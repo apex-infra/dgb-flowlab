@@ -30,6 +30,24 @@ def _need(cond, msg):
         raise ConfigError(msg)
 
 
+def _validate_transfers(fl, names, where):
+    """Explicit, ordered transfers: every hop is written down by the operator."""
+    ts = fl["transfers"]
+    _need(isinstance(ts, list) and ts, f"{where}.transfers must be a non-empty list")
+    out_of_source = 0
+    for j, t in enumerate(ts):
+        w = f"{where}.transfers[{j}]"
+        _need(isinstance(t, dict) and set(t) == {"from", "to", "amount_sats", "delay_seconds"},
+              f"{w} must have exactly: from, to, amount_sats, delay_seconds")
+        _need(t["from"] in names and t["to"] in names, f"{w}: wallets must belong to this flow")
+        _need(t["from"] != t["to"], f"{w}: from and to must differ")
+        _need(_is_int(t["amount_sats"]) and t["amount_sats"] >= 1, f"{w}.amount_sats must be a positive integer")
+        _need(_is_int(t["delay_seconds"]) and t["delay_seconds"] >= 0, f"{w}.delay_seconds must be >= 0")
+        if t["from"] == fl["source_wallet"]:
+            out_of_source += t["amount_sats"]
+    _need(out_of_source <= fl["allocation_sats"], f"{where}: transfers out of the source exceed its allocation")
+
+
 def validate(cfg):
     """Return a normalized deep copy of cfg, or raise ConfigError."""
     _need(isinstance(cfg, dict), "config must be an object")
@@ -51,6 +69,8 @@ def validate(cfg):
         _need(_is_int(fl.get("allocation_sats")) and fl["allocation_sats"] > 0,
               f"{where}.allocation_sats must be a positive integer (satoshis)")
         fl.setdefault("description", "")
+        if fl.get("transfers") is not None:
+            _validate_transfers(fl, names, where)
 
     wl = cfg.get("workload")
     _need(isinstance(wl, dict), "config.workload required")
