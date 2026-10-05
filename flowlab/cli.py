@@ -11,12 +11,16 @@ cli.py -- the operator's command line.
     recover EXP         after a crash: show what was interrupted, leave RECOVERY if clean
     resolve ACTION OUTCOME [--txid T] [--evidence TEXT]   settle an interrupted broadcast
     stop                emergency stop: abort everything, keep all history
+    watch [EXP] [--once]   live read-only dashboard (newest experiment if none given)
 """
 
 import argparse
 import json
+import shutil
+import sqlite3
 import time
 
+from . import dashboard
 from .engine import Engine, EngineError
 from .executor import Executor
 from .node_verifier import NodeVerifier
@@ -59,7 +63,10 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
     s.add_argument("--txid"); s.add_argument("--evidence", default="")
     sub.add_parser("list")
     sub.add_parser("stop")
+    s = sub.add_parser("watch"); s.add_argument("exp", nargs="?"); s.add_argument("--once", action="store_true")
     a = p.parse_args(argv)
+    if a.cmd == "watch":
+        return _watch(a, rpc, out, sleep, db, local_path)
 
     needs_node = a.cmd in ("run", "resume", "recover")
     builder = None
@@ -83,6 +90,25 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
         return 1
     finally:
         e.close(clean=clean)
+
+
+def _watch(a, rpc, out, sleep, db, local_path):
+    """Read-only: never opens the engine, never approves or sends anything."""
+    wallets = list(getattr(rpc, "wallets", []))
+    if rpc is None:
+        try:
+            local = _load(local_path)
+            rpc = RpcClient(local["rpc_user"], local["rpc_password"], local["rpc_port"],
+                            local["rpc_host"], allowed_wallets=local["wallets"])
+            wallets = list(local["wallets"])
+        except (OSError, KeyError, ValueError):
+            rpc = None
+    try:
+        return dashboard.watch(db, a.exp, rpc, wallets, out, sleep, once=a.once,
+                               width=shutil.get_terminal_size((100, 30)).columns - 1)
+    except sqlite3.OperationalError:
+        out("no database yet: create an experiment first (python3 flowctl.py new CONFIG.json)")
+        return 1
 
 
 def _dispatch(a, e, rpc, builder, out, sleep):
