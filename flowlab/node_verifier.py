@@ -80,24 +80,26 @@ class NodeVerifier(Verifier):
                 total += 1
         return (True, f"{total} utxos readable")
 
+    def _lookup(self, flow, txid):
+        """Wallet-side lookup, so it works without -txindex."""
+        for w in self._wallets(flow):
+            try:
+                return self.rpc.get_transaction(w, txid)
+            except RpcError:
+                continue
+        return None
+
     def _transaction(self, exp, flow):
         for txid in self.known_txids(flow):
-            self.rpc.get_raw_transaction(txid, True)  # raises if node does not know it
+            if self._lookup(flow, txid) is None:
+                return (False, f"{txid[:12]} is not known to any flow wallet")
         return (True, "recorded txids known to node")
 
     def _confirmation(self, exp, flow):
         for txid in self.known_txids(flow):
-            found = False
-            for w in self._wallets(flow):
-                try:
-                    t = self.rpc.get_transaction(w, txid)
-                except RpcError:
-                    continue
-                found = True
-                if t.get("confirmations", 0) < 0:
-                    return (False, f"{txid[:12]} conflicted")
-            if not found:
-                return (False, f"{txid[:12]} not in any flow wallet")
+            t = self._lookup(flow, txid)
+            if t is not None and t.get("confirmations", 0) < 0:
+                return (False, f"{txid[:12]} conflicted")
         return (True, "confirmation state consistent")
 
     def _flow_state(self, exp, flow):

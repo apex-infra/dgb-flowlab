@@ -54,15 +54,16 @@ class TxBuilder:
         self.max_fee_sats = int(max_fee_sats)
 
     def _fee_reserve(self, n_inputs):
-        """Sats to keep back for the fee: the node's relay fee on a generous size
-        estimate, times 1.5, never above the cap. If the node will not say, fall
-        back to the whole cap (conservative)."""
+        """Sats to keep back for the fee: the node's relay fee on a typical segwit
+        size estimate, never above the cap. If the node will not say, fall back to
+        the whole cap (conservative). The node still has the final word: funding
+        fails cleanly if this was too optimistic."""
         try:
             rate = to_sats(self.rpc.get_network_info()["relayfee"])  # sats per kB
         except Exception:  # noqa: BLE001
             return self.max_fee_sats
-        size = 10 + 148 * n_inputs + 2 * 34
-        return min(self.max_fee_sats, ceil(rate * size / 1000 * 1.5))
+        size = 10 + 68 * n_inputs + 2 * 34
+        return min(self.max_fee_sats, ceil(rate * size / 1000))
 
     def _owned(self, address):
         for w in self.wallets:
