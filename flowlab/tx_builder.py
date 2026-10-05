@@ -14,6 +14,7 @@ tx_builder.py -- build, verify, preview, then broadcast (as separate steps).
 
 import hashlib
 from dataclasses import dataclass
+from math import ceil
 
 from .rpc import RpcError, to_sats
 
@@ -52,6 +53,17 @@ class TxBuilder:
         self.wallets = list(wallets)
         self.max_fee_sats = int(max_fee_sats)
 
+    def _fee_reserve(self, n_inputs):
+        """Sats to keep back for the fee: the node's relay fee on a generous size
+        estimate, times 1.5, never above the cap. If the node will not say, fall
+        back to the whole cap (conservative)."""
+        try:
+            rate = to_sats(self.rpc.get_network_info()["relayfee"])  # sats per kB
+        except Exception:  # noqa: BLE001
+            return self.max_fee_sats
+        size = 10 + 148 * n_inputs + 2 * 34
+        return min(self.max_fee_sats, ceil(rate * size / 1000 * 1.5))
+
     def _owned(self, address):
         for w in self.wallets:
             try:
@@ -76,11 +88,12 @@ class TxBuilder:
         for u in coins:
             chosen.append(u)
             total += to_sats(u["amount"])
-            if total >= amount_sats + self.max_fee_sats:
+            if total >= amount_sats + self._fee_reserve(len(chosen)):
                 break
-        if total < amount_sats + self.max_fee_sats:
+        reserve = self._fee_reserve(max(1, len(chosen)))
+        if total < amount_sats + reserve:
             raise BuildError(f"insufficient funds: have {total} sats, need "
-                             f"{amount_sats} plus a fee reserve of {self.max_fee_sats}")
+                             f"{amount_sats} plus a fee reserve of {reserve}")
         value_of = {(u["txid"], u["vout"]): to_sats(u["amount"]) for u in chosen}
 
         change = self.rpc.get_new_address(source_wallet, "flowlab-change")
