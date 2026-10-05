@@ -40,8 +40,8 @@ def _expand_repeat(fl, names, where):
     step_down_sats per hop (so each wallet can pay the fee out of what it received)."""
     r = fl["repeat"]
     need = {"cycle", "count", "amount_sats", "delay_seconds"}
-    _need(isinstance(r, dict) and need <= set(r) <= need | {"step_down_sats"},
-          f"{where}.repeat needs: cycle, count, amount_sats, delay_seconds (optional step_down_sats)")
+    _need(isinstance(r, dict) and need <= set(r) <= need | {"step_down_sats", "sweep"},
+          f"{where}.repeat needs: cycle, count, amount_sats, delay_seconds (optional step_down_sats, sweep)")
     cyc = r["cycle"]
     _need(isinstance(cyc, list) and len(cyc) >= 2 and all(c in names for c in cyc),
           f"{where}.repeat.cycle must list at least two of this flow's wallets")
@@ -49,13 +49,20 @@ def _expand_repeat(fl, names, where):
     _need(all(cyc[i] != cyc[(i + 1) % len(cyc)] for i in range(len(cyc))),
           f"{where}.repeat.cycle: neighbouring wallets must differ")
     step = r.get("step_down_sats", 0)
+    sweep = r.get("sweep", False)
+    _need(isinstance(sweep, bool), f"{where}.repeat.sweep must be true or false")
+    _need(not (sweep and step), f"{where}.repeat: sweep and step_down_sats cannot be combined")
     _need(_is_int(r["count"]) and 1 <= r["count"] <= MAX_REPEAT, f"{where}.repeat.count must be 1..{MAX_REPEAT}")
     _need(_is_int(r["amount_sats"]) and r["amount_sats"] >= 1, f"{where}.repeat.amount_sats must be a positive integer")
     _need(_is_int(step) and step >= 0, f"{where}.repeat.step_down_sats must be >= 0")
     _need(_is_int(r["delay_seconds"]) and r["delay_seconds"] >= 0, f"{where}.repeat.delay_seconds must be >= 0")
     _need(r["amount_sats"] - (r["count"] - 1) * step >= 1, f"{where}.repeat: the amount would reach zero")
     n = len(cyc)
-    return [{"from": cyc[i % n], "to": cyc[(i + 1) % n], "amount_sats": r["amount_sats"] - i * step,
+    def amount(i):
+        if sweep and cyc[i % n] != fl["source_wallet"]:
+            return "all"          # whole balance minus the fee: nothing is left behind
+        return r["amount_sats"] - i * step
+    return [{"from": cyc[i % n], "to": cyc[(i + 1) % n], "amount_sats": amount(i),
              "delay_seconds": r["delay_seconds"]} for i in range(r["count"])]
 
 
@@ -71,11 +78,16 @@ def _validate_transfers(fl, names, where):
               f"{w} must have exactly: from, to, amount_sats, delay_seconds")
         _need(t["from"] in names and t["to"] in names, f"{w}: wallets must belong to this flow")
         _need(t["from"] != t["to"], f"{w}: from and to must differ")
-        _need(_is_int(t["amount_sats"]) and t["amount_sats"] >= 1, f"{w}.amount_sats must be a positive integer")
+        sweep = t["amount_sats"] == "all"
+        _need(sweep or (_is_int(t["amount_sats"]) and t["amount_sats"] >= 1),
+              f"{w}.amount_sats must be a positive integer, or \"all\" (whole balance minus fee)")
+        _need(not sweep or t["from"] != fl["source_wallet"],
+              f"{w}: \"all\" is not allowed out of the source wallet")
         _need(_is_int(t["delay_seconds"]) and t["delay_seconds"] >= 0, f"{w}.delay_seconds must be >= 0")
-        bal[t["from"]] -= t["amount_sats"]
-        _need(bal[t["from"]] >= 0, f"{w}: {t['from']} would not hold enough to send this")
-        bal[t["to"]] += t["amount_sats"]
+        amt = bal[t["from"]] if sweep else t["amount_sats"]
+        _need(amt >= 1 and bal[t["from"]] >= amt, f"{w}: {t['from']} would not hold enough to send this")
+        bal[t["from"]] -= amt
+        bal[t["to"]] += amt
 
 
 def validate(cfg):

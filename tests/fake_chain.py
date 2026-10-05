@@ -73,11 +73,16 @@ class FakeChain:
         self.raw[h] = {"inputs": [(i["txid"], i["vout"]) for i in inputs], "outputs": dict(outputs)}
         return h
 
-    def fund_raw_transaction(self, wallet, hexstr, change_address, fee_rate=None):
+    def fund_raw_transaction(self, wallet, hexstr, change_address, fee_rate=None, subtract_fee=False):
         r = self.raw[hexstr]
         total = sum(self.utxos[i]["sats"] for i in r["inputs"])
+        if subtract_fee:
+            k = next(iter(r["outputs"]))
+            r["outputs"][k] -= FEE
         out = sum(r["outputs"].values())
         change = total - out - FEE
+        if subtract_fee:
+            change = total - out - FEE if total - out > FEE else 0
         if change < 0:
             raise RpcError("Insufficient funds", -4)
         self.n += 1

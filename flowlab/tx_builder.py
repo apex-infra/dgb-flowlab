@@ -77,7 +77,9 @@ class TxBuilder:
     def build(self, source_wallet, address, amount_sats, minconf=1, fee_rate=None):
         if source_wallet not in self.wallets:
             raise BuildError("source wallet is not an experiment wallet")
-        if not isinstance(amount_sats, int) or isinstance(amount_sats, bool) or amount_sats <= 0:
+        sweep = amount_sats == "all"
+        if not sweep and (not isinstance(amount_sats, int) or isinstance(amount_sats, bool)
+                          or amount_sats <= 0):
             raise BuildError("amount must be a positive integer number of satoshis")
         if not self._owned(address):
             raise BuildError("destination is not one of the experiment wallets; refusing")
@@ -86,21 +88,32 @@ class TxBuilder:
                  if u.get("spendable", True) and u.get("safe", True)]
         coins.sort(key=lambda u: (-to_sats(u["amount"]), u["txid"], u["vout"]))
         chosen, total = [], 0
-        for u in coins:
-            chosen.append(u)
-            total += to_sats(u["amount"])
-            if total >= amount_sats + self._fee_reserve(len(chosen)):
-                break
-        reserve = self._fee_reserve(max(1, len(chosen)))
-        if total < amount_sats + reserve:
-            raise BuildError(f"insufficient funds: have {total} sats, need "
-                             f"{amount_sats} plus a fee reserve of {reserve}")
+        if sweep:
+            chosen, total = coins, sum(to_sats(u["amount"]) for u in coins)
+            if not chosen:
+                raise BuildError("nothing to send: the wallet has no confirmed spendable coins")
+            request = total
+            reserve = self._fee_reserve(len(chosen))
+            if total <= reserve:
+                raise BuildError(f"balance {total} sats does not cover the fee reserve {reserve}")
+        else:
+            request = amount_sats
+            for u in coins:
+                chosen.append(u)
+                total += to_sats(u["amount"])
+                if total >= amount_sats + self._fee_reserve(len(chosen)):
+                    break
+            reserve = self._fee_reserve(max(1, len(chosen)))
+            if total < amount_sats + reserve:
+                raise BuildError(f"insufficient funds: have {total} sats, need "
+                                 f"{amount_sats} plus a fee reserve of {reserve}")
         value_of = {(u["txid"], u["vout"]): to_sats(u["amount"]) for u in chosen}
 
         change = self.rpc.get_new_address(source_wallet, "flowlab-change")
         raw = self.rpc.create_raw_transaction(
-            [{"txid": u["txid"], "vout": u["vout"]} for u in chosen], {address: amount_sats})
-        funded = self.rpc.fund_raw_transaction(source_wallet, raw, change, fee_rate)
+            [{"txid": u["txid"], "vout": u["vout"]} for u in chosen], {address: request})
+        funded = self.rpc.fund_raw_transaction(source_wallet, raw, change, fee_rate,
+                                               subtract_fee=sweep)
         signed = self.rpc.sign_raw_transaction(source_wallet, funded["hex"])
         if signed.get("complete") is not True:
             raise BuildError("transaction was not fully signed")
@@ -115,7 +128,11 @@ class TxBuilder:
             outs.append((o["scriptPubKey"].get("address"), to_sats(o["value"])))
         dest = [o for o in outs if o[0] == address]
         others = [o for o in outs if o[0] != address]
-        if len(dest) != 1 or dest[0][1] != amount_sats:
+        if sweep:
+            if len(dest) != 1 or others:
+                raise BuildError("a full-balance send must have exactly one output: the destination")
+            amount_sats = dest[0][1]
+        elif len(dest) != 1 or dest[0][1] != amount_sats:
             raise BuildError("destination output is not exactly the requested amount")
         if len(others) > 1 or any(a != change for a, _ in others):
             raise BuildError("unexpected output (only destination and our own change allowed)")
@@ -145,7 +162,8 @@ def broadcast(engine, rpc, job_id, prepared):
         # Anything else (timeout, dropped connection, "already known") may mean the
         # node HAS the transaction: leave the intent in place for recovery to settle.
         raise
-    engine.complete_action(action_id, {"txid": txid, "fee_sats": prepared.fee_sats})
+    engine.complete_action(action_id, {"txid": txid, "fee_sats": prepared.fee_sats,
+                                       "amount_sats": prepared.amount_sats})
     if txid != prepared.txid:
         raise BuildError(f"node returned txid {txid}, expected {prepared.txid} (recorded as sent)")
     return txid

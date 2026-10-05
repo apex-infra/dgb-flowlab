@@ -161,8 +161,11 @@ class RpcClient:
         out = {a: to_dgb(s) for a, s in outputs.items()}
         return self._call("createrawtransaction", [inputs, out])
 
-    def fund_raw_transaction(self, wallet, hexstr, change_address, fee_rate_sat_vb=None):
+    def fund_raw_transaction(self, wallet, hexstr, change_address, fee_rate_sat_vb=None,
+                             subtract_fee=False):
         opts = {"add_inputs": False, "changeAddress": change_address}
+        if subtract_fee:
+            opts["subtractFeeFromOutputs"] = [0]
         if fee_rate_sat_vb is not None:
             opts["fee_rate"] = fee_rate_sat_vb
         return self._call("fundrawtransaction", [hexstr, opts], wallet=wallet)

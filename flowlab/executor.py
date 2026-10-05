@@ -144,14 +144,15 @@ class Executor:
                     issues.append(f"{tag}: cannot read transaction ({err})")
                     continue
                 fee = -to_sats(sent.get("fee", 0))
-                if to_sats(got["amount"]) != plan["amount_sats"]:
-                    issues.append(f"{tag}: receiver saw {to_sats(got['amount'])} sats, planned {plan['amount_sats']}")
+                want = recorded.get("amount_sats") if plan["amount_sats"] == "all" else plan["amount_sats"]
+                if want is None or to_sats(got["amount"]) != want:
+                    issues.append(f"{tag}: receiver saw {to_sats(got['amount'])} sats, expected {want}")
                 if fee != recorded.get("fee_sats"):
                     issues.append(f"{tag}: fee {fee} sats differs from the recorded {recorded.get('fee_sats')}")
                 if got.get("confirmations", 0) < flow["confirmations_required"]:
                     issues.append(f"{tag}: below the required confirmations")
                 fees += fee
-                moved += plan["amount_sats"]
+                moved += want or 0
             for w in [flow["source_wallet"], *json.loads(flow["flow_wallets_json"]),
                       flow["destination_wallet"]]:
                 balances[w] = to_sats(self.rpc.get_balances(w)["mine"]["trusted"])

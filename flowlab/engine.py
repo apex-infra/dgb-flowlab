@@ -206,7 +206,8 @@ class Engine:
             path = " -> ".join([fl["source_wallet"], *fl["flow_wallets"], fl["destination_wallet"]])
             lines.append(f"  flow {i}: {path}   allocation {fl['allocation_sats']} sats")
             for k, t in enumerate(fl.get("transfers", []), 1):
-                lines.append(f"    {k:>3}. {t['from']} -> {t['to']}   {t['amount_sats']} sats   wait {t['delay_seconds']}s")
+                amt = "ENTIRE BALANCE minus fee" if t["amount_sats"] == "all" else f"{t['amount_sats']} sats"
+                lines.append(f"    {k:>3}. {t['from']} -> {t['to']}   {amt}   wait {t['delay_seconds']}s")
         wl = cfg.get("workload")
         if wl:
             lines += [
