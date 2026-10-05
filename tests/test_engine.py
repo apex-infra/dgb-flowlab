@@ -51,7 +51,7 @@ CFG = {
     "confirmations_required": 2,
     "fee_policy": {"type": "estimate", "conf_target": 6},
     "address_policy": "new",
-    "randomization": {"enabled": True, "model": "bounded_random"},
+    "randomization": {"enabled": False},
 }
 
 
@@ -162,19 +162,18 @@ class ApprovalTests(Base):
         with self.assertRaises(ConfigError):
             self.e.configure_experiment(exp, bad)
 
-    def test_seed_generated_and_recorded_before_approval(self):
+    def test_randomization_is_rejected(self):
         exp = self.e.create_experiment()
-        self.e.configure_experiment(exp, CFG)
-        row = self.e.get_experiment(exp)
-        cfg = json.loads(row["config_json"])
-        self.assertIsInstance(cfg["randomization"]["seed"], int)
-        self.assertEqual(row["random_seed"], cfg["randomization"]["seed"])
+        bad = copy.deepcopy(CFG)
+        bad["randomization"] = {"enabled": True, "model": "uniform"}
+        with self.assertRaises(ConfigError):
+            self.e.configure_experiment(exp, bad)
 
     def test_approval_requires_matching_hash_and_is_one_time(self):
         exp = self.e.create_experiment()
         h1 = self.e.configure_experiment(exp, CFG)
         cfg2 = copy.deepcopy(CFG)
-        cfg2["randomization"] = {"enabled": False}
+        cfg2["confirmations_required"] = 3
         h2 = self.e.configure_experiment(exp, cfg2)        # reconfigure before approval is fine
         self.assertNotEqual(h1, h2)
         with self.assertRaises(ApprovalError):
@@ -197,7 +196,7 @@ class ApprovalTests(Base):
         self.e.configure_experiment(exp, CFG)
         text = self.e.review(exp)["text"]
         for needle in ("w1_source -> w2_flowA -> w3_flowB -> w4_dest", "INITIAL PARAMETERS",
-                       "AUTOMATIC EXECUTION", "seed="):
+                       "AUTOMATIC EXECUTION", "randomization: disabled"):
             self.assertIn(needle, text)
 
 

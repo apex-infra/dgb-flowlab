@@ -9,14 +9,12 @@ displayed, hashed, exported and logged, so it must never carry any.
 
 import copy
 import json
-import secrets
 import hashlib
 
 from . import audit
 
 WORKLOAD_MODES = ("count", "duration", "automatic")
 ADDRESS_POLICIES = ("existing", "new")
-RANDOM_MODELS = ("uniform", "weighted", "bounded_random", "seeded_deterministic")
 
 
 class ConfigError(ValueError):
@@ -76,14 +74,10 @@ def validate(cfg):
     _need(cfg.get("address_policy") in ADDRESS_POLICIES,
           f"address_policy must be one of {ADDRESS_POLICIES}")
 
-    rnd = cfg.get("randomization")
-    _need(isinstance(rnd, dict) and isinstance(rnd.get("enabled"), bool),
-          "randomization.enabled (bool) required")
-    if rnd["enabled"]:
-        _need(rnd.get("model") in RANDOM_MODELS, f"randomization.model must be one of {RANDOM_MODELS}")
-        if rnd.get("seed") is None:
-            rnd["seed"] = secrets.randbits(32)       # recorded before approval, so it is replayable
-        _need(_is_int(rnd["seed"]) and rnd["seed"] >= 0, "randomization.seed must be a non-negative integer")
+    rnd = cfg.get("randomization", {"enabled": False})
+    _need(isinstance(rnd, dict) and rnd.get("enabled") in (False, None),
+          "randomization is not supported: transfers are explicit and deterministic")
+    cfg["randomization"] = {"enabled": False}
     return cfg
 
 
