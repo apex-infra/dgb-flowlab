@@ -47,7 +47,7 @@ class Prepared:
 
 
 class TxBuilder:
-    def __init__(self, rpc, wallets, max_fee_sats=1_000_000):
+    def __init__(self, rpc, wallets, max_fee_sats=10_000_000):
         self.rpc = rpc
         self.wallets = list(wallets)
         self.max_fee_sats = int(max_fee_sats)
