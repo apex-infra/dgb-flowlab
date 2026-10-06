@@ -159,6 +159,18 @@ class WebReadTests(WebBase):
         for p in ("/app.css", "/app.js", "/form.js"):
             self.assertEqual(self.get(p)[0], 200, p)
 
+    def test_page_contains_experimental_monitor_anchors(self):
+        self.start()
+        page = self.get()[2].decode()
+
+        for want in (
+            'id="m-generated"',
+            'id="m-mode"',
+            'id="m-hops-l"',
+            'id="panel-experimental"',
+        ):
+            self.assertIn(want, page)
+
     def test_each_server_has_its_own_secret(self):
         self.start()
         first = self.srv.token

@@ -47,16 +47,44 @@ function drawStage(flow, bal, nextSeq) {
   const total = names.reduce((a, w) => a + ((bal && bal[w]) || 0), 0), used = {};
   flow.jobs.forEach(j => {
     const a = pos[j.from], b = pos[j.to]; if (!a || !b) return;
-    const dir = b.i > a.i ? -1 : 1, span = Math.abs(b.i - a.i);
-    const key = dir + ":" + Math.min(a.i, b.i) + "-" + Math.max(a.i, b.i), k = used[key] = (used[key] || 0) + 1;
-    const ht = Math.min(135, 34 + 30 * span + 22 * (k - 1)), mx = (a.x + b.x) / 2;
-    const planned = j.state === "PLANNED", col = (planned && j.seq === nextSeq) ? "#F0B64A" : (COLORS[j.state] || "#7C93A8");
-    const p = mk("path", {d: `M${a.x},${a.y} Q${mx},${a.y + dir * ht * 2} ${b.x},${b.y}`, fill: "none", stroke: col,
-      "stroke-width": planned ? 1.5 : 2.5, "stroke-dasharray": planned ? "5 6" : "none"});
+    const planned = j.state === "PLANNED";
+    const col = (planned && j.seq === nextSeq) ? "#F0B64A" : (COLORS[j.state] || "#7C93A8");
+    let p, lx, ly;
+
+    if (j.from === j.to) {
+      const key = "self:" + j.from;
+      const k = used[key] = (used[key] || 0) + 1;
+      const ht = Math.min(125, 52 + 18 * (k - 1));
+      p = mk("path", {
+        d: `M${a.x - 16},${a.y - 12} C${a.x - 82},${a.y - ht} ${a.x + 82},${a.y - ht} ${a.x + 16},${a.y - 12}`,
+        fill: "none",
+        stroke: col,
+        "stroke-width": planned ? 1.5 : 2.5,
+        "stroke-dasharray": planned ? "5 6" : "none"
+      });
+      lx = a.x;
+      ly = a.y - ht + 8;
+    } else {
+      const dir = b.i > a.i ? -1 : 1, span = Math.abs(b.i - a.i);
+      const key = dir + ":" + Math.min(a.i, b.i) + "-" + Math.max(a.i, b.i);
+      const k = used[key] = (used[key] || 0) + 1;
+      const ht = Math.min(135, 34 + 30 * span + 22 * (k - 1));
+      const mx = (a.x + b.x) / 2;
+      p = mk("path", {
+        d: `M${a.x},${a.y} Q${mx},${a.y + dir * ht * 2} ${b.x},${b.y}`,
+        fill: "none",
+        stroke: col,
+        "stroke-width": planned ? 1.5 : 2.5,
+        "stroke-dasharray": planned ? "5 6" : "none"
+      });
+      lx = mx;
+      ly = a.y + dir * ht;
+    }
+
     svg.appendChild(p);
-    const ay = a.y + dir * ht;
-    svg.appendChild(mk("circle", {cx: mx, cy: ay, r: 11, fill: "#0A1A2B", stroke: col, "stroke-width": 1.5}));
-    svg.appendChild(mk("text", {x: mx, y: ay + 4, "text-anchor": "middle", fill: col, "font-size": 12, "font-weight": 600}, String(j.seq)));
+    svg.appendChild(mk("circle", {cx: lx, cy: ly, r: 11, fill: "#0A1A2B", stroke: col, "stroke-width": 1.5}));
+    svg.appendChild(mk("text", {x: lx, y: ly + 4, "text-anchor": "middle", fill: col, "font-size": 12,
+      "font-weight": 600}, String(j.seq)));
     if (j.state === "BROADCAST") beads.push({p, len: p.getTotalLength()});
   });
   names.forEach(w => {
@@ -127,6 +155,64 @@ async function renderApprove(data) {
   sigs.rv = e.id;
   try { buildApprove(p, await api("review", {exp: e.id}), () => { sigs.rv = null; }); p.hidden = false; }
   catch (err) { sigs.rv = null; toast(err.message, true); }
+}
+
+function renderExperimental(data) {
+  const box = $("panel-experimental"), s = data.snapshot;
+  if (!s || s.mode !== "experimental") {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+
+  const jobs = s.flows.flatMap(f => f.jobs);
+  const current = [...jobs].reverse().find(j => j.generated);
+  const rnd = s.randomization || {};
+
+  box.replaceChildren();
+  box.hidden = false;
+
+  const head = h("div", "exp-head");
+  head.append(
+    h("h2", null, "Experimental engine"),
+    h("span", "pill dgb", rnd.model || "unknown model"),
+    h("span", "mono mute", "seed " + (rnd.seed != null ? rnd.seed : "-"))
+  );
+  box.append(head);
+
+  const grid = h("div", "exp-grid");
+
+  const item = (label, value, cls) => {
+    const d = h("div", "exp-item");
+    d.append(h("span", "mute", label), h("b", cls || null, value));
+    return d;
+  };
+
+  if (!current) {
+    grid.append(
+      item("Approved workload", String(s.target_jobs || "-") + " decisions"),
+      item("Generated", String(jobs.length)),
+      item("Current decision", "not generated yet")
+    );
+    box.append(grid);
+    return;
+  }
+
+  const g = current.generated;
+  const decision = Number.isInteger(g.decision_index) ? g.decision_index + 1 : current.seq;
+
+  grid.append(
+    item("Decision", decision + " / " + (s.target_jobs || "?")),
+    item("Route", current.from + " → " + current.to, "mono"),
+    item("Planned amount", current.planned === "all" ? "entire balance" : dgb(current.planned) + " DGB"),
+    item("Delay", String(current.delay_s || 0) + " s"),
+    item("Eligible routes", String(g.eligible_transition_count ?? "-")),
+    item("Observed source balance", g.observed_balance_sats != null ? dgb(g.observed_balance_sats) + " DGB" : "-"),
+    item("Fee reserve", g.fee_reserve_sats != null ? dgb(g.fee_reserve_sats) + " DGB" : "-"),
+    item("Generator", "v" + (g.generator_version ?? "-"))
+  );
+
+  box.append(grid);
 }
 
 function renderUnresolved(data) {
@@ -216,13 +302,19 @@ function renderConsole(data) {
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
-  renderPicker(data); renderExports(data); renderBanner(data); renderActions(data); renderUnresolved(data); renderConsole(data);
+  renderPicker(data); renderExports(data); renderBanner(data); renderActions(data);
+  renderUnresolved(data); renderExperimental(data); renderConsole(data);
   const s = data.snapshot;
   if (!s) { $("state").textContent = "none"; $("state").className = "pill mute"; $("desc").textContent = CONTROL ? "No experiment yet. Open New experiment to create one." : "No experiment yet."; return; }
   const e = s.exp, jobs = s.flows.flatMap(f => f.jobs);
   $("desc").textContent = e.description || "";
   const st = $("state"); st.textContent = e.state; st.className = "pill " + (PILL[e.state] || "mute");
-  $("m-hops").textContent = jobs.filter(j => j.state === "CONFIRMED").length + " / " + jobs.length;
+  const confirmed = jobs.filter(j => j.state === "CONFIRMED").length;
+  const target = s.mode === "experimental" && Number.isInteger(s.target_jobs) ? s.target_jobs : jobs.length;
+  $("m-hops").textContent = confirmed + " / " + target;
+  $("m-hops-l").textContent = s.mode === "experimental" ? "decisions confirmed" : "hops confirmed";
+  $("m-generated").textContent = s.mode === "experimental" ? jobs.length + " / " + target : String(jobs.length);
+  $("m-mode").textContent = s.mode || "deterministic";
   $("m-fees").textContent = dgb(jobs.reduce((a, j) => a + (j.fee || 0), 0));
   const al = $("alert"), bad = ["PAUSED", "ERROR", "ABORTED", "RECOVERY"].includes(e.state);
   al.style.display = bad ? "block" : "none"; al.textContent = bad ? e.state + ": " + (e.state_reason || "") : "";
