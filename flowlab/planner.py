@@ -71,6 +71,13 @@ def experimental_decision(engine, flow_id, decision_index):
     derived_seed = int.from_bytes(hashlib.sha256(material).digest(), "big")
     rng = random.Random(derived_seed)
 
+    topology = matches[0][1].get("experimental_topology")
+    if not topology:
+        raise PlanError("experimental decision requires an approved topology")
+
+    transitions = topology["transitions"]
+    route = transitions[rng.randrange(len(transitions))]
+
     amount = rng.randint(
         workload["amount_sats_min"],
         workload["amount_sats_max"],
@@ -81,6 +88,8 @@ def experimental_decision(engine, flow_id, decision_index):
     )
 
     return {
+        "from": route["from"],
+        "to": route["to"],
         "amount_sats": amount,
         "delay_seconds": delay,
         "generated_from": {

@@ -1,4 +1,5 @@
 import copy
+import json
 import os
 import tempfile
 import unittest
@@ -126,6 +127,50 @@ class ExperimentalDecisionTests(PlannerBase):
             self.assertLessEqual(d["amount_sats"], CFG["workload"]["amount_sats_max"])
             self.assertGreaterEqual(d["delay_seconds"], CFG["workload"]["delay_seconds_min"])
             self.assertLessEqual(d["delay_seconds"], CFG["workload"]["delay_seconds_max"])
+
+    def test_route_is_always_from_approved_topology(self):
+        _, flow = self.experimental_flow(seed=424242)
+
+        cfg = json.loads(self.e.get_experiment(
+            self.e.get_flow(flow)["experiment_id"]
+        )["config_json"])
+        allowed = {
+            (t["from"], t["to"])
+            for t in cfg["flows"][0]["experimental_topology"]["transitions"]
+        }
+
+        for i in range(100):
+            d = experimental_decision(self.e, flow, i)
+            self.assertIn((d["from"], d["to"]), allowed)
+
+    def test_same_seed_and_index_reproduce_same_route(self):
+        _, flow = self.experimental_flow(seed=555)
+
+        a = experimental_decision(self.e, flow, 12)
+        b = experimental_decision(self.e, flow, 12)
+
+        self.assertEqual((a["from"], a["to"]), (b["from"], b["to"]))
+
+    def test_destination_is_never_used_during_experimental_workload(self):
+        _, flow = self.experimental_flow(seed=888)
+
+        for i in range(100):
+            d = experimental_decision(self.e, flow, i)
+            self.assertNotEqual(d["from"], "w4_dest")
+            self.assertNotEqual(d["to"], "w4_dest")
+
+    def test_self_transfer_can_be_selected(self):
+        _, flow = self.experimental_flow(seed=1)
+
+        seen_self = False
+        for i in range(500):
+            d = experimental_decision(self.e, flow, i)
+            if d["from"] == d["to"]:
+                seen_self = True
+                break
+
+        self.assertTrue(seen_self)
+
 
     def test_decision_records_replay_metadata(self):
         _, flow = self.experimental_flow(seed=999)
