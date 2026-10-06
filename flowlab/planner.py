@@ -34,7 +34,13 @@ def transfers_for(engine, flow_id):
 
 
 def experimental_decision(
-        engine, flow_id, decision_index, balances_sats=None, fee_reserve_sats=0):
+        engine,
+        flow_id,
+        decision_index,
+        balances_sats=None,
+        fee_reserve_sats=0,
+        source_budget_remaining_sats=None,
+):
     """Return one reproducible experimental decision.
 
     balances_sats, when supplied, is a caller-provided snapshot of confirmed
@@ -46,6 +52,13 @@ def experimental_decision(
     if (not isinstance(fee_reserve_sats, int) or isinstance(fee_reserve_sats, bool)
             or fee_reserve_sats < 0):
         raise PlanError("fee_reserve_sats must be a non-negative integer")
+    if source_budget_remaining_sats is not None:
+        if (not isinstance(source_budget_remaining_sats, int)
+                or isinstance(source_budget_remaining_sats, bool)
+                or source_budget_remaining_sats < 0):
+            raise PlanError(
+                "source_budget_remaining_sats must be a non-negative integer or None"
+            )
 
     flow = engine.get_flow(flow_id)
     cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
@@ -92,24 +105,35 @@ def experimental_decision(
                 raise PlanError("balances_sats must contain non-negative integer satoshi balances")
 
         minimum = workload["amount_sats_min"]
-        eligible = [
-            t for t in transitions
-            if balances_sats.get(t["from"], 0) - fee_reserve_sats >= minimum
-        ]
+
+        def spendable(t):
+            amount = balances_sats.get(t["from"], 0) - fee_reserve_sats
+            if (
+                t["from"] == flow["source_wallet"]
+                and source_budget_remaining_sats is not None
+            ):
+                amount = min(amount, source_budget_remaining_sats)
+            return amount
+
+        eligible = [t for t in transitions if spendable(t) >= minimum]
 
     if not eligible:
         raise PlanError("no approved experimental transition currently has enough confirmed balance")
 
     route = eligible[rng.randrange(len(eligible))]
 
-    available = (
-        workload["amount_sats_max"]
-        if balances_sats is None
-        else min(
+    if balances_sats is None:
+        available = workload["amount_sats_max"]
+    else:
+        available = min(
             workload["amount_sats_max"],
             balances_sats.get(route["from"], 0) - fee_reserve_sats,
         )
-    )
+        if (
+            route["from"] == flow["source_wallet"]
+            and source_budget_remaining_sats is not None
+        ):
+            available = min(available, source_budget_remaining_sats)
     if available < workload["amount_sats_min"]:
         raise PlanError("selected route cannot satisfy the approved minimum amount")
 
@@ -140,6 +164,7 @@ def experimental_decision(
                 else balances_sats.get(route["from"], 0)
             ),
             "fee_reserve_sats": fee_reserve_sats,
+            "source_budget_remaining_sats": source_budget_remaining_sats,
         },
     }
 
@@ -173,16 +198,32 @@ def generate_experimental_job(
     if decision_index >= workload["jobs"]:
         raise PlanError("experimental workload is already complete")
 
+    source_used_sats = 0
+    for job in jobs:
+        planned = json.loads(job["planned_json"])
+        if planned["from"] == flow["source_wallet"]:
+            amount = planned["amount_sats"]
+            if not isinstance(amount, int) or isinstance(amount, bool):
+                raise PlanError("experimental source job has a non-integer amount")
+            source_used_sats += amount
+
+    source_budget_remaining_sats = max(
+        0,
+        flow["initial_alloc_sats"] - source_used_sats,
+    )
+
     decision = experimental_decision(
         engine,
         flow_id,
         decision_index,
         balances_sats=balances_sats,
         fee_reserve_sats=fee_reserve_sats,
+        source_budget_remaining_sats=source_budget_remaining_sats,
     )
 
     generated_from = dict(decision["generated_from"])
     generated_from["balance_snapshot_sats"] = dict(balances_sats)
+    generated_from["source_budget_used_sats"] = source_used_sats
 
     job_id = engine.add_job(
         flow_id,

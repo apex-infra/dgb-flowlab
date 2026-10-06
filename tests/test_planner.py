@@ -253,6 +253,74 @@ class ExperimentalDecisionTests(PlannerBase):
                 fee_reserve_sats=10_000_000,
             )
 
+    def test_source_route_is_capped_by_remaining_allocation(self):
+        _, flow = self.experimental_flow(seed=840)
+
+        balances = {
+            "w1_source": 5_000_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        remaining = CFG["workload"]["amount_sats_min"] + 12_345
+
+        for i in range(30):
+            d = experimental_decision(
+                self.e,
+                flow,
+                i,
+                balances,
+                fee_reserve_sats=10_000_000,
+                source_budget_remaining_sats=remaining,
+            )
+
+            self.assertEqual(d["from"], "w1_source")
+            self.assertLessEqual(d["amount_sats"], remaining)
+            self.assertEqual(
+                d["generated_from"]["source_budget_remaining_sats"],
+                remaining,
+            )
+
+    def test_source_routes_become_ineligible_when_budget_below_minimum(self):
+        _, flow = self.experimental_flow(seed=850)
+
+        balances = {
+            "w1_source": 5_000_000_000,
+            "w2_flowA": 250_000_000,
+            "w3_flowB": 0,
+        }
+
+        for i in range(30):
+            d = experimental_decision(
+                self.e,
+                flow,
+                i,
+                balances,
+                source_budget_remaining_sats=(
+                    CFG["workload"]["amount_sats_min"] - 1
+                ),
+            )
+            self.assertNotEqual(d["from"], "w1_source")
+
+    def test_exhausted_source_budget_does_not_block_internal_routes(self):
+        _, flow = self.experimental_flow(seed=860)
+
+        balances = {
+            "w1_source": 5_000_000_000,
+            "w2_flowA": 500_000_000,
+            "w3_flowB": 500_000_000,
+        }
+
+        for i in range(30):
+            d = experimental_decision(
+                self.e,
+                flow,
+                i,
+                balances,
+                source_budget_remaining_sats=0,
+            )
+            self.assertIn(d["from"], ("w2_flowA", "w3_flowB"))
+
     def test_invalid_fee_reserve_is_refused(self):
         _, flow = self.experimental_flow(seed=830)
 
@@ -339,6 +407,56 @@ class ExperimentalJobTests(ExperimentalDecisionTests):
         self.assertEqual(generated["seed"], 9001)
         self.assertEqual(generated["fee_reserve_sats"], 10_000_000)
         self.assertEqual(generated["balance_snapshot_sats"], self.balances())
+
+    def test_generated_jobs_account_for_source_allocation(self):
+        _, flow = self.experimental_flow(seed=870)
+
+        allocation = self.e.get_flow(flow)["initial_alloc_sats"]
+
+        balances = {
+            "w1_source": allocation * 10,
+            "w2_flowA": allocation,
+            "w3_flowB": allocation,
+        }
+
+        source_used = 0
+        cfg = json.loads(self.e.get_experiment(
+            self.e.get_flow(flow)["experiment_id"]
+        )["config_json"])
+
+        for i in range(cfg["workload"]["jobs"]):
+            jid = generate_experimental_job(
+                self.e,
+                flow,
+                balances,
+                fee_reserve_sats=0,
+            )
+
+            job = self.e.get_job(jid)
+            plan = json.loads(job["planned_json"])
+            generated = json.loads(job["generated_from_json"])
+
+            self.assertEqual(
+                generated["source_budget_used_sats"],
+                source_used,
+            )
+            self.assertEqual(
+                generated["source_budget_remaining_sats"],
+                allocation - source_used,
+            )
+
+            if plan["from"] == "w1_source":
+                source_used += plan["amount_sats"]
+                self.assertLessEqual(source_used, allocation)
+
+            self.e.advance_flow(flow, "EXECUTE")
+            act = self.e.begin_action(jid, "broadcast", {"amount_sats": 1})
+            txid = f"{i + 80:02x}" * 32
+            self.e.complete_action(act, {"txid": txid})
+            self.e.advance_flow(flow, "CONFIRMATION")
+            self.e.record_confirmation(txid, 2, 200 + i)
+            self.e.advance_flow(flow, "NEXT_STATE")
+            self.e.advance_flow(flow, "PLAN")
 
     def test_second_job_requires_first_to_be_confirmed(self):
         _, flow = self.experimental_flow(seed=9002)
