@@ -17,6 +17,7 @@ class NodeCase:
         self.n = FakeNode()
         self.sent = []
         h = self.n.handlers
+        h["getnetworkinfo"] = lambda: {"relayfee": Decimal("0.001")}
         h["getaddressinfo"] = lambda a: {"ismine": a in (DEST, CHANGE)}
         h["getnewaddress"] = lambda label: CHANGE
         h["listunspent"] = lambda m: [
@@ -48,6 +49,17 @@ class BuildTests(NodeCase, unittest.TestCase):
         self.assertEqual((p.txid, p.fee_sats, p.amount_sats), (TXID, 100_000, 100_000_000))
         self.assertIn("to address", p.summary())
         self.assertEqual(self.sent, [])  # build never broadcasts
+
+    def test_planning_fee_reserve_uses_relay_fee_not_maximum_cap(self):
+        reserve = self.b.planning_fee_reserve_sats()
+
+        self.assertGreater(reserve, 0)
+        self.assertLess(reserve, self.b.max_fee_sats)
+
+    def test_planning_fee_reserve_rejects_bad_input_counts(self):
+        for n in (0, -1, 1.5, True):
+            with self.assertRaises(BuildError):
+                self.b.planning_fee_reserve_sats(n)
 
     def test_destination_must_be_ours(self):
         with self.assertRaises(BuildError):

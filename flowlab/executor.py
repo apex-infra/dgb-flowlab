@@ -94,7 +94,7 @@ class Executor:
 
     def _generate_next_experimental_job(self, flow):
         balances = self._confirmed_balances(flow)
-        fee_reserve = self.builder.max_fee_sats
+        fee_reserve = self.builder.planning_fee_reserve_sats()
         return generate_experimental_job(
             self.engine,
             flow["id"],

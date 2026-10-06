@@ -241,7 +241,7 @@ class ExperimentalRunTests(ExecBase):
         self.assertIn("balance_snapshot_sats", generated)
         self.assertEqual(
             generated["fee_reserve_sats"],
-            self.b.max_fee_sats,
+            self.b.planning_fee_reserve_sats(),
         )
 
 

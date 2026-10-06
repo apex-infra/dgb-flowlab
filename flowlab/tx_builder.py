@@ -65,6 +65,18 @@ class TxBuilder:
         size = 10 + 68 * n_inputs + 2 * 34
         return min(self.max_fee_sats, ceil(rate * size / 1000))
 
+    def planning_fee_reserve_sats(self, n_inputs=8):
+        """Conservative fee reserve used during planning.
+
+        This is not the transaction's actual fee. It estimates relay-fee
+        requirements for a moderately fragmented transaction so the planner
+        does not reserve the entire max-fee safety ceiling.
+        """
+        if (not isinstance(n_inputs, int) or isinstance(n_inputs, bool)
+                or n_inputs < 1):
+            raise BuildError("planning fee input count must be a positive integer")
+        return self._fee_reserve(n_inputs)
+
     def _owned(self, address):
         for w in self.wallets:
             try:
