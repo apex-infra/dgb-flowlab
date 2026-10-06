@@ -62,6 +62,12 @@ const whole = (text, what, min) => {
 
   const note = text => h("div", "mute form-note", text);
 
+  function newSeed() {
+    const words = new Uint32Array(1);
+    crypto.getRandomValues(words);
+    return String(words[0]);
+  }
+
   function edgeKey(from, to) {
     return from + "\u0000" + to;
   }
@@ -436,11 +442,22 @@ const whole = (text, what, min) => {
       "uniform"
     );
 
+    const seed = num("f-seed", newSeed(), "180px");
+    const seedButton = h("button", null, "New seed");
+    seedButton.type = "button";
+    seedButton.onclick = () => {
+      seed.value = newSeed();
+      refreshPreview();
+    };
+
+    const seedRow = h("div", "seed-row");
+    seedRow.append(seed, seedButton);
+
     random.append(
       h("legend", null, "Randomization"),
       field("Model", model),
-      field("Seed", num("f-seed", "2262026", "180px")),
-      note("The seed is part of the approved configuration. The same approved inputs reproduce the same decisions when replayed with the same observed state.")
+      field("Seed", seedRow),
+      note("A fresh seed is generated for each new experimental form. The seed remains editable and becomes part of the approved configuration so the run can be reproduced.")
     );
 
     const topo = h("fieldset");

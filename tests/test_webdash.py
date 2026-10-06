@@ -187,6 +187,19 @@ class WebReadTests(WebBase):
         ):
             self.assertIn(want, script)
 
+
+    def test_experimental_form_generates_fresh_seed(self):
+        self.start()
+        status, _, body = self.get("/form.js")
+        self.assertEqual(status, 200)
+
+        text = body.decode()
+        self.assertIn("crypto.getRandomValues", text)
+        self.assertIn("new Uint32Array(1)", text)
+        self.assertIn("New seed", text)
+        self.assertNotIn('num("f-seed", "2262026"', text)
+
+
     def test_each_server_has_its_own_secret(self):
         self.start()
         first = self.srv.token

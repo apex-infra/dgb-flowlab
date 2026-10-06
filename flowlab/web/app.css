@@ -130,3 +130,15 @@ a.btn:hover{color:var(--paper)}
   gap:7px;
 }
 .topology-cell input{min-width:auto}
+
+
+.seed-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.seed-row button {
+  white-space: nowrap;
+}
