@@ -3,6 +3,7 @@ import json
 import os
 import tempfile
 import unittest
+from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
 from flowlab import Engine
@@ -168,6 +169,99 @@ class RunTests(ExecBase):
             self.chain.mine(2)
             self.assertIsNotNone(r["blocked"])
         self.assertEqual(len(self.sent()), before)
+
+    def test_self_transfer_reconciliation_uses_exact_transaction_output(self):
+        self.chain.fund("flab_a", 500_000_000)
+        self.chain.mine(3)
+
+        flow = self.e.list_flows(self.exp)[0]["id"]
+        self.e.advance_flow(flow, "PLAN")
+
+        jid = self.e.add_job(
+            flow,
+            {
+                "from": "flab_a",
+                "to": "flab_a",
+                "amount_sats": 100_000_000,
+                "step": 0,
+            },
+            planned_delay_s=0,
+            generated_from={"source": "self-transfer reconciliation test"},
+        )
+
+        self.e.advance_flow(flow, "EXECUTE")
+        self.x.tick(self.exp)          # build + broadcast
+
+        self.chain.mine(2)
+        self.x.tick(self.exp)          # confirmation
+
+        job = self.e.get_job(jid)
+        self.assertEqual(job["state"], "CONFIRMED")
+
+        recorded = json.loads(job["result_json"])
+        self.assertEqual(recorded["amount_sats"], 100_000_000)
+        self.assertTrue(recorded["address"])
+
+        ok, final_state, stats = self.x.reconcile(self.exp)
+
+        self.assertTrue(ok, stats)
+        self.assertEqual(stats["issues"], [])
+        self.assertEqual(stats["total_moved_sats"], 100_000_000)
+        self.assertEqual(stats["total_fees_sats"], FEE)
+        self.assertIn("flab_a", final_state["balances_sats"])
+
+    def test_self_transfer_reconciliation_catches_wrong_output_amount(self):
+        self.chain.fund("flab_a", 500_000_000)
+        self.chain.mine(3)
+
+        flow = self.e.list_flows(self.exp)[0]["id"]
+        self.e.advance_flow(flow, "PLAN")
+
+        jid = self.e.add_job(
+            flow,
+            {
+                "from": "flab_a",
+                "to": "flab_a",
+                "amount_sats": 100_000_000,
+                "step": 0,
+            },
+            planned_delay_s=0,
+            generated_from={"source": "self-transfer reconciliation test"},
+        )
+
+        self.e.advance_flow(flow, "EXECUTE")
+        self.x.tick(self.exp)
+
+        self.chain.mine(2)
+        self.x.tick(self.exp)
+
+        job = self.e.get_job(jid)
+        recorded = json.loads(job["result_json"])
+        target = recorded["address"]
+
+        real = self.chain.get_raw_transaction
+
+        def liar(txid, verbose=True):
+            result = real(txid, verbose)
+            if not verbose:
+                return result
+
+            result = copy.deepcopy(result)
+            for output in result["vout"]:
+                if output["scriptPubKey"].get("address") == target:
+                    output["value"] -= Decimal("0.00000001")
+                    break
+            return result
+
+        self.chain.get_raw_transaction = liar
+
+        ok, _, stats = self.x.reconcile(self.exp)
+
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("self-transfer output was" in issue for issue in stats["issues"]),
+            stats,
+        )
 
     def test_reconciliation_failure_goes_to_error_not_complete(self):
         real = self.chain.get_transaction

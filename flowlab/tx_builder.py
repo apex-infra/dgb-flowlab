@@ -174,8 +174,12 @@ def broadcast(engine, rpc, job_id, prepared):
         # Anything else (timeout, dropped connection, "already known") may mean the
         # node HAS the transaction: leave the intent in place for recovery to settle.
         raise
-    engine.complete_action(action_id, {"txid": txid, "fee_sats": prepared.fee_sats,
-                                       "amount_sats": prepared.amount_sats})
+    engine.complete_action(action_id, {
+        "txid": txid,
+        "fee_sats": prepared.fee_sats,
+        "amount_sats": prepared.amount_sats,
+        "address": prepared.address,
+    })
     if txid != prepared.txid:
         raise BuildError(f"node returned txid {txid}, expected {prepared.txid} (recorded as sent)")
     return txid

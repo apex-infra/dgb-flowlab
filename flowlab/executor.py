@@ -205,8 +205,30 @@ class Executor:
                     continue
                 fee = -to_sats(sent.get("fee", 0))
                 want = recorded.get("amount_sats") if plan["amount_sats"] == "all" else plan["amount_sats"]
-                if want is None or to_sats(got["amount"]) != want:
+
+                if plan["from"] == plan["to"]:
+                    address = recorded.get("address")
+                    if not address:
+                        issues.append(f"{tag}: self-transfer has no recorded destination address")
+                    else:
+                        try:
+                            raw = self.rpc.get_raw_transaction(job["txid"], True)
+                            actual = sum(
+                                to_sats(o["value"])
+                                for o in raw.get("vout", [])
+                                if o.get("scriptPubKey", {}).get("address") == address
+                            )
+                        except RpcError as err:
+                            issues.append(f"{tag}: cannot decode self-transfer output ({err})")
+                            actual = None
+
+                        if actual is not None and (want is None or actual != want):
+                            issues.append(
+                                f"{tag}: self-transfer output was {actual} sats, expected {want}"
+                            )
+                elif want is None or to_sats(got["amount"]) != want:
                     issues.append(f"{tag}: receiver saw {to_sats(got['amount'])} sats, expected {want}")
+
                 if fee != recorded.get("fee_sats"):
                     issues.append(f"{tag}: fee {fee} sats differs from the recorded {recorded.get('fee_sats')}")
                 if got.get("confirmations", 0) < flow["confirmations_required"]:

@@ -123,7 +123,20 @@ class FakeChain:
     def get_raw_transaction(self, txid, verbose=True):
         if txid not in self.txs:
             raise RpcError("No such mempool or blockchain transaction", -5)
-        return {"txid": txid}
+        if not verbose:
+            return txid
+        t = self.txs[txid]
+        return {
+            "txid": txid,
+            "vout": [
+                {
+                    "n": n,
+                    "value": Decimal(sats) / SATS,
+                    "scriptPubKey": {"address": address},
+                }
+                for n, (address, sats) in enumerate(t["outputs"])
+            ],
+        }
 
     def get_transaction(self, wallet, txid):
         t = self.txs.get(txid)
