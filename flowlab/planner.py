@@ -144,6 +144,62 @@ def experimental_decision(
     }
 
 
+def generate_experimental_job(
+        engine, flow_id, balances_sats, fee_reserve_sats=0):
+    """Generate and persist exactly one experimental job.
+
+    The caller supplies the observed confirmed-balance snapshot. Previous
+    experimental jobs must already be CONFIRMED before another is generated.
+    """
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
+
+    rnd = cfg.get("randomization", {"enabled": False})
+    if not rnd.get("enabled"):
+        raise PlanError("experimental job generation requires randomization to be enabled")
+
+    workload = cfg.get("workload")
+    if not workload:
+        raise PlanError("experimental job generation requires a workload envelope")
+    if workload["mode"] != "count":
+        raise PlanError("generator v1 currently supports count workloads only")
+
+    jobs = engine.list_jobs(flow_id)
+
+    if any(j["state"] != "CONFIRMED" for j in jobs):
+        raise PlanError("previous experimental job must be confirmed before generating the next")
+
+    decision_index = len(jobs)
+    if decision_index >= workload["jobs"]:
+        raise PlanError("experimental workload is already complete")
+
+    decision = experimental_decision(
+        engine,
+        flow_id,
+        decision_index,
+        balances_sats=balances_sats,
+        fee_reserve_sats=fee_reserve_sats,
+    )
+
+    generated_from = dict(decision["generated_from"])
+    generated_from["balance_snapshot_sats"] = dict(balances_sats)
+
+    job_id = engine.add_job(
+        flow_id,
+        {
+            "from": decision["from"],
+            "to": decision["to"],
+            "amount_sats": decision["amount_sats"],
+            "step": decision_index,
+        },
+        planned_delay_s=decision["delay_seconds"],
+        generated_from=generated_from,
+        depends_on=[jobs[-1]["id"]] if jobs else (),
+    )
+
+    return job_id
+
+
 def generate_jobs(engine, flow_id):
     """Create one job per configured transfer, in order. Returns the job ids."""
     if engine.list_jobs(flow_id):

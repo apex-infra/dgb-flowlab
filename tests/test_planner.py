@@ -9,6 +9,7 @@ from flowlab import ConfigError, Engine
 from flowlab.planner import (
     PlanError,
     experimental_decision,
+    generate_experimental_job,
     generate_jobs,
     next_due,
 )
@@ -302,6 +303,82 @@ class ExperimentalDecisionTests(PlannerBase):
 
         with self.assertRaises(PlanError):
             experimental_decision(self.e, flow, 0)
+
+
+class ExperimentalJobTests(ExperimentalDecisionTests):
+    def balances(self):
+        return {
+            "w1_source": 500_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+    def test_one_generated_decision_is_persisted_as_one_job(self):
+        _, flow = self.experimental_flow(seed=9001)
+
+        jid = generate_experimental_job(
+            self.e,
+            flow,
+            self.balances(),
+            fee_reserve_sats=10_000_000,
+        )
+
+        jobs = self.e.list_jobs(flow)
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0]["id"], jid)
+
+        planned = json.loads(jobs[0]["planned_json"])
+        generated = json.loads(jobs[0]["generated_from_json"])
+
+        self.assertEqual(planned["step"], 0)
+        self.assertIn(planned["from"], self.balances())
+        self.assertGreaterEqual(planned["amount_sats"], CFG["workload"]["amount_sats_min"])
+        self.assertLessEqual(planned["amount_sats"], 490_000_000)
+
+        self.assertEqual(generated["decision_index"], 0)
+        self.assertEqual(generated["seed"], 9001)
+        self.assertEqual(generated["fee_reserve_sats"], 10_000_000)
+        self.assertEqual(generated["balance_snapshot_sats"], self.balances())
+
+    def test_second_job_requires_first_to_be_confirmed(self):
+        _, flow = self.experimental_flow(seed=9002)
+
+        generate_experimental_job(self.e, flow, self.balances())
+
+        with self.assertRaises(PlanError):
+            generate_experimental_job(self.e, flow, self.balances())
+
+    def test_count_workload_stops_at_approved_job_count(self):
+        _, flow = self.experimental_flow(seed=9003)
+
+        cfg = json.loads(self.e.get_experiment(
+            self.e.get_flow(flow)["experiment_id"]
+        )["config_json"])
+        limit = cfg["workload"]["jobs"]
+
+        balances = self.balances()
+
+        for i in range(limit):
+            jid = generate_experimental_job(self.e, flow, balances)
+
+            job = self.e.get_job(jid)
+            self.assertEqual(json.loads(job["planned_json"])["step"], i)
+
+            self.e.advance_flow(flow, "EXECUTE")
+            act = self.e.begin_action(jid, "broadcast", {"amount_sats": 1})
+            txid = f"{i + 1:02x}" * 32
+            self.e.complete_action(act, {"txid": txid})
+            self.e.advance_flow(flow, "CONFIRMATION")
+            self.e.record_confirmation(txid, 2, 100 + i)
+            self.e.advance_flow(flow, "NEXT_STATE")
+
+            if i + 1 < limit:
+                self.e.advance_flow(flow, "PLAN")
+
+        self.e.advance_flow(flow, "PLAN")
+
+        with self.assertRaises(PlanError):
+            generate_experimental_job(self.e, flow, balances)
 
 
 class PlanTests(PlannerBase):
