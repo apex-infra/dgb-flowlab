@@ -171,6 +171,22 @@ class WebReadTests(WebBase):
         ):
             self.assertIn(want, page)
 
+    def test_form_script_contains_both_experiment_modes(self):
+        self.start()
+        script = self.get("/form.js")[2].decode()
+
+        for want in (
+            "Deterministic",
+            "Experimental",
+            "experimental_topology",
+            "amount_sats_min",
+            "amount_sats_max",
+            "delay_seconds_min",
+            "delay_seconds_max",
+            "seeded_deterministic",
+        ):
+            self.assertIn(want, script)
+
     def test_each_server_has_its_own_secret(self):
         self.start()
         first = self.srv.token
