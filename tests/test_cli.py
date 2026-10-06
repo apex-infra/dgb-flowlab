@@ -62,9 +62,29 @@ class RepeatTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             validate(c)
 
-    def test_no_random_keys_survive(self):
+    def test_randomization_requires_a_seed(self):
         with self.assertRaises(ConfigError):
             validate(dict(cfg_repeat(), randomization={"enabled": True, "model": "uniform"}))
+
+    def test_seeded_randomization_validates(self):
+        cfg = dict(
+            cfg_repeat(),
+            randomization={"enabled": True, "model": "uniform", "seed": 12345},
+        )
+        cfg["workload"] = {
+            "mode": "count",
+            "jobs": 7,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 100_000_000,
+            "delay_seconds_min": 0,
+            "delay_seconds_max": 30,
+        }
+
+        got = validate(cfg)
+        self.assertEqual(
+            got["randomization"],
+            {"enabled": True, "model": "uniform", "seed": 12345},
+        )
 
 
 class ReviewTests(PlannerBase):

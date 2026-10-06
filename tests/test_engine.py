@@ -162,10 +162,59 @@ class ApprovalTests(Base):
         with self.assertRaises(ConfigError):
             self.e.configure_experiment(exp, bad)
 
-    def test_randomization_is_rejected(self):
+    def test_randomization_requires_seed(self):
         exp = self.e.create_experiment()
         bad = copy.deepcopy(CFG)
         bad["randomization"] = {"enabled": True, "model": "uniform"}
+        with self.assertRaises(ConfigError):
+            self.e.configure_experiment(exp, bad)
+
+    def test_seeded_randomization_is_persisted(self):
+        exp = self.e.create_experiment()
+        cfg = copy.deepcopy(CFG)
+        cfg["randomization"] = {
+            "enabled": True,
+            "model": "uniform",
+            "seed": 2262026,
+        }
+
+        h = self.e.configure_experiment(exp, cfg)
+        row = self.e.get_experiment(exp)
+
+        self.assertEqual(row["random_seed"], 2262026)
+        stored = json.loads(row["config_json"])
+        self.assertEqual(stored["randomization"]["seed"], 2262026)
+        self.assertEqual(stored["randomization"]["model"], "uniform")
+
+        review = self.e.review(exp)
+        self.assertIn("randomization: ENABLED model=uniform seed=2262026", review["text"])
+
+        self.e.approve(exp, h)
+        flow = self.e.list_flows(exp)[0]
+        self.assertEqual(flow["random_seed"], 2262026)
+        self.assertEqual(
+            json.loads(flow["randomization_json"]),
+            {"enabled": True, "model": "uniform", "seed": 2262026},
+        )
+
+    def test_randomization_rejects_invalid_model_and_seed(self):
+        exp = self.e.create_experiment()
+
+        bad = copy.deepcopy(CFG)
+        bad["randomization"] = {
+            "enabled": True,
+            "model": "not-a-model",
+            "seed": 1,
+        }
+        with self.assertRaises(ConfigError):
+            self.e.configure_experiment(exp, bad)
+
+        bad = copy.deepcopy(CFG)
+        bad["randomization"] = {
+            "enabled": True,
+            "model": "uniform",
+            "seed": -1,
+        }
         with self.assertRaises(ConfigError):
             self.e.configure_experiment(exp, bad)
 

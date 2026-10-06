@@ -15,6 +15,7 @@ from . import audit
 
 WORKLOAD_MODES = ("count", "duration", "automatic")
 ADDRESS_POLICIES = ("existing", "new")
+RANDOM_MODELS = ("uniform", "weighted", "bounded_random", "seeded_deterministic")
 
 
 class ConfigError(ValueError):
@@ -142,9 +143,18 @@ def validate(cfg):
           f"address_policy must be one of {ADDRESS_POLICIES}")
 
     rnd = cfg.get("randomization", {"enabled": False})
-    _need(isinstance(rnd, dict) and rnd.get("enabled") in (False, None),
-          "randomization is not supported: transfers are explicit and deterministic")
-    cfg["randomization"] = {"enabled": False}
+    _need(isinstance(rnd, dict) and isinstance(rnd.get("enabled"), bool),
+          "randomization.enabled must be a bool")
+    if rnd["enabled"]:
+        _need(rnd.get("model") in RANDOM_MODELS,
+              f"randomization.model must be one of {RANDOM_MODELS}")
+        seed = rnd.get("seed")
+        _need(_is_int(seed) and seed >= 0,
+              "randomization.seed must be a non-negative integer")
+        _need(wl is not None,
+              "randomization requires a workload envelope")
+    else:
+        cfg["randomization"] = {"enabled": False}
     return cfg
 
 
