@@ -253,6 +253,16 @@ class WebReadTests(WebBase):
         self.snap()
         self.assertEqual(self.digest(), before)
 
+    def test_form_script_contains_play_mode_and_server_compiler(self):
+        self.start()
+        form = self.get("/form.js")[2].decode()
+        app = self.get("/app.js")[2].decode()
+
+        self.assertIn('"Play"', form)
+        self.assertIn('"compile_play"', form)
+        self.assertIn("window.flowPlays", app)
+        self.assertIn("window.flowPlays", form)
+
     def test_missing_database_serves_an_empty_snapshot(self):
         self.serve(db="/nonexistent/none.db")
         data = self.snap()
@@ -448,6 +458,41 @@ class WebControlTests(WebBase):
 
         self.assertEqual(s, 400)
         self.assertIn("unknown play", out["error"])
+
+    def test_compiled_play_config_can_enter_normal_new_review_path(self):
+        self.up()
+
+        s, compiled = self.do("compile_play", {
+            "play": "ring",
+            "params": {
+                "source_wallet": "flab_source",
+                "workers": ["flab_a", "flab_b"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 200, compiled)
+
+        s, created = self.do("new", {
+            "config": compiled["config"],
+            "description": "ring play from dashboard",
+        })
+
+        self.assertEqual(s, 200, created)
+        self.assertIn("exp", created)
+        self.assertIn("hash", created)
+        self.assertIn("experimental topology:", created["text"])
+        self.assertIn("flab_source -> flab_a", created["text"])
+        self.assertIn("flab_a -> flab_b", created["text"])
+        self.assertIn("flab_b -> flab_a", created["text"])
 
     def test_experimental_config_does_not_require_destination_as_last_workload_hop(self):
         self.up()

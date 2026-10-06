@@ -317,6 +317,7 @@ function renderConsole(data) {
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
+  window.flowPlays = data.plays || [];
   renderPicker(data); renderExports(data); renderBanner(data); renderActions(data);
   renderUnresolved(data); renderExperimental(data); renderConsole(data);
   const s = data.snapshot;

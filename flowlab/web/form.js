@@ -34,7 +34,9 @@ const whole = (text, what, min) => {
     builtFor: "",
     mode: "experimental",
     workers: [],
-    edges: new Set()
+    edges: new Set(),
+    playConfig: null,
+    previewSeq: 0
   };
 
   const sel = (id, options, value) => {
@@ -76,11 +78,16 @@ const whole = (text, what, min) => {
     return window.flowWallets || [];
   }
 
+  function plays() {
+    return window.flowPlays || [];
+  }
+
   function modeButtons() {
     const box = h("div", "mode-switch");
     const det = h("button", state.mode === "deterministic" ? "on" : null, "Deterministic");
     const exp = h("button", state.mode === "experimental" ? "on" : null, "Experimental");
-    det.type = exp.type = "button";
+    const play = h("button", state.mode === "play" ? "on" : null, "Play");
+    det.type = exp.type = play.type = "button";
 
     det.onclick = () => {
       state.mode = "deterministic";
@@ -90,8 +97,12 @@ const whole = (text, what, min) => {
       state.mode = "experimental";
       build(true);
     };
+    play.onclick = () => {
+      state.mode = "play";
+      build(true);
+    };
 
-    box.append(det, exp);
+    box.append(det, exp, play);
     return box;
   }
 
@@ -545,15 +556,213 @@ const whole = (text, what, min) => {
     };
   }
 
+  // ------------------------------------------------ play
+
+  function selectedPlayWorkers() {
+    return state.workers.filter(x => x.on).map(x => x.name);
+  }
+
+  function refreshPlayWorkers() {
+    const src = $("f-src").value;
+    const dst = $("f-dst").value;
+    const keep = new Map(state.workers.map(x => [x.name, x.on]));
+
+    state.workers = wallets()
+      .filter(w => w !== src && w !== dst)
+      .map(w => ({
+        name: w,
+        on: keep.has(w) ? keep.get(w) : true
+      }));
+
+    drawPlayWorkers();
+  }
+
+  function drawPlayWorkers() {
+    const box = $("f-play-workers");
+    if (!box) return;
+
+    box.replaceChildren();
+
+    state.workers.forEach(w => {
+      const label = h("label");
+      const check = h("input");
+
+      check.type = "checkbox";
+      check.checked = w.on;
+      check.onchange = () => {
+        w.on = check.checked;
+        refreshPreview();
+      };
+
+      label.append(check, document.createTextNode(w.name));
+      box.append(label);
+    });
+  }
+
+  function playParams() {
+    const workers = selectedPlayWorkers();
+
+    if (!workers.length)
+      throw new Error("Play mode needs at least one working wallet");
+
+    const allocation = toSats($("f-allocation").value, "Experiment allocation");
+    const minAmount = toSats($("f-minamt").value, "Minimum amount");
+    const maxAmount = toSats($("f-maxamt").value, "Maximum amount");
+
+    if (maxAmount < minAmount)
+      throw new Error("Maximum amount must be at least the minimum amount");
+
+    if (maxAmount > allocation)
+      throw new Error("Maximum amount cannot exceed the experiment allocation");
+
+    const minDelay = whole($("f-mindelay").value, "Minimum delay", 0);
+    const maxDelay = whole($("f-maxdelay").value, "Maximum delay", 0);
+
+    if (maxDelay < minDelay)
+      throw new Error("Maximum delay must be at least the minimum delay");
+
+    return {
+      source_wallet: $("f-src").value,
+      workers,
+      destination_wallet: $("f-dst").value,
+      allocation_sats: allocation,
+      decisions: whole($("f-jobs").value, "Number of decisions", 1),
+      amount_sats_min: minAmount,
+      amount_sats_max: maxAmount,
+      delay_seconds_min: minDelay,
+      delay_seconds_max: maxDelay,
+      confirmations_required: whole($("f-conf").value, "Confirmations", 1),
+      seed: whole($("f-seed").value, "Seed", 0)
+    };
+  }
+
+  function playRequest() {
+    return {
+      play: $("f-play").value,
+      params: playParams()
+    };
+  }
+
+  function buildPlay(body, ws) {
+    const catalog = plays();
+
+    if (!catalog.length) {
+      body.append(note("No plays are available from the server."));
+      return;
+    }
+
+    const play = h("select");
+    play.id = "f-play";
+    catalog.forEach(p => play.append(new Option(p.title, p.name)));
+
+    const src = sel("f-src", ws, ws[0]);
+    const dst = sel("f-dst", ws, ws[ws.length - 1]);
+
+    const workerBox = h("div", "row");
+    workerBox.id = "f-play-workers";
+
+    const roles = h("fieldset");
+    roles.append(
+      h("legend", null, "Play"),
+      field("Strategy", play),
+      field("Source wallet", src),
+      field("Working wallets", workerBox),
+      field("Final destination", dst),
+      note("Play topology is compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
+    );
+
+    const workload = h("fieldset");
+    workload.append(
+      h("legend", null, "Play parameters"),
+      field("Experiment allocation (DGB)", num("f-allocation", "2")),
+      field("Number of decisions", num("f-jobs", "20", "100px")),
+      field("Minimum amount (DGB)", num("f-minamt", "0.10")),
+      field("Maximum amount (DGB)", num("f-maxamt", "1.00")),
+      field("Minimum delay (seconds)", num("f-mindelay", "5", "100px")),
+      field("Maximum delay (seconds)", num("f-maxdelay", "60", "100px")),
+      field("Confirmations required", num("f-conf", "2", "80px"))
+    );
+
+    const seed = num("f-seed", newSeed(), "180px");
+    const seedButton = h("button", null, "New seed");
+    seedButton.type = "button";
+    seedButton.onclick = () => {
+      seed.value = newSeed();
+      refreshPreview();
+    };
+
+    const seedRow = h("div", "seed-row");
+    seedRow.append(seed, seedButton);
+
+    const replay = h("fieldset");
+    replay.append(
+      h("legend", null, "Reproducibility"),
+      field("Seed", seedRow),
+      note("The seed becomes part of the compiled and approved config.")
+    );
+
+    body.append(roles, workload, replay);
+
+    src.onchange = dst.onchange = () => {
+      refreshPlayWorkers();
+      refreshPreview();
+    };
+
+    play.onchange = refreshPreview;
+
+    refreshPlayWorkers();
+  }
+
+  async function compilePlayForPreview() {
+    const seq = ++state.previewSeq;
+    state.playConfig = null;
+
+    const out = $("f-json");
+    if (!out) return;
+
+    let req;
+    try {
+      req = playRequest();
+    } catch (err) {
+      out.textContent = String(err.message);
+      return;
+    }
+
+    out.textContent = "Compiling play...";
+
+    try {
+      const compiled = await api("compile_play", req);
+      if (seq !== state.previewSeq) return;
+
+      state.playConfig = compiled.config;
+      out.textContent = JSON.stringify(compiled.config, null, 2);
+    } catch (err) {
+      if (seq !== state.previewSeq) return;
+      out.textContent = String(err.message);
+    }
+  }
+
   // ------------------------------------------------ common
 
   function collect() {
-    return state.mode === "experimental"
-      ? collectExperimental()
-      : collectDeterministic();
+    if (state.mode === "experimental")
+      return collectExperimental();
+
+    if (state.mode === "play") {
+      if (!state.playConfig)
+        throw new Error("Compile the play successfully before creating it");
+      return state.playConfig;
+    }
+
+    return collectDeterministic();
   }
 
   function refreshPreview() {
+    if (state.mode === "play") {
+      compilePlayForPreview();
+      return;
+    }
+
     const route = $("f-route");
     if (route && state.mode === "deterministic")
       route.textContent = deterministicPath().join("  ->  ");
@@ -578,6 +787,8 @@ const whole = (text, what, min) => {
     state.builtFor = signature;
     state.workers = [];
     state.edges = new Set();
+    state.playConfig = null;
+    state.previewSeq += 1;
     form.replaceChildren();
 
     const desc = h("input");
@@ -595,6 +806,8 @@ const whole = (text, what, min) => {
 
     if (state.mode === "experimental")
       buildExperimental(body, ws);
+    else if (state.mode === "play")
+      buildPlay(body, ws);
     else
       buildDeterministic(body, ws);
 
@@ -623,7 +836,13 @@ const whole = (text, what, min) => {
 
     let cfg;
     try {
-      cfg = collect();
+      if (state.mode === "play") {
+        const compiled = await api("compile_play", playRequest());
+        cfg = compiled.config;
+        state.playConfig = cfg;
+      } else {
+        cfg = collect();
+      }
     } catch (err) {
       toast(err.message, true);
       return;
