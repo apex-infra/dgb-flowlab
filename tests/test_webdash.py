@@ -233,6 +233,42 @@ class WebReadTests(WebBase):
         self.start(Rpc(fail=True))
         self.assertEqual(self.snap()["balances"], {"flab_a": None, "flab_b": None})
 
+
+    def test_wallet_balance_refreshes_after_cache_expires(self):
+        from unittest.mock import patch
+
+        class MovingRpc:
+            def __init__(self):
+                self.amounts = {
+                    "flab_a": Decimal("0"),
+                    "flab_b": Decimal("0"),
+                }
+
+            def get_balances(self, wallet):
+                return {"mine": {"trusted": self.amounts[wallet]}}
+
+        rpc = MovingRpc()
+
+        # Keep the first result cached so we can prove the dashboard really
+        # holds it until the TTL says it is stale.
+        with patch("flowlab.webdash.BALANCE_TTL", 3600):
+            self.start(rpc)
+
+            first = self.snap()["balances"]
+            self.assertEqual(first["flab_a"], 0)
+
+            rpc.amounts["flab_a"] = Decimal("0.22339458")
+
+            cached = self.snap()["balances"]
+            self.assertEqual(cached["flab_a"], 0)
+
+            # Force that same cache entry to be considered expired.
+            with patch("flowlab.webdash.BALANCE_TTL", -1):
+                fresh = self.snap()["balances"]
+
+            self.assertEqual(fresh["flab_a"], 22_339_458)
+            self.assertEqual(fresh["flab_b"], 0)
+
     def test_wrong_host_header_is_refused_everywhere(self):
         self.start()
         for host in ("evil.example", f"evil.example:{self.port}", "127.0.0.1"):
