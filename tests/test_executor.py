@@ -14,7 +14,7 @@ from flowlab.tx_builder import BuildError, TxBuilder
 from tests.fake_chain import FEE, FakeChain
 from tests.test_engine import FakeVerifier
 
-W = ["flab_source", "flab_a", "flab_b", "flab_dest"]
+W = ["flab_source", "flab_stage", "flab_a", "flab_b", "flab_dest"]
 CFG = {
     "flows": [{"description": "explicit", "source_wallet": "flab_source",
                "flow_wallets": ["flab_a", "flab_b"], "destination_wallet": "flab_dest",
@@ -56,6 +56,23 @@ EXP_CFG["randomization"] = {
 }
 EXP_CFG["finalization"] = {
     "mode": "sweep_workers_to_destination",
+}
+
+
+STAGED_EXP_CFG = copy.deepcopy(EXP_CFG)
+STAGED_EXP_CFG["flows"][0]["allocation_wallet"] = "flab_stage"
+STAGED_EXP_CFG["flows"][0]["flow_wallets"] = [
+    "flab_stage",
+    "flab_a",
+    "flab_b",
+]
+STAGED_EXP_CFG["flows"][0]["experimental_topology"] = {
+    "transitions": [
+        {"from": "flab_stage", "to": "flab_a"},
+        {"from": "flab_stage", "to": "flab_b"},
+        {"from": "flab_a", "to": "flab_b"},
+        {"from": "flab_b", "to": "flab_a"},
+    ]
 }
 
 
@@ -464,6 +481,55 @@ class ExperimentalRunTests(ExecBase):
         self.assertEqual(
             generated["fee_reserve_sats"],
             self.b.planning_fee_reserve_sats(),
+        )
+
+
+class StagedAllocationRunTests(ExecBase):
+    config = STAGED_EXP_CFG
+
+    def test_full_allocation_is_committed_before_randomized_work(self):
+        allocation = STAGED_EXP_CFG["flows"][0]["allocation_sats"]
+
+        r = self.run_all()
+        self.assertTrue(r["done"], r)
+        self.assertEqual(self.e.get_experiment(self.exp)["state"], "COMPLETE")
+
+        flow = self.e.list_flows(self.exp)[0]
+        jobs = self.e.list_jobs(flow["id"])
+
+        commits = [
+            j for j in jobs
+            if json.loads(j["generated_from_json"] or "{}").get("source")
+            == "experimental allocation commit"
+        ]
+        self.assertEqual(len(commits), 1)
+
+        commit = commits[0]
+        plan = json.loads(commit["planned_json"])
+        result = json.loads(commit["result_json"])
+
+        self.assertEqual(plan["from"], "flab_source")
+        self.assertEqual(plan["to"], "flab_stage")
+        self.assertEqual(plan["amount_sats"], allocation)
+        self.assertEqual(plan["step"], 0)
+
+        # The stage receives the full approved principal.  The reserve pays
+        # the commitment transaction fee separately.
+        self.assertEqual(result["amount_sats"], allocation)
+
+        # Every later transaction is paid from experiment-owned principal.
+        exp = self.e.get_experiment(self.exp)
+        stats = json.loads(exp["stats_json"])
+        experiment_fees = stats["total_fees_sats"] - result["fee_sats"]
+
+        final = json.loads(exp["final_state_json"])["balances_sats"]
+
+        self.assertEqual(final["flab_stage"], 0)
+        self.assertEqual(final["flab_a"], 0)
+        self.assertEqual(final["flab_b"], 0)
+        self.assertEqual(
+            final["flab_dest"],
+            allocation - experiment_fees,
         )
 
 

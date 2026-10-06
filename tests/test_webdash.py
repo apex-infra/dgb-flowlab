@@ -24,13 +24,14 @@ def cfg_experimental():
         "flows": [{
             "description": "experimental",
             "source_wallet": "flab_source",
-            "flow_wallets": ["flab_a", "flab_b"],
+            "allocation_wallet": "flab_stage",
+            "flow_wallets": ["flab_stage", "flab_a", "flab_b"],
             "destination_wallet": "flab_dest",
             "allocation_sats": 300_000_000,
             "experimental_topology": {
                 "transitions": [
-                    {"from": "flab_source", "to": "flab_a"},
-                    {"from": "flab_source", "to": "flab_b"},
+                    {"from": "flab_stage", "to": "flab_a"},
+                    {"from": "flab_stage", "to": "flab_b"},
                     {"from": "flab_a", "to": "flab_a"},
                     {"from": "flab_a", "to": "flab_b"},
                     {"from": "flab_b", "to": "flab_a"},
@@ -296,6 +297,8 @@ class WebReadTests(WebBase):
 
         self.assertIn('"Play"', form)
         self.assertIn('"compile_play"', form)
+        self.assertIn('"f-stage"', form)
+        self.assertIn("Allocation wallet", form)
         self.assertIn("window.flowPlays", app)
         self.assertIn("window.flowPlays", form)
 
@@ -433,6 +436,7 @@ class WebControlTests(WebBase):
             "play": "ring",
             "params": {
                 "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
                 "workers": ["flab_a", "flab_b"],
                 "destination_wallet": "flab_dest",
                 "allocation_sats": 500_000_000,
@@ -452,7 +456,7 @@ class WebControlTests(WebBase):
         self.assertEqual(
             out["config"]["flows"][0]["experimental_topology"]["transitions"],
             [
-                {"from": "flab_source", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_a"},
                 {"from": "flab_a", "to": "flab_b"},
                 {"from": "flab_b", "to": "flab_a"},
             ],
@@ -468,6 +472,7 @@ class WebControlTests(WebBase):
             "play": "random_walk",
             "params": {
                 "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
                 "workers": ["flab_a", "not_a_flowlab_wallet"],
                 "destination_wallet": "flab_dest",
                 "allocation_sats": 500_000_000,
@@ -502,6 +507,7 @@ class WebControlTests(WebBase):
             "play": "ring",
             "params": {
                 "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
                 "workers": ["flab_a", "flab_b"],
                 "destination_wallet": "flab_dest",
                 "allocation_sats": 500_000_000,
@@ -526,7 +532,7 @@ class WebControlTests(WebBase):
         self.assertIn("exp", created)
         self.assertIn("hash", created)
         self.assertIn("experimental topology:", created["text"])
-        self.assertIn("flab_source -> flab_a", created["text"])
+        self.assertIn("flab_stage -> flab_a", created["text"])
         self.assertIn("flab_a -> flab_b", created["text"])
         self.assertIn("flab_b -> flab_a", created["text"])
 
@@ -571,8 +577,8 @@ class WebControlTests(WebBase):
         text = out["text"]
 
         self.assertIn("experimental topology:", text)
-        self.assertIn("flab_source -> flab_a", text)
-        self.assertIn("flab_source -> flab_b", text)
+        self.assertIn("flab_stage -> flab_a", text)
+        self.assertIn("flab_stage -> flab_b", text)
         self.assertIn("flab_a -> flab_a", text)
         self.assertIn("flab_a -> flab_b", text)
         self.assertIn("flab_b -> flab_a", text)

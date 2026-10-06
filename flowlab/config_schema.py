@@ -84,11 +84,16 @@ def _validate_experimental_topology(fl, where):
           f"{where}.experimental_topology.transitions must be a non-empty list")
 
     source = fl["source_wallet"]
-    active = [source, *fl["flow_wallets"]]
+    allocation_wallet = fl.get("allocation_wallet", source)
+
+    # New committed-allocation configs keep the stocked reserve/source outside
+    # randomized workload topology.  Legacy configs without allocation_wallet
+    # continue to treat source_wallet as the workload entry point.
+    active = [allocation_wallet, *fl["flow_wallets"]]
     allowed = set(active)
 
     seen = set()
-    source_outbound = False
+    allocation_outbound = False
 
     for j, t in enumerate(transitions):
         w = f"{where}.experimental_topology.transitions[{j}]"
@@ -96,18 +101,25 @@ def _validate_experimental_topology(fl, where):
               f"{w} must have exactly: from, to")
         _need(t["from"] in allowed and t["to"] in allowed,
               f"{w}: wallets must be the source or one of this flow's experimental wallets")
-        _need(not (t["from"] == source and t["to"] == source),
-              f"{w}: source -> source is not an experimental transition")
+        _need(not (t["from"] == allocation_wallet and t["to"] == allocation_wallet),
+              f"{w}: allocation wallet -> itself is not an experimental transition")
+
+        if allocation_wallet != source:
+            _need(t["from"] != source and t["to"] != source,
+                  f"{w}: reserve/source wallet is outside experimental workload topology")
 
         edge = (t["from"], t["to"])
         _need(edge not in seen, f"{w}: duplicate transition {t['from']} -> {t['to']}")
         seen.add(edge)
 
-        if t["from"] == source and t["to"] != source:
-            source_outbound = True
+        if t["from"] == allocation_wallet and t["to"] != allocation_wallet:
+            allocation_outbound = True
 
-    _need(source_outbound,
-          f"{where}.experimental_topology needs at least one transition out of the source wallet")
+    _need(
+        allocation_outbound,
+        f"{where}.experimental_topology needs at least one transition out of "
+        "the allocation wallet",
+    )
 
 
 def _validate_transfers(fl, names, where):
@@ -152,6 +164,25 @@ def validate(cfg):
               f"{where}.flow_wallets must be a list of wallet names")
         names = [fl["source_wallet"], *fw, fl["destination_wallet"]]
         _need(len(set(names)) == len(names), f"{where}: wallets must all be distinct")
+
+        allocation_wallet = fl.get("allocation_wallet")
+        if allocation_wallet is not None:
+            _need(
+                isinstance(allocation_wallet, str) and allocation_wallet,
+                f"{where}.allocation_wallet must be a wallet name",
+            )
+            _need(
+                allocation_wallet in fw,
+                f"{where}.allocation_wallet must be one of flow_wallets",
+            )
+            _need(
+                allocation_wallet not in (
+                    fl["source_wallet"],
+                    fl["destination_wallet"],
+                ),
+                f"{where}.allocation_wallet must differ from source and destination",
+            )
+
         _need(_is_int(fl.get("allocation_sats")) and fl["allocation_sats"] > 0,
               f"{where}.allocation_sats must be a positive integer (satoshis)")
         fl.setdefault("description", "")

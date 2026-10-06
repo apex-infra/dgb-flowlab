@@ -170,6 +170,7 @@ def experimental_decision(
 
 
 EXPERIMENTAL_JOB_SOURCE = "seeded experimental generator"
+ALLOCATION_COMMIT_JOB_SOURCE = "experimental allocation commit"
 FINALIZATION_JOB_SOURCE = "experimental finalization"
 
 
@@ -185,11 +186,75 @@ def experimental_workload_jobs(engine, flow_id):
     ]
 
 
+def experimental_allocation_jobs(engine, flow_id):
+    """Return the one-time reserve -> allocation-wallet commitment job."""
+    return [
+        job for job in engine.list_jobs(flow_id)
+        if _generated_source(job) == ALLOCATION_COMMIT_JOB_SOURCE
+    ]
+
+
 def experimental_finalization_jobs(engine, flow_id):
     return [
         job for job in engine.list_jobs(flow_id)
         if _generated_source(job) == FINALIZATION_JOB_SOURCE
     ]
+
+
+def generate_experimental_allocation_job(engine, flow_id):
+    """Commit the exact approved principal before randomized work begins.
+
+    The reserve/source pays this transaction's network fee separately.
+    The allocation wallet receives exactly initial_alloc_sats.
+    """
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
+
+    matches = [
+        f for f in cfg["flows"]
+        if f["source_wallet"] == flow["source_wallet"]
+        and f["destination_wallet"] == flow["destination_wallet"]
+    ]
+    if len(matches) != 1:
+        raise PlanError("cannot match this flow to exactly one flow in the approved config")
+
+    allocation_wallet = matches[0].get("allocation_wallet")
+
+    # Backward-compatible legacy experimental configs have no separate
+    # commitment phase.
+    if allocation_wallet is None:
+        return None
+
+    flow_wallets = json.loads(flow["flow_wallets_json"])
+    if allocation_wallet not in flow_wallets:
+        raise PlanError("approved allocation wallet is not a managed flow wallet")
+
+    existing = experimental_allocation_jobs(engine, flow_id)
+    if len(existing) > 1:
+        raise PlanError("experimental flow has more than one allocation commitment")
+    if existing:
+        return None
+
+    jobs = engine.list_jobs(flow_id)
+    if jobs:
+        raise PlanError("allocation commitment must be the first experimental job")
+
+    return engine.add_job(
+        flow_id,
+        {
+            "from": flow["source_wallet"],
+            "to": allocation_wallet,
+            "amount_sats": flow["initial_alloc_sats"],
+            "step": 0,
+        },
+        planned_delay_s=0,
+        generated_from={
+            "source": ALLOCATION_COMMIT_JOB_SOURCE,
+            "phase": "allocation",
+            "allocation_wallet": allocation_wallet,
+            "allocation_sats": flow["initial_alloc_sats"],
+        },
+    )
 
 
 def generate_experimental_finalization_job(
@@ -323,7 +388,7 @@ def generate_experimental_job(
             "from": decision["from"],
             "to": decision["to"],
             "amount_sats": decision["amount_sats"],
-            "step": decision_index,
+            "step": len(jobs),
         },
         planned_delay_s=decision["delay_seconds"],
         generated_from=generated_from,

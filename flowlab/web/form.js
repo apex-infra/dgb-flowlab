@@ -340,18 +340,19 @@ const whole = (text, what, min) => {
 
   function experimentalWorkers() {
     const src = $("f-src").value;
+    const stage = $("f-stage").value;
     const dst = $("f-dst").value;
-    return wallets().filter(w => w !== src && w !== dst);
+    return wallets().filter(w => w !== src && w !== stage && w !== dst);
   }
 
   function resetDefaultEdges() {
-    const src = $("f-src").value;
+    const stage = $("f-stage").value;
     const workers = experimentalWorkers();
 
     state.edges = new Set();
 
     for (const to of workers)
-      state.edges.add(edgeKey(src, to));
+      state.edges.add(edgeKey(stage, to));
 
     for (const from of workers)
       for (const to of workers)
@@ -364,11 +365,11 @@ const whole = (text, what, min) => {
 
     box.replaceChildren();
 
-    const src = $("f-src").value;
+    const stage = $("f-stage").value;
     const workers = experimentalWorkers();
 
     if (!workers.length) {
-      box.append(note("Choose at least one working wallet between the source and destination."));
+      box.append(note("Choose at least one working wallet in addition to the allocation wallet."));
       return;
     }
 
@@ -378,7 +379,7 @@ const whole = (text, what, min) => {
     table.append(h("div", "topology-corner", "FROM / TO"));
     workers.forEach(to => table.append(h("div", "topology-head mono", to)));
 
-    const froms = [src, ...workers];
+    const froms = [stage, ...workers];
 
     froms.forEach(from => {
       table.append(h("div", "topology-head mono", from));
@@ -390,12 +391,7 @@ const whole = (text, what, min) => {
 
         check.type = "checkbox";
 
-        if (from === src && to === src) {
-          check.disabled = true;
-          check.checked = false;
-        } else {
-          check.checked = state.edges.has(key);
-        }
+        check.checked = state.edges.has(key);
 
         check.onchange = () => {
           if (check.checked) state.edges.add(key);
@@ -419,9 +415,11 @@ const whole = (text, what, min) => {
 
   function buildExperimental(body, ws) {
     const src = sel("f-src", ws, ws[0]);
+    const stageDefault = ws.find(w => w !== src.value && w !== ws[ws.length - 1]) || ws[0];
+    const stage = sel("f-stage", ws, stageDefault);
     const dst = sel("f-dst", ws, ws[ws.length - 1]);
 
-    src.onchange = dst.onchange = experimentalWalletChanged;
+    src.onchange = stage.onchange = dst.onchange = experimentalWalletChanged;
 
     const topology = h("div");
     topology.id = "f-topology";
@@ -429,9 +427,10 @@ const whole = (text, what, min) => {
     const walletsBox = h("fieldset");
     walletsBox.append(
       h("legend", null, "Wallet roles"),
-      field("Source wallet", src),
+      field("Reserve / funding wallet", src),
+      field("Allocation wallet", stage),
       field("Final destination", dst),
-      note("The destination is reserved for finalization and is not part of the randomized workload.")
+      note("The reserve commits the full allocation to the allocation wallet before randomized workload begins. The reserve and destination are outside randomized routing.")
     );
 
     const workload = h("fieldset");
@@ -475,7 +474,7 @@ const whole = (text, what, min) => {
     topo.append(
       h("legend", null, "Approved topology"),
       topology,
-      note("Diagonal worker cells are self-transfers. Source → source is never permitted. The destination is excluded from experimental routing.")
+      note("The allocation wallet is the workload entry point. Diagonal worker cells are self-transfers. The reserve and destination are excluded from experimental routing.")
     );
 
     body.append(walletsBox, workload, random, topo);
@@ -486,11 +485,12 @@ const whole = (text, what, min) => {
 
   function collectExperimental() {
     const src = $("f-src").value;
+    const stage = $("f-stage").value;
     const dst = $("f-dst").value;
     const workers = experimentalWorkers();
 
-    if (src === dst)
-      throw new Error("Source and destination must be different wallets");
+    if (new Set([src, stage, dst]).size !== 3)
+      throw new Error("Reserve, allocation wallet, and destination must be different wallets");
 
     if (!workers.length)
       throw new Error("Experimental mode needs at least one working wallet");
@@ -513,15 +513,15 @@ const whole = (text, what, min) => {
 
     const transitions = [];
 
-    for (const from of [src, ...workers]) {
+    for (const from of [stage, ...workers]) {
       for (const to of workers) {
         if (state.edges.has(edgeKey(from, to)))
           transitions.push({from, to});
       }
     }
 
-    if (!transitions.some(x => x.from === src))
-      throw new Error("Allow at least one transition out of the source wallet");
+    if (!transitions.some(x => x.from === stage))
+      throw new Error("Allow at least one transition out of the allocation wallet");
 
     const seed = whole($("f-seed").value, "Seed", 0);
 
@@ -529,7 +529,8 @@ const whole = (text, what, min) => {
       flows: [{
         description: $("f-desc").value.trim() || "experimental dashboard run",
         source_wallet: src,
-        flow_wallets: workers,
+        allocation_wallet: stage,
+        flow_wallets: [stage, ...workers],
         destination_wallet: dst,
         allocation_sats: allocation,
         experimental_topology: {transitions}
@@ -564,11 +565,12 @@ const whole = (text, what, min) => {
 
   function refreshPlayWorkers() {
     const src = $("f-src").value;
+    const stage = $("f-stage").value;
     const dst = $("f-dst").value;
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
     state.workers = wallets()
-      .filter(w => w !== src && w !== dst)
+      .filter(w => w !== src && w !== stage && w !== dst)
       .map(w => ({
         name: w,
         on: keep.has(w) ? keep.get(w) : true
@@ -621,10 +623,18 @@ const whole = (text, what, min) => {
     if (maxDelay < minDelay)
       throw new Error("Maximum delay must be at least the minimum delay");
 
+    const src = $("f-src").value;
+    const stage = $("f-stage").value;
+    const dst = $("f-dst").value;
+
+    if (new Set([src, stage, dst]).size !== 3)
+      throw new Error("Reserve, allocation wallet, and destination must be different wallets");
+
     return {
-      source_wallet: $("f-src").value,
+      source_wallet: src,
+      allocation_wallet: stage,
       workers,
-      destination_wallet: $("f-dst").value,
+      destination_wallet: dst,
       allocation_sats: allocation,
       decisions: whole($("f-jobs").value, "Number of decisions", 1),
       amount_sats_min: minAmount,
@@ -656,6 +666,8 @@ const whole = (text, what, min) => {
     catalog.forEach(p => play.append(new Option(p.title, p.name)));
 
     const src = sel("f-src", ws, ws[0]);
+    const stageDefault = ws.find(w => w !== src.value && w !== ws[ws.length - 1]) || ws[0];
+    const stage = sel("f-stage", ws, stageDefault);
     const dst = sel("f-dst", ws, ws[ws.length - 1]);
 
     const workerBox = h("div", "row");
@@ -665,7 +677,8 @@ const whole = (text, what, min) => {
     roles.append(
       h("legend", null, "Play"),
       field("Strategy", play),
-      field("Source wallet", src),
+      field("Reserve / funding wallet", src),
+      field("Allocation wallet", stage),
       field("Working wallets", workerBox),
       field("Final destination", dst),
       note("Play topology is compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
@@ -703,7 +716,7 @@ const whole = (text, what, min) => {
 
     body.append(roles, workload, replay);
 
-    src.onchange = dst.onchange = () => {
+    src.onchange = stage.onchange = dst.onchange = () => {
       refreshPlayWorkers();
       refreshPreview();
     };

@@ -12,7 +12,9 @@ import json
 from .engine import EngineError, GuardFailed
 from .planner import (
     PlanError,
+    experimental_allocation_jobs,
     experimental_workload_jobs,
+    generate_experimental_allocation_job,
     generate_experimental_finalization_job,
     generate_experimental_job,
     generate_jobs,
@@ -73,6 +75,29 @@ class Executor:
         cfg = self._config_for_flow(flow)
         return bool(cfg.get("randomization", {}).get("enabled"))
 
+    def _experimental_allocation_complete(self, flow):
+        cfg = self._config_for_flow(flow)
+
+        matches = [
+            f for f in cfg["flows"]
+            if f["source_wallet"] == flow["source_wallet"]
+            and f["destination_wallet"] == flow["destination_wallet"]
+        ]
+        if len(matches) != 1:
+            raise PlanError("cannot match this flow to exactly one flow in the approved config")
+
+        if matches[0].get("allocation_wallet") is None:
+            return True
+
+        jobs = experimental_allocation_jobs(self.engine, flow["id"])
+        if len(jobs) > 1:
+            raise PlanError("experimental flow has more than one allocation commitment")
+
+        return (
+            len(jobs) == 1
+            and jobs[0]["state"] == "CONFIRMED"
+        )
+
     def _experimental_workload_complete(self, flow):
         cfg = self._config_for_flow(flow)
         workload = cfg.get("workload") or {}
@@ -98,6 +123,12 @@ class Executor:
             wallet: to_sats(self.rpc.get_balances(wallet)["mine"]["trusted"])
             for wallet in wallets
         }
+
+    def _generate_allocation_job(self, flow):
+        return generate_experimental_allocation_job(
+            self.engine,
+            flow["id"],
+        )
 
     def _generate_next_experimental_job(self, flow):
         balances = self._confirmed_balances(flow)
@@ -137,7 +168,16 @@ class Executor:
             if self._is_experimental(flow):
                 jobs = e.list_jobs(flow_id)
                 if not jobs or all(j["state"] == "CONFIRMED" for j in jobs):
-                    if not self._experimental_workload_complete(flow):
+                    if not self._experimental_allocation_complete(flow):
+                        jid = self._generate_allocation_job(flow)
+                        if jid is None:
+                            raise EngineError(
+                                "experimental allocation is incomplete but no commitment job was generated"
+                            )
+                        actions.append(
+                            f"generated allocation step {self._step(e.get_job(jid))}"
+                        )
+                    elif not self._experimental_workload_complete(flow):
                         jid = self._generate_next_experimental_job(flow)
                         actions.append(
                             f"generated experimental step {self._step(e.get_job(jid))}"
@@ -166,7 +206,9 @@ class Executor:
         elif st == "NEXT_STATE":
             jobs = e.list_jobs(flow_id)
             if self._is_experimental(flow):
-                if not self._experimental_workload_complete(flow):
+                if not self._experimental_allocation_complete(flow):
+                    target = "PLAN"
+                elif not self._experimental_workload_complete(flow):
                     target = "PLAN"
                 elif self._experimental_workers_empty(flow):
                     target = "COMPLETE"

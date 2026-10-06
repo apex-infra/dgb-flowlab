@@ -39,6 +39,7 @@ PLAY_SPECS = {
 
 _REQUIRED_PARAMS = {
     "source_wallet",
+    "allocation_wallet",
     "workers",
     "destination_wallet",
     "allocation_sats",
@@ -82,10 +83,12 @@ def _validate_params(name, params):
     _need(not missing, f"missing play parameters: {', '.join(missing)}")
 
     src = params["source_wallet"]
+    stage = params["allocation_wallet"]
     dst = params["destination_wallet"]
     workers = params["workers"]
 
     _need(isinstance(src, str) and src, "source_wallet is required")
+    _need(isinstance(stage, str) and stage, "allocation_wallet is required")
     _need(isinstance(dst, str) and dst, "destination_wallet is required")
     _need(
         isinstance(workers, list)
@@ -100,8 +103,11 @@ def _validate_params(name, params):
         + ("" if min_workers == 1 else "s"),
     )
 
-    names = [src, *workers, dst]
-    _need(len(set(names)) == len(names), "source, workers, and destination must all be distinct")
+    names = [src, stage, *workers, dst]
+    _need(
+        len(set(names)) == len(names),
+        "source, allocation wallet, workers, and destination must all be distinct",
+    )
 
     allocation = params["allocation_sats"]
     minimum = params["amount_sats_min"]
@@ -156,13 +162,14 @@ def compile_play(name, params):
     _validate_params(name, params)
 
     src = params["source_wallet"]
+    stage = params["allocation_wallet"]
     workers = list(params["workers"])
     dst = params["destination_wallet"]
 
     if name == "random_walk":
-        transitions = _random_walk_transitions(src, workers)
+        transitions = _random_walk_transitions(stage, workers)
     elif name == "ring":
-        transitions = _ring_transitions(src, workers)
+        transitions = _ring_transitions(stage, workers)
     else:
         raise PlayError(f"unknown play: {name}")
 
@@ -170,7 +177,8 @@ def compile_play(name, params):
         "flows": [{
             "description": PLAY_SPECS[name]["title"],
             "source_wallet": src,
-            "flow_wallets": workers,
+            "allocation_wallet": stage,
+            "flow_wallets": [stage, *workers],
             "destination_wallet": dst,
             "allocation_sats": params["allocation_sats"],
             "experimental_topology": {

@@ -6,6 +6,7 @@ from flowlab.plays import PlayError, compile_play, get_play_spec, list_plays
 
 BASE = {
     "source_wallet": "flab_source",
+    "allocation_wallet": "flab_stage",
     "workers": ["flab_a", "flab_b", "flab_c"],
     "destination_wallet": "flab_dest",
     "allocation_sats": 500_000_000,
@@ -46,15 +47,19 @@ class PlayCompilerTests(unittest.TestCase):
 
         flow = cfg["flows"][0]
         self.assertEqual(flow["source_wallet"], "flab_source")
-        self.assertEqual(flow["flow_wallets"], ["flab_a", "flab_b", "flab_c"])
+        self.assertEqual(flow["allocation_wallet"], "flab_stage")
+        self.assertEqual(
+            flow["flow_wallets"],
+            ["flab_stage", "flab_a", "flab_b", "flab_c"],
+        )
         self.assertEqual(flow["destination_wallet"], "flab_dest")
 
         self.assertEqual(
             flow["experimental_topology"]["transitions"],
             [
-                {"from": "flab_source", "to": "flab_a"},
-                {"from": "flab_source", "to": "flab_b"},
-                {"from": "flab_source", "to": "flab_c"},
+                {"from": "flab_stage", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_b"},
+                {"from": "flab_stage", "to": "flab_c"},
                 {"from": "flab_a", "to": "flab_b"},
                 {"from": "flab_a", "to": "flab_c"},
                 {"from": "flab_b", "to": "flab_a"},
@@ -83,7 +88,7 @@ class PlayCompilerTests(unittest.TestCase):
         self.assertEqual(
             transitions,
             [
-                {"from": "flab_source", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_a"},
                 {"from": "flab_a", "to": "flab_b"},
                 {"from": "flab_b", "to": "flab_c"},
                 {"from": "flab_c", "to": "flab_a"},

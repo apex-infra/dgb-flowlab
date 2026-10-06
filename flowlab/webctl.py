@@ -31,6 +31,7 @@ FLOW_KEYS = {
     "source_wallet",
     "flow_wallets",
     "destination_wallet",
+    "allocation_wallet",
     "allocation_sats",
     "repeat",
     "transfers",
