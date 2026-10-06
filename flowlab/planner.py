@@ -33,7 +33,8 @@ def transfers_for(engine, flow_id):
     return transfers
 
 
-def experimental_decision(engine, flow_id, decision_index, balances_sats=None):
+def experimental_decision(
+        engine, flow_id, decision_index, balances_sats=None, fee_reserve_sats=0):
     """Return one reproducible experimental decision.
 
     balances_sats, when supplied, is a caller-provided snapshot of confirmed
@@ -42,6 +43,9 @@ def experimental_decision(engine, flow_id, decision_index, balances_sats=None):
     """
     if not isinstance(decision_index, int) or isinstance(decision_index, bool) or decision_index < 0:
         raise PlanError("decision_index must be a non-negative integer")
+    if (not isinstance(fee_reserve_sats, int) or isinstance(fee_reserve_sats, bool)
+            or fee_reserve_sats < 0):
+        raise PlanError("fee_reserve_sats must be a non-negative integer")
 
     flow = engine.get_flow(flow_id)
     cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
@@ -90,7 +94,7 @@ def experimental_decision(engine, flow_id, decision_index, balances_sats=None):
         minimum = workload["amount_sats_min"]
         eligible = [
             t for t in transitions
-            if balances_sats.get(t["from"], 0) >= minimum
+            if balances_sats.get(t["from"], 0) - fee_reserve_sats >= minimum
         ]
 
     if not eligible:
@@ -101,7 +105,10 @@ def experimental_decision(engine, flow_id, decision_index, balances_sats=None):
     available = (
         workload["amount_sats_max"]
         if balances_sats is None
-        else min(workload["amount_sats_max"], balances_sats.get(route["from"], 0))
+        else min(
+            workload["amount_sats_max"],
+            balances_sats.get(route["from"], 0) - fee_reserve_sats,
+        )
     )
     if available < workload["amount_sats_min"]:
         raise PlanError("selected route cannot satisfy the approved minimum amount")
@@ -132,6 +139,7 @@ def experimental_decision(engine, flow_id, decision_index, balances_sats=None):
                 None if balances_sats is None
                 else balances_sats.get(route["from"], 0)
             ),
+            "fee_reserve_sats": fee_reserve_sats,
         },
     }
 

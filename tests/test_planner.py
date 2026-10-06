@@ -215,6 +215,56 @@ class ExperimentalDecisionTests(PlannerBase):
         with self.assertRaises(PlanError):
             experimental_decision(self.e, flow, 0, balances)
 
+    def test_fee_reserve_reduces_generated_amount_ceiling(self):
+        _, flow = self.experimental_flow(seed=810)
+
+        balances = {
+            "w1_source": 150_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        for i in range(30):
+            d = experimental_decision(
+                self.e, flow, i, balances, fee_reserve_sats=10_000_000
+            )
+            self.assertLessEqual(d["amount_sats"], 140_000_000)
+            self.assertEqual(
+                d["generated_from"]["fee_reserve_sats"],
+                10_000_000,
+            )
+
+    def test_route_is_ineligible_when_only_fee_reserve_remains(self):
+        _, flow = self.experimental_flow(seed=820)
+
+        balances = {
+            "w1_source": 109_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        with self.assertRaises(PlanError):
+            experimental_decision(
+                self.e,
+                flow,
+                0,
+                balances,
+                fee_reserve_sats=10_000_000,
+            )
+
+    def test_invalid_fee_reserve_is_refused(self):
+        _, flow = self.experimental_flow(seed=830)
+
+        with self.assertRaises(PlanError):
+            experimental_decision(
+                self.e,
+                flow,
+                0,
+                {"w1_source": 500_000_000},
+                fee_reserve_sats=-1,
+            )
+
+
     def test_balance_snapshot_metadata_is_recorded(self):
         _, flow = self.experimental_flow(seed=700)
 
