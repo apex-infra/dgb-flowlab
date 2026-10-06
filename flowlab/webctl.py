@@ -92,6 +92,10 @@ class Controller:
         if extra:
             raise ControlError("not supported here: " + ", ".join(sorted(extra)))
         cfg = validate(cfg)
+        for fl in cfg["flows"]:
+            ts = fl.get("transfers") or []
+            if not ts or ts[-1]["to"] != fl["destination_wallet"]:
+                raise ControlError("the last hop must end in the destination wallet")
 
         def go(e):
             exp = e.create_experiment(_text(body, "description", required=False, limit=200))

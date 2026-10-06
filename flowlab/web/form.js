@@ -23,7 +23,31 @@ const whole = (text, what, min) => {
     options.forEach(o => s.append(new Option(o, o))); if (value) s.value = value; return s; };
   const field = (label, control) => { const d = h("div", "field"); d.append(h("span", null, label), control); return d; };
   const num = (id, value, width) => { const i = h("input"); i.id = id; i.value = value; i.style.maxWidth = width || "140px"; return i; };
-  let built = "";
+  let built = "", middles = [];
+
+  // Straight path: source -> the wallets you pick, in the order shown -> destination.
+  // The first hop sends the amount you enter; every later hop sends that wallet's whole balance minus the fee.
+  function path() { return [$("f-src").value, ...middles.filter(m => m.on).map(m => m.name), $("f-dst").value]; }
+
+  function drawMiddles() {
+    const box = $("f-mids"); box.replaceChildren();
+    middles.forEach((m, i) => {
+      const row = h("div", "midrow"), l = h("label"), c = h("input");
+      c.type = "checkbox"; c.checked = m.on; c.onchange = () => { m.on = c.checked; drawMiddles(); refresh(); };
+      l.append(c, document.createTextNode(m.name));
+      const up = h("button", null, "Up"), dn = h("button", null, "Down");
+      up.type = dn.type = "button"; up.disabled = i === 0; dn.disabled = i === middles.length - 1;
+      up.onclick = () => { [middles[i - 1], middles[i]] = [middles[i], middles[i - 1]]; drawMiddles(); refresh(); };
+      dn.onclick = () => { [middles[i + 1], middles[i]] = [middles[i], middles[i + 1]]; drawMiddles(); refresh(); };
+      row.append(l, up, dn); box.append(row);
+    });
+  }
+
+  function others() {
+    const src = $("f-src").value, dst = $("f-dst").value, keep = new Map(middles.map(m => [m.name, m.on]));
+    middles = (window.flowWallets || []).filter(w => w !== src && w !== dst).map(w => ({name: w, on: keep.has(w) ? keep.get(w) : true}));
+    drawMiddles();
+  }
 
   function build() {
     const wallets = window.flowWallets || [];
@@ -31,35 +55,29 @@ const whole = (text, what, min) => {
     built = wallets.join(); form.replaceChildren();
     const desc = h("input"); desc.id = "f-desc"; desc.placeholder = "what is this run for?";
     const src = sel("f-src", wallets, wallets[0]), dst = sel("f-dst", wallets, wallets[wallets.length - 1]);
+    src.onchange = dst.onchange = () => { others(); refresh(); };
     const mids = h("div"); mids.id = "f-mids";
-    wallets.forEach(w => { const l = h("label"), c = h("input"); c.type = "checkbox"; c.value = w;
-      c.checked = w !== wallets[0] && w !== wallets[wallets.length - 1]; l.append(c, document.createTextNode(w)); mids.append(l); });
-    const wal = h("fieldset"); wal.append(h("legend", null, "Wallets"), field("Source", src), field("Flow wallets in between", mids), field("Destination", dst),
-      field("Allocation from the source (DGB)", num("f-alloc", "3")), field("Confirmations required", num("f-conf", "2", "80px")));
+    const route = h("div", "route mono"); route.id = "f-route";
+    const wal = h("fieldset"); wal.append(h("legend", null, "Route"), field("Starts at", src), field("Passes through", mids),
+      field("Ends at (always)", dst), field("Path", route));
 
-    const mode = h("fieldset"); mode.append(h("legend", null, "Hops"));
-    const rb = (v, t, on) => { const l = h("label"), r = h("input"); r.type = "radio"; r.name = "mode"; r.value = v; r.checked = on;
-      r.onchange = showMode; l.append(r, document.createTextNode(t)); return l; };
-    mode.append(h("div", "row"));
-    mode.lastChild.append(rb("repeat", "Repeat around a cycle", true), rb("explicit", "List every hop", false));
-    const rep = h("div"); rep.id = "f-repeat";
-    const cyc = h("input"); cyc.id = "f-cycle"; cyc.value = [wallets[0], ...wallets.slice(1, -1)].join(", ");
-    const kind = sel("f-kind", ["same amount every hop", "step down each hop", "other wallets send their whole balance"]);
-    rep.append(field("Cycle (starts at the source)", cyc), field("Number of hops", num("f-count", "3", "90px")),
-      field("Amount per hop (DGB)", num("f-amt", "2")), field("Delay between hops (seconds)", num("f-delay", "60", "110px")),
-      field("Amounts", kind), field("Step down (DGB)", num("f-step", "0.02")));
-    const exp = h("div"); exp.id = "f-explicit"; exp.hidden = true;
+    const amt = h("fieldset"); amt.append(h("legend", null, "Amounts and timing"),
+      field("Amount to send from the source (DGB)", num("f-amt", "2")),
+      field("Wait between hops (seconds)", num("f-delay", "60", "110px")),
+      field("Confirmations required", num("f-conf", "2", "80px")),
+      h("div", "mute", "After the first hop, each wallet sends everything it holds minus the fee, so no small leftovers stay behind and the funds end in the destination."));
+
+    const adv = h("details"); adv.id = "f-adv"; adv.append(h("summary", null, "Advanced: list every hop yourself"));
     const rows = h("div"); rows.id = "f-rows"; const add = h("button", null, "Add hop"); add.type = "button";
     add.onclick = () => addRow(rows, wallets);
-    exp.append(rows, add, h("div", "mute", "Amount is in DGB, or the word all for the wallet's whole balance minus the fee. Not allowed out of the source."));
+    const use = h("label"), uc = h("input"); uc.type = "checkbox"; uc.id = "f-useadv"; use.append(uc, document.createTextNode("Use this hop list instead of the route above"));
+    adv.append(use, rows, add, h("div", "mute", "Amount is in DGB, or the word all for the wallet's whole balance minus the fee (not allowed out of the source). The last hop must end in the destination; the server refuses anything else."));
     addRow(rows, wallets, wallets[0], wallets[1] || wallets[0], "2");
-    mode.append(rep, exp);
-    kind.onchange = () => { $("f-step").parentNode.hidden = kind.value !== "step down each hop"; };
 
     const go = h("button", "primary", "Create and review"); go.type = "submit";
     const prev = h("details"); prev.append(h("summary", null, "Config JSON"), h("pre", "mono")); prev.lastChild.id = "f-json";
-    form.append(field("Description", desc), wal, mode, go, prev);
-    kind.onchange();
+    form.append(field("Description", desc), wal, amt, adv, go, prev);
+    others(); refresh();
   }
 
   function addRow(rows, wallets, from, to, amount) {
@@ -70,34 +88,29 @@ const whole = (text, what, min) => {
     r.append(f, t, a, d, x); rows.append(r);
   }
 
-  function showMode() {
-    const m = form.querySelector("input[name=mode]:checked").value;
-    $("f-repeat").hidden = m !== "repeat"; $("f-explicit").hidden = m !== "explicit";
-  }
+  function refresh() { const r = $("f-route"); if (r) r.textContent = path().join("  ->  "); }
 
   function collect() {
     const src = $("f-src").value, dst = $("f-dst").value;
-    const mids = [...$("f-mids").querySelectorAll("input:checked")].map(c => c.value);
-    const flow = {description: $("f-desc").value.trim() || "dashboard run", source_wallet: src, flow_wallets: mids,
-      destination_wallet: dst, allocation_sats: toSats($("f-alloc").value, "Allocation")};
-    if (form.querySelector("input[name=mode]:checked").value === "repeat") {
-      const kind = $("f-kind").value;
-      const rep = {cycle: $("f-cycle").value.split(",").map(s => s.trim()).filter(Boolean), count: whole($("f-count").value, "Number of hops", 1),
-        amount_sats: toSats($("f-amt").value, "Amount"), delay_seconds: whole($("f-delay").value, "Delay", 0)};
-      if (kind === "step down each hop") rep.step_down_sats = toSats($("f-step").value, "Step down");
-      if (kind.startsWith("other wallets")) rep.sweep = true;
-      flow.repeat = rep;
-    } else {
+    if (src === dst) throw new Error("Source and destination must be different wallets");
+    const delay = whole($("f-delay").value, "Wait between hops", 0), amount = toSats($("f-amt").value, "Amount");
+    const flow = {description: $("f-desc").value.trim() || "dashboard run", source_wallet: src,
+      flow_wallets: middles.filter(m => m.on).map(m => m.name), destination_wallet: dst, allocation_sats: amount};
+    if ($("f-useadv").checked) {
       flow.transfers = [...$("f-rows").children].map((r, i) => { const [f, t, a, d] = r.children, n = "Hop " + (i + 1);
         return {from: f.value, to: t.value, amount_sats: a.value.trim().toLowerCase() === "all" ? "all" : toSats(a.value, n + " amount"),
           delay_seconds: whole(d.value, n + " delay", 0)}; });
       if (!flow.transfers.length) throw new Error("Add at least one hop");
+      flow.allocation_sats = Math.max(amount, ...flow.transfers.filter(t => t.from === src && t.amount_sats !== "all").map(t => t.amount_sats));
+    } else {
+      const p = path();
+      flow.transfers = p.slice(0, -1).map((from, i) => ({from, to: p[i + 1], amount_sats: i === 0 ? amount : "all", delay_seconds: delay}));
     }
     return {flows: [flow], confirmations_required: whole($("f-conf").value, "Confirmations", 1),
       fee_policy: {type: "minimum"}, address_policy: "new"};
   }
 
-  form.addEventListener("input", () => { try { $("f-json").textContent = JSON.stringify(collect(), null, 2); }
+  form.addEventListener("input", () => { refresh(); try { $("f-json").textContent = JSON.stringify(collect(), null, 2); }
     catch (err) { $("f-json").textContent = String(err.message); } });
   form.addEventListener("submit", async ev => {
     ev.preventDefault();
