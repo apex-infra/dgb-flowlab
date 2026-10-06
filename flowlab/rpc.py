@@ -81,6 +81,11 @@ class RpcClient:
         self._timeout = timeout
         self._wallets = frozenset(allowed_wallets)
 
+    @property
+    def allowed_wallets(self):
+        """Immutable wallet allowlist configured for this RPC client."""
+        return self._wallets
+
     def __repr__(self):
         return f"<RpcClient {self._url} wallets={sorted(self._wallets)}>"
 

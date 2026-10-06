@@ -98,7 +98,18 @@ class VerifierTests(unittest.TestCase):
     def test_all_clear(self):
         self.assertEqual(evaluate(self.v, {}, FLOW, "start"), [])
 
-    def test_extra_wallet_loaded_fails(self):
+    def test_allowlisted_extra_wallet_loaded_is_allowed(self):
+        self.c = RpcClient(
+            "u", "p", self.n.port,
+            allowed_wallets=["flab_source", "flab_a", "flab_b"],
+        )
+        self.v = NodeVerifier(self.c)
+        self.n.handlers["listwallets"] = lambda: [
+            "flab_source", "flab_a", "flab_b"
+        ]
+        self.assertEqual(evaluate(self.v, {}, FLOW, "start"), [])
+
+    def test_non_allowlisted_extra_wallet_loaded_fails(self):
         self.n.handlers["listwallets"] = lambda: ["flab_source", "flab_a", "pool"]
         self.assertTrue(any("wallet" in f for f in evaluate(self.v, {}, FLOW, "start")))
 

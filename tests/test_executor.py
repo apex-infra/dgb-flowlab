@@ -474,7 +474,7 @@ class NodeVerifierIntegration(ExecBase):
         self.assertTrue(self.run_all()["done"])
         self.assertEqual(self.e.get_experiment(self.exp)["state"], "COMPLETE")
 
-    def test_extra_wallet_loaded_blocks_the_run(self):
+    def test_non_allowlisted_wallet_loaded_blocks_the_run(self):
         self.chain.wallets.append("pool")
         r = self.x.tick(self.exp)
         self.assertIn("verification failed", r["blocked"])

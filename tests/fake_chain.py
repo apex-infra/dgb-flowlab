@@ -11,6 +11,7 @@ SATS = Decimal(10) ** 8
 class FakeChain:
     def __init__(self, wallets):
         self.wallets = list(wallets)
+        self.allowed_wallets = frozenset(wallets)
         self.height = 100
         self.owner, self.utxos, self.txs, self.raw = {}, {}, {}, {}
         self.n = 0

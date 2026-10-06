@@ -18,6 +18,7 @@ class NodeVerifier(Verifier):
         self.rpc = rpc
         self.known_txids = known_txids or (lambda flow: [])
         self.min_peers = min_peers
+        self.allowed_wallets = frozenset(getattr(rpc, "allowed_wallets", ()))
 
     def verify(self, experiment, flow, action):
         checks = {}
@@ -53,9 +54,12 @@ class NodeVerifier(Verifier):
         want = self._wallets(flow)
         if not want:
             return (True, "no flow")
-        extra = sorted(loaded - set(want))
+        # Required flow wallets must be loaded. Additional loaded wallets are
+        # permitted only when they belong to FlowLab's configured RPC allowlist.
+        allowed = self.allowed_wallets or set(want)
+        extra = sorted(loaded - set(allowed))
         if extra:
-            return (False, f"unexpected wallets loaded: {extra}")
+            return (False, f"non-allowlisted wallets loaded: {extra}")
         missing = [w for w in want if w not in loaded]
         if missing:
             return (False, f"wallets not loaded: {missing}")
