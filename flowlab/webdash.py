@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import dashboard
+from .plays import list_plays
 from .webctl import Controller
 
 WEB = Path(__file__).with_name("web")
@@ -122,7 +123,7 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                     keep = ("id", "description", "state", "state_reason", "started_at", "completed_at")
                     snap["exp"] = {k: snap["exp"][k] for k in keep}
                 return self._json(200, {"snapshot": snap, "extras": extras, "balances": current_balances(),
-                                        "wallets": list(wallets), "control": control,
+                                        "wallets": list(wallets), "plays": list_plays(), "control": control,
                                         "runner": {"active": ctl.active(), "exp": ctl.exp},
                                         "log": list(ctl.log), "server_time": now.isoformat()})
             if path == "/api/export":

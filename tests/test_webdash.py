@@ -360,6 +360,95 @@ class WebControlTests(WebBase):
         self.assertIn("hash", out)
         self.assertIn("randomization: ENABLED", out["text"])
 
+    def test_snapshot_exposes_play_catalog(self):
+        self.up()
+
+        data = self.snap()
+
+        self.assertEqual(
+            [p["name"] for p in data["plays"]],
+            ["random_walk", "ring"],
+        )
+
+    def test_compile_play_returns_config_without_creating_experiment(self):
+        self.up()
+
+        # Establish a real database first. Compiling a play must not create
+        # another experiment or otherwise mutate persistent state.
+        s0, baseline = self.do("new", {
+            "config": cfg_experimental(),
+            "description": "baseline",
+        })
+        self.assertEqual(s0, 200, baseline)
+
+        before = len(self.snap()["extras"]["experiments"])
+
+        s, out = self.do("compile_play", {
+            "play": "ring",
+            "params": {
+                "source_wallet": "flab_source",
+                "workers": ["flab_a", "flab_b"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(out["play"]["name"], "ring")
+        self.assertNotIn("play", out["config"])
+        self.assertEqual(
+            out["config"]["flows"][0]["experimental_topology"]["transitions"],
+            [
+                {"from": "flab_source", "to": "flab_a"},
+                {"from": "flab_a", "to": "flab_b"},
+                {"from": "flab_b", "to": "flab_a"},
+            ],
+        )
+
+        after = len(self.snap()["extras"]["experiments"])
+        self.assertEqual(after, before)
+
+    def test_compile_play_refuses_wallet_outside_dashboard_allowlist(self):
+        self.up()
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "workers": ["flab_a", "not_a_flowlab_wallet"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn("wallet", out["error"].lower())
+
+    def test_compile_play_refuses_unknown_play(self):
+        self.up()
+
+        s, out = self.do("compile_play", {
+            "play": "not_real",
+            "params": {},
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn("unknown play", out["error"])
+
     def test_experimental_config_does_not_require_destination_as_last_workload_hop(self):
         self.up()
 

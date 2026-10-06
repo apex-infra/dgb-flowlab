@@ -13,6 +13,7 @@ from collections import deque
 
 from .cli import _open, _run
 from .config_schema import validate
+from .plays import compile_play, get_play_spec
 
 FINISHED = ("COMPLETE", "IDLE", "ABORTED")
 # The dashboard accepts only the config fields it knows how to present and review.
@@ -59,9 +60,19 @@ class Controller:
         self._lock, self._halt = threading.Lock(), threading.Event()
         self._thread, self.exp = None, None
         self.log = deque(maxlen=300)
-        self.actions = {"review": self.review, "new": self.new, "approve": self.approve, "run": self.run,
-                        "stop": self.stop, "halt": self.halt, "clear_stop": self.clear_stop, "resume": self.resume,
-                        "recover": self.recover, "resolve": self.resolve}
+        self.actions = {
+            "review": self.review,
+            "new": self.new,
+            "compile_play": self.compile_play,
+            "approve": self.approve,
+            "run": self.run,
+            "stop": self.stop,
+            "halt": self.halt,
+            "clear_stop": self.clear_stop,
+            "resume": self.resume,
+            "recover": self.recover,
+            "resolve": self.resolve,
+        }
 
     # ----------------------------------------------------------------- plumbing
     def say(self, line):
@@ -96,6 +107,34 @@ class Controller:
         exp = _text(body, "exp")
         return self._with_engine(lambda e: {"exp": exp, "text": e.review(exp)["text"],
                                             "hash": e.get_experiment(exp)["config_hash"]})
+
+    def compile_play(self, body):
+        name = _text(body, "play", limit=64)
+        params = body.get("params")
+        if not isinstance(params, dict):
+            raise ControlError("'params' must be an object")
+
+        cfg = compile_play(name, params)
+
+        # A dashboard play may only reference wallets configured for this
+        # FlowLab instance. The play compiler itself stays environment-agnostic.
+        used = set()
+        for fl in cfg["flows"]:
+            used.add(fl["source_wallet"])
+            used.update(fl["flow_wallets"])
+            used.add(fl["destination_wallet"])
+
+        outside = sorted(used - set(self.wallets))
+        if outside:
+            raise ControlError(
+                "play references wallet(s) outside the dashboard allowlist: "
+                + ", ".join(outside)
+            )
+
+        return {
+            "play": get_play_spec(name),
+            "config": cfg,
+        }
 
     def new(self, body):
         cfg = body.get("config")
