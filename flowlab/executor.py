@@ -12,6 +12,8 @@ import json
 from .engine import EngineError, GuardFailed
 from .planner import (
     PlanError,
+    experimental_workload_jobs,
+    generate_experimental_finalization_job,
     generate_experimental_job,
     generate_jobs,
     next_due,
@@ -71,16 +73,21 @@ class Executor:
         cfg = self._config_for_flow(flow)
         return bool(cfg.get("randomization", {}).get("enabled"))
 
-    def _experimental_complete(self, flow):
+    def _experimental_workload_complete(self, flow):
         cfg = self._config_for_flow(flow)
         workload = cfg.get("workload") or {}
         if workload.get("mode") != "count":
             raise PlanError("executor v1 currently supports count experimental workloads only")
-        jobs = self.engine.list_jobs(flow["id"])
+        jobs = experimental_workload_jobs(self.engine, flow["id"])
         return (
             len(jobs) >= workload["jobs"]
             and all(j["state"] == "CONFIRMED" for j in jobs)
         )
+
+    def _experimental_workers_empty(self, flow):
+        balances = self._confirmed_balances(flow)
+        workers = json.loads(flow["flow_wallets_json"])
+        return all(balances.get(worker, 0) == 0 for worker in workers)
 
     def _confirmed_balances(self, flow):
         wallets = [
@@ -96,6 +103,16 @@ class Executor:
         balances = self._confirmed_balances(flow)
         fee_reserve = self.builder.planning_fee_reserve_sats()
         return generate_experimental_job(
+            self.engine,
+            flow["id"],
+            balances,
+            fee_reserve_sats=fee_reserve,
+        )
+
+    def _generate_next_finalization_job(self, flow):
+        balances = self._confirmed_balances(flow)
+        fee_reserve = self.builder.planning_fee_reserve_sats()
+        return generate_experimental_finalization_job(
             self.engine,
             flow["id"],
             balances,
@@ -120,10 +137,19 @@ class Executor:
             if self._is_experimental(flow):
                 jobs = e.list_jobs(flow_id)
                 if not jobs or all(j["state"] == "CONFIRMED" for j in jobs):
-                    if not self._experimental_complete(flow):
+                    if not self._experimental_workload_complete(flow):
                         jid = self._generate_next_experimental_job(flow)
                         actions.append(
                             f"generated experimental step {self._step(e.get_job(jid))}"
+                        )
+                    else:
+                        jid = self._generate_next_finalization_job(flow)
+                        if jid is None:
+                            raise EngineError(
+                                "experimental finalization entered PLAN with no worker to sweep"
+                            )
+                        actions.append(
+                            f"generated finalization step {self._step(e.get_job(jid))}"
                         )
             r = next_due(e, flow_id)
             if r["job"]:
@@ -140,7 +166,12 @@ class Executor:
         elif st == "NEXT_STATE":
             jobs = e.list_jobs(flow_id)
             if self._is_experimental(flow):
-                target = "COMPLETE" if self._experimental_complete(flow) else "PLAN"
+                if not self._experimental_workload_complete(flow):
+                    target = "PLAN"
+                elif self._experimental_workers_empty(flow):
+                    target = "COMPLETE"
+                else:
+                    target = "PLAN"
             else:
                 target = "COMPLETE" if all(j["state"] == "CONFIRMED" for j in jobs) else "PLAN"
             e.advance_flow(flow_id, target)

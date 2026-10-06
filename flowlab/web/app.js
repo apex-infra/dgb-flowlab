@@ -166,7 +166,13 @@ function renderExperimental(data) {
   }
 
   const jobs = s.flows.flatMap(f => f.jobs);
-  const current = [...jobs].reverse().find(j => j.generated);
+  const decisions = jobs.filter(
+    j => j.generated && Number.isInteger(j.generated.decision_index)
+  );
+  const finalizations = jobs.filter(
+    j => j.generated && j.generated.phase === "finalization"
+  );
+  const current = decisions.length ? decisions[decisions.length - 1] : null;
   const rnd = s.randomization || {};
 
   box.replaceChildren();
@@ -191,7 +197,7 @@ function renderExperimental(data) {
   if (!current) {
     grid.append(
       item("Approved workload", String(s.target_jobs || "-") + " decisions"),
-      item("Generated", String(jobs.length)),
+      item("Generated", String(decisions.length)),
       item("Current decision", "not generated yet")
     );
     box.append(grid);
@@ -211,7 +217,14 @@ function renderExperimental(data) {
     item("Source budget used", g.source_budget_used_sats != null ? dgb(g.source_budget_used_sats) + " DGB" : "-"),
     item("Source budget remaining", g.source_budget_remaining_sats != null ? dgb(g.source_budget_remaining_sats) + " DGB" : "-"),
     item("Fee reserve", g.fee_reserve_sats != null ? dgb(g.fee_reserve_sats) + " DGB" : "-"),
-    item("Generator", "v" + (g.generator_version ?? "-"))
+    item("Generator", "v" + (g.generator_version ?? "-")),
+    item(
+      "Finalization",
+      finalizations.length
+        ? String(finalizations.filter(j => j.state === "CONFIRMED").length)
+          + " / " + String(finalizations.length) + " sweeps confirmed"
+        : "pending"
+    )
   );
 
   box.append(grid);

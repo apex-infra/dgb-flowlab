@@ -33,6 +33,8 @@ SAFE_GENERATED_KEYS = {
     "balance_snapshot_sats",
     "source_budget_used_sats",
     "source_budget_remaining_sats",
+    "phase",
+    "worker",
 }
 
 

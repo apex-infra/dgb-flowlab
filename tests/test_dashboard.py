@@ -94,14 +94,25 @@ class DashboardTests(DashBase):
         after = snapshot(self.db, exp)
         jobs = after["flows"][0]["jobs"]
 
-        self.assertEqual(len(jobs), EXP_CFG["workload"]["jobs"])
         self.assertTrue(all(j["generated"] for j in jobs))
+
+        decisions = [
+            j for j in jobs
+            if isinstance(j["generated"].get("decision_index"), int)
+        ]
+        finalizations = [
+            j for j in jobs
+            if j["generated"].get("phase") == "finalization"
+        ]
+
+        self.assertEqual(len(decisions), EXP_CFG["workload"]["jobs"])
         self.assertEqual(
-            [j["generated"]["decision_index"] for j in jobs],
+            [j["generated"]["decision_index"] for j in decisions],
             list(range(EXP_CFG["workload"]["jobs"])),
         )
+        self.assertGreaterEqual(len(finalizations), 1)
 
-        for job in jobs:
+        for job in decisions:
             generated = job["generated"]
             self.assertIn("generator_version", generated)
             self.assertIn("model", generated)
@@ -109,6 +120,16 @@ class DashboardTests(DashBase):
             self.assertIn("balance_snapshot_sats", generated)
             self.assertIn("fee_reserve_sats", generated)
             self.assertIn("delay_s", job)
+
+        for job in finalizations:
+            self.assertEqual(
+                job["generated"]["source"],
+                "experimental finalization",
+            )
+            self.assertIn(job["generated"]["worker"], ("flab_a", "flab_b"))
+
+        for job in jobs:
+            generated = job["generated"]
 
             # Snapshot exposure is explicitly whitelisted.
             self.assertLessEqual(set(generated), {
@@ -124,6 +145,8 @@ class DashboardTests(DashBase):
                 "balance_snapshot_sats",
                 "source_budget_used_sats",
                 "source_budget_remaining_sats",
+                "phase",
+                "worker",
             })
 
     def test_deterministic_snapshot_reports_deterministic_mode(self):

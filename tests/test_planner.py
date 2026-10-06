@@ -461,6 +461,56 @@ class ExperimentalJobTests(ExperimentalDecisionTests):
             self.e.advance_flow(flow, "NEXT_STATE")
             self.e.advance_flow(flow, "PLAN")
 
+    def test_finalization_job_does_not_advance_decision_index(self):
+        _, flow = self.experimental_flow(seed=9004)
+        balances = self.balances()
+
+        first = generate_experimental_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=0,
+        )
+        self.assertEqual(
+            json.loads(self.e.get_job(first)["generated_from_json"])["decision_index"],
+            0,
+        )
+        self.confirm(flow, first, 70)
+
+        cleanup = self.e.add_job(
+            flow,
+            {
+                "from": "w2_flowA",
+                "to": "w4_dest",
+                "amount_sats": "all",
+                "step": 99,
+            },
+            planned_delay_s=0,
+            generated_from={
+                "source": "experimental finalization",
+                "phase": "finalization",
+                "worker": "w2_flowA",
+            },
+            depends_on=[first],
+        )
+        self.confirm(flow, cleanup, 71)
+
+        second = generate_experimental_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=0,
+        )
+        generated = json.loads(
+            self.e.get_job(second)["generated_from_json"]
+        )
+
+        self.assertEqual(generated["decision_index"], 1)
+        self.assertEqual(
+            generated["source"],
+            "seeded experimental generator",
+        )
+
     def test_second_job_requires_first_to_be_confirmed(self):
         _, flow = self.experimental_flow(seed=9002)
 

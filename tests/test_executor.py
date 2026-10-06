@@ -304,15 +304,45 @@ class ExperimentalRunTests(ExecBase):
         flow = self.e.list_flows(self.exp)[0]
         jobs = self.e.list_jobs(flow["id"])
 
-        self.assertEqual(len(jobs), 4)
-        self.assertEqual(len(self.sent()), 4)
         self.assertTrue(all(j["state"] == "CONFIRMED" for j in jobs))
 
-        indexes = [
-            json.loads(j["generated_from_json"])["decision_index"]
+        generated = [
+            (j, json.loads(j["generated_from_json"]))
             for j in jobs
         ]
-        self.assertEqual(indexes, [0, 1, 2, 3])
+        decisions = [
+            (j, meta)
+            for j, meta in generated
+            if meta.get("source") == "seeded experimental generator"
+        ]
+        finalizations = [
+            (j, meta)
+            for j, meta in generated
+            if meta.get("source") == "experimental finalization"
+        ]
+
+        self.assertEqual(len(decisions), 4)
+        self.assertEqual(
+            [meta["decision_index"] for _, meta in decisions],
+            [0, 1, 2, 3],
+        )
+        self.assertGreaterEqual(len(finalizations), 1)
+        self.assertLessEqual(len(finalizations), 2)
+        self.assertEqual(len(self.sent()), len(jobs))
+
+        flow_wallets = json.loads(flow["flow_wallets_json"])
+        for job, meta in finalizations:
+            plan = json.loads(job["planned_json"])
+            self.assertEqual(meta["phase"], "finalization")
+            self.assertIn(plan["from"], flow_wallets)
+            self.assertEqual(plan["to"], flow["destination_wallet"])
+            self.assertEqual(plan["amount_sats"], "all")
+
+        for worker in flow_wallets:
+            self.assertEqual(
+                self.chain.get_balances(worker)["mine"]["trusted"],
+                0,
+            )
 
     def test_only_one_experimental_job_exists_before_first_confirmation(self):
         self.x.tick(self.exp)      # START -> PLAN

@@ -152,7 +152,7 @@ def experimental_decision(
         "amount_sats": amount,
         "delay_seconds": delay,
         "generated_from": {
-            "source": "seeded experimental generator",
+            "source": EXPERIMENTAL_JOB_SOURCE,
             "generator_version": GENERATOR_VERSION,
             "model": rnd["model"],
             "seed": rnd["seed"],
@@ -167,6 +167,97 @@ def experimental_decision(
             "source_budget_remaining_sats": source_budget_remaining_sats,
         },
     }
+
+
+EXPERIMENTAL_JOB_SOURCE = "seeded experimental generator"
+FINALIZATION_JOB_SOURCE = "experimental finalization"
+
+
+def _generated_source(job):
+    return json.loads(job["generated_from_json"] or "{}").get("source")
+
+
+def experimental_workload_jobs(engine, flow_id):
+    """Only seeded workload jobs count toward the approved decision total."""
+    return [
+        job for job in engine.list_jobs(flow_id)
+        if _generated_source(job) == EXPERIMENTAL_JOB_SOURCE
+    ]
+
+
+def experimental_finalization_jobs(engine, flow_id):
+    return [
+        job for job in engine.list_jobs(flow_id)
+        if _generated_source(job) == FINALIZATION_JOB_SOURCE
+    ]
+
+
+def generate_experimental_finalization_job(
+        engine, flow_id, balances_sats, fee_reserve_sats=0):
+    """Persist the next approved worker -> destination sweep, if one is needed."""
+    if (not isinstance(fee_reserve_sats, int) or isinstance(fee_reserve_sats, bool)
+            or fee_reserve_sats < 0):
+        raise PlanError("fee_reserve_sats must be a non-negative integer")
+
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
+
+    finalization = cfg.get("finalization") or {}
+    if finalization.get("mode") != "sweep_workers_to_destination":
+        raise PlanError("approved experimental finalization mode is not supported")
+
+    jobs = engine.list_jobs(flow_id)
+    if any(j["state"] != "CONFIRMED" for j in jobs):
+        raise PlanError("previous job must be confirmed before finalization")
+
+    workload = cfg.get("workload") or {}
+    workload_jobs = experimental_workload_jobs(engine, flow_id)
+    if workload.get("mode") != "count" or len(workload_jobs) < workload.get("jobs", 0):
+        raise PlanError("experimental workload must complete before finalization")
+
+    finalized_workers = {
+        json.loads(job["planned_json"])["from"]
+        for job in experimental_finalization_jobs(engine, flow_id)
+    }
+
+    workers = json.loads(flow["flow_wallets_json"])
+    for worker in workers:
+        if worker in finalized_workers:
+            continue
+
+        balance = balances_sats.get(worker, 0)
+        if not isinstance(balance, int) or isinstance(balance, bool) or balance < 0:
+            raise PlanError("finalization balances must be non-negative integer satoshis")
+
+        if balance == 0:
+            continue
+
+        if balance <= fee_reserve_sats:
+            raise PlanError(
+                f"worker {worker} balance {balance} sats does not cover "
+                f"finalization fee reserve {fee_reserve_sats}"
+            )
+
+        return engine.add_job(
+            flow_id,
+            {
+                "from": worker,
+                "to": flow["destination_wallet"],
+                "amount_sats": "all",
+                "step": len(jobs),
+            },
+            planned_delay_s=0,
+            generated_from={
+                "source": FINALIZATION_JOB_SOURCE,
+                "phase": "finalization",
+                "worker": worker,
+                "balance_snapshot_sats": dict(balances_sats),
+                "fee_reserve_sats": fee_reserve_sats,
+            },
+            depends_on=[jobs[-1]["id"]] if jobs else (),
+        )
+
+    return None
 
 
 def generate_experimental_job(
@@ -194,12 +285,13 @@ def generate_experimental_job(
     if any(j["state"] != "CONFIRMED" for j in jobs):
         raise PlanError("previous experimental job must be confirmed before generating the next")
 
-    decision_index = len(jobs)
+    workload_jobs = experimental_workload_jobs(engine, flow_id)
+    decision_index = len(workload_jobs)
     if decision_index >= workload["jobs"]:
         raise PlanError("experimental workload is already complete")
 
     source_used_sats = 0
-    for job in jobs:
+    for job in workload_jobs:
         planned = json.loads(job["planned_json"])
         if planned["from"] == flow["source_wallet"]:
             amount = planned["amount_sats"]
