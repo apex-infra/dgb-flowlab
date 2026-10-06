@@ -89,8 +89,13 @@ class WebBase(DashBase):
     control = True
     use_chain = False
 
-    def serve(self, rpc=None, wallets=("flab_a", "flab_b"), sleep=None, control=True, db=None, builder=None):
-        self.srv = make_server(db or self.db, None, rpc, wallets, port=0, builder=builder, control=control, sleep=sleep)
+    def serve(self, rpc=None, wallets=("flab_a", "flab_b"), sleep=None, control=True,
+              db=None, builder=None, wallet_roles=None):
+        self.srv = make_server(
+            db or self.db, None, rpc, wallets, port=0,
+            builder=builder, control=control, sleep=sleep,
+            wallet_roles=wallet_roles,
+        )
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
         self.addCleanup(self.srv.server_close)
@@ -301,6 +306,23 @@ class WebReadTests(WebBase):
         self.assertIn("Allocation wallet", form)
         self.assertIn("window.flowPlays", app)
         self.assertIn("window.flowPlays", form)
+        self.assertIn("window.flowWalletRoles", app)
+        self.assertIn("walletRoles()", form)
+        self.assertIn('roleWallets("reserve")', form)
+        self.assertIn('roleWallets("stage")', form)
+        self.assertIn('roleWallets("destinations")', form)
+
+    def test_snapshot_exposes_wallet_roles(self):
+        roles = {
+            "reserve": ["flab_a"],
+            "stage": ["flab_b"],
+            "workers": [],
+            "hubs": [],
+            "destinations": [],
+        }
+        self.serve(wallet_roles=roles)
+
+        self.assertEqual(self.snap()["wallet_roles"], roles)
 
     def test_missing_database_serves_an_empty_snapshot(self):
         self.serve(db="/nonexistent/none.db")

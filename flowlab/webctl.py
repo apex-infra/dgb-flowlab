@@ -55,9 +55,15 @@ def _text(body, key, required=True, limit=500):
 
 
 class Controller:
-    def __init__(self, db, rpc=None, builder=None, wallets=(), sleep=None, control=True):
+    def __init__(self, db, rpc=None, builder=None, wallets=(), sleep=None, control=True,
+                 wallet_roles=None):
         self.db, self.rpc, self.builder = db, rpc, builder
-        self.wallets, self.control, self._sleep = list(wallets), control, sleep
+        self.wallets = list(wallets)
+        self.wallet_roles = {
+            k: list(v)
+            for k, v in (wallet_roles or {}).items()
+        }
+        self.control, self._sleep = control, sleep
         self._lock, self._halt = threading.Lock(), threading.Event()
         self._thread, self.exp = None, None
         self.log = deque(maxlen=300)

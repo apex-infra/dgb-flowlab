@@ -56,8 +56,15 @@ def export_run(snap, fmt):
 
 
 def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None,
-                control=True, sleep=None):
-    ctl = Controller(db_path, rpc, builder, wallets, sleep, control)
+                control=True, sleep=None, wallet_roles=None):
+    wallet_roles = {
+        k: list(v)
+        for k, v in (wallet_roles or {}).items()
+    }
+    ctl = Controller(
+        db_path, rpc, builder, wallets, sleep, control,
+        wallet_roles=wallet_roles,
+    )
     token = secrets.token_urlsafe(24)
     cache = {"at": 0.0, "value": None}
 
@@ -123,7 +130,8 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                     keep = ("id", "description", "state", "state_reason", "started_at", "completed_at")
                     snap["exp"] = {k: snap["exp"][k] for k in keep}
                 return self._json(200, {"snapshot": snap, "extras": extras, "balances": current_balances(),
-                                        "wallets": list(wallets), "plays": list_plays(), "control": control,
+                                        "wallets": list(wallets), "wallet_roles": wallet_roles,
+                                        "plays": list_plays(), "control": control,
                                         "runner": {"active": ctl.active(), "exp": ctl.exp},
                                         "log": list(ctl.log), "server_time": now.isoformat()})
             if path == "/api/export":
@@ -184,8 +192,12 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
     return srv
 
 
-def serve(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None, control=True, out=print):
-    srv = make_server(db_path, exp_id, rpc, wallets, port, builder, control)
+def serve(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None, control=True,
+          out=print, wallet_roles=None):
+    srv = make_server(
+        db_path, exp_id, rpc, wallets, port, builder, control,
+        wallet_roles=wallet_roles,
+    )
     mode = "full control" if control else "read-only"
     out(f"dashboard: http://127.0.0.1:{srv.server_address[1]}   ({mode}; this computer only; Ctrl+C to stop)")
     try:

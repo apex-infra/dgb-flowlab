@@ -36,6 +36,65 @@ def _load(path):
         return json.load(f)
 
 
+ROLE_KEYS = ("reserve", "stage", "workers", "hubs", "destinations")
+
+
+def _wallet_roles(local):
+    """Validate optional dashboard wallet-role metadata.
+
+    The existing wallets array remains the RPC/security allowlist.
+    wallet_roles only describes how those allowlisted wallets are intended
+    to be used by FlowLab's experiment builder.
+    """
+    roles = local.get("wallet_roles")
+    if roles is None:
+        return {}
+
+    if not isinstance(roles, dict):
+        raise ValueError("wallet_roles must be an object")
+
+    extra = set(roles) - set(ROLE_KEYS)
+    if extra:
+        raise ValueError("unknown wallet role(s): " + ", ".join(sorted(extra)))
+
+    allowed = set(local["wallets"])
+    out = {}
+    assigned = {}
+
+    for role in ROLE_KEYS:
+        values = roles.get(role, [])
+
+        if not isinstance(values, list) or not all(
+            isinstance(w, str) and w for w in values
+        ):
+            raise ValueError(f"wallet_roles.{role} must be a list of wallet names")
+
+        if len(values) != len(set(values)):
+            raise ValueError(f"wallet_roles.{role} contains duplicates")
+
+        outside = sorted(set(values) - allowed)
+        if outside:
+            raise ValueError(
+                f"wallet_roles.{role} contains wallet(s) outside wallets allowlist: "
+                + ", ".join(outside)
+            )
+
+        for wallet in values:
+            if wallet in assigned:
+                raise ValueError(
+                    f"{wallet} is assigned to both {assigned[wallet]} and {role}"
+                )
+            assigned[wallet] = role
+
+        out[role] = list(values)
+
+    for required in ("reserve", "stage", "destinations"):
+        if not out[required]:
+            raise ValueError(f"wallet_roles.{required} must contain at least one wallet")
+
+    return out
+
+
 def _node(local, rpc):
     rpc = rpc or RpcClient(local["rpc_user"], local["rpc_password"], local["rpc_port"],
                            local["rpc_host"], allowed_wallets=local["wallets"])
@@ -97,20 +156,25 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
 
 def _watch(a, rpc, out, sleep, db, local_path):
     """watch is read-only. serve shows the same page; unless --read-only it also offers the operator actions."""
-    wallets, max_fee = list(getattr(rpc, "wallets", [])), 10_000_000
+    wallets, max_fee, wallet_roles = list(getattr(rpc, "wallets", [])), 10_000_000, {}
     if rpc is None:
         try:
             local = _load(local_path)
             rpc = RpcClient(local["rpc_user"], local["rpc_password"], local["rpc_port"],
                             local["rpc_host"], allowed_wallets=local["wallets"])
-            wallets, max_fee = list(local["wallets"]), local.get("max_fee_sats", 10_000_000)
+            wallets = list(local["wallets"])
+            max_fee = local.get("max_fee_sats", 10_000_000)
+            wallet_roles = _wallet_roles(local)
         except (OSError, KeyError, ValueError):
             rpc = None
     try:
         if a.cmd == "serve":
             from . import webdash  # late: webctl imports this module
             builder = TxBuilder(rpc, wallets, max_fee_sats=max_fee) if rpc else None
-            return webdash.serve(db, a.exp, rpc, wallets, a.port, builder, not a.read_only, out)
+            return webdash.serve(
+                db, a.exp, rpc, wallets, a.port, builder, not a.read_only, out,
+                wallet_roles=wallet_roles,
+            )
         return dashboard.watch(db, a.exp, rpc, wallets, out, sleep, once=a.once,
                                width=shutil.get_terminal_size((100, 30)).columns - 1)
     except sqlite3.OperationalError:

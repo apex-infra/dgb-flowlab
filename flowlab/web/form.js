@@ -78,6 +78,24 @@ const whole = (text, what, min) => {
     return window.flowWallets || [];
   }
 
+  function walletRoles() {
+    return window.flowWalletRoles || {};
+  }
+
+  function roleWallets(name) {
+    const values = walletRoles()[name];
+    return Array.isArray(values) && values.length ? values : wallets();
+  }
+
+  function workloadWallets() {
+    const roles = walletRoles();
+    const values = [
+      ...(Array.isArray(roles.workers) ? roles.workers : []),
+      ...(Array.isArray(roles.hubs) ? roles.hubs : [])
+    ];
+    return values.length ? [...new Set(values)] : wallets();
+  }
+
   function plays() {
     return window.flowPlays || [];
   }
@@ -342,7 +360,7 @@ const whole = (text, what, min) => {
     const src = $("f-src").value;
     const stage = $("f-stage").value;
     const dst = $("f-dst").value;
-    return wallets().filter(w => w !== src && w !== stage && w !== dst);
+    return workloadWallets().filter(w => w !== src && w !== stage && w !== dst);
   }
 
   function resetDefaultEdges() {
@@ -414,10 +432,13 @@ const whole = (text, what, min) => {
   }
 
   function buildExperimental(body, ws) {
-    const src = sel("f-src", ws, ws[0]);
-    const stageDefault = ws.find(w => w !== src.value && w !== ws[ws.length - 1]) || ws[0];
-    const stage = sel("f-stage", ws, stageDefault);
-    const dst = sel("f-dst", ws, ws[ws.length - 1]);
+    const reserves = roleWallets("reserve");
+    const stages = roleWallets("stage");
+    const destinations = roleWallets("destinations");
+
+    const src = sel("f-src", reserves, reserves[0]);
+    const stage = sel("f-stage", stages, stages[0]);
+    const dst = sel("f-dst", destinations, destinations[0]);
 
     src.onchange = stage.onchange = dst.onchange = experimentalWalletChanged;
 
@@ -569,7 +590,7 @@ const whole = (text, what, min) => {
     const dst = $("f-dst").value;
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
-    state.workers = wallets()
+    state.workers = workloadWallets()
       .filter(w => w !== src && w !== stage && w !== dst)
       .map(w => ({
         name: w,
@@ -665,10 +686,13 @@ const whole = (text, what, min) => {
     play.id = "f-play";
     catalog.forEach(p => play.append(new Option(p.title, p.name)));
 
-    const src = sel("f-src", ws, ws[0]);
-    const stageDefault = ws.find(w => w !== src.value && w !== ws[ws.length - 1]) || ws[0];
-    const stage = sel("f-stage", ws, stageDefault);
-    const dst = sel("f-dst", ws, ws[ws.length - 1]);
+    const reserves = roleWallets("reserve");
+    const stages = roleWallets("stage");
+    const destinations = roleWallets("destinations");
+
+    const src = sel("f-src", reserves, reserves[0]);
+    const stage = sel("f-stage", stages, stages[0]);
+    const dst = sel("f-dst", destinations, destinations[0]);
 
     const workerBox = h("div", "row");
     workerBox.id = "f-play-workers";
