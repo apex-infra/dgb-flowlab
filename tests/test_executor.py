@@ -30,8 +30,34 @@ CFG = {
 }
 
 
+EXP_CFG = copy.deepcopy(CFG)
+EXP_CFG["flows"][0].pop("transfers")
+EXP_CFG["flows"][0]["experimental_topology"] = {
+    "transitions": [
+        {"from": "flab_source", "to": "flab_a"},
+        {"from": "flab_source", "to": "flab_b"},
+        {"from": "flab_a", "to": "flab_b"},
+        {"from": "flab_b", "to": "flab_a"},
+    ]
+}
+EXP_CFG["workload"] = {
+    "mode": "count",
+    "jobs": 4,
+    "amount_sats_min": 50_000_000,
+    "amount_sats_max": 100_000_000,
+    "delay_seconds_min": 0,
+    "delay_seconds_max": 5,
+}
+EXP_CFG["randomization"] = {
+    "enabled": True,
+    "model": "uniform",
+    "seed": 2262026,
+}
+
+
 class ExecBase(unittest.TestCase):
     use_node_verifier = False
+    config = CFG
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
@@ -44,7 +70,9 @@ class ExecBase(unittest.TestCase):
         self.b = TxBuilder(self.chain, W, max_fee_sats=10_000_000)
         self.x = Executor(self.e, self.chain, self.b)
         exp = self.e.create_experiment("exec")
-        self.e.approve(exp, self.e.configure_experiment(exp, copy.deepcopy(CFG)))
+        self.e.approve(exp, self.e.configure_experiment(
+            exp, copy.deepcopy(self.config)
+        ))
         self.e.start(exp)
         self.exp = exp
 
@@ -165,6 +193,56 @@ class RunTests(ExecBase):
         r = self.run_all()
         self.assertTrue(any("RECONCILIATION FAILED" in a for a in r["actions"]))
         self.assertEqual(self.e.get_experiment(self.exp)["state"], "ERROR")
+
+
+class ExperimentalRunTests(ExecBase):
+    config = EXP_CFG
+
+    def test_progressive_run_generates_exact_approved_count(self):
+        r = self.run_all()
+
+        self.assertTrue(r["done"], r)
+        self.assertEqual(self.e.get_experiment(self.exp)["state"], "COMPLETE")
+
+        flow = self.e.list_flows(self.exp)[0]
+        jobs = self.e.list_jobs(flow["id"])
+
+        self.assertEqual(len(jobs), 4)
+        self.assertEqual(len(self.sent()), 4)
+        self.assertTrue(all(j["state"] == "CONFIRMED" for j in jobs))
+
+        indexes = [
+            json.loads(j["generated_from_json"])["decision_index"]
+            for j in jobs
+        ]
+        self.assertEqual(indexes, [0, 1, 2, 3])
+
+    def test_only_one_experimental_job_exists_before_first_confirmation(self):
+        self.x.tick(self.exp)      # START -> PLAN
+        self.x.tick(self.exp)      # generate step 1 / possibly PLAN -> EXECUTE
+
+        flow = self.e.list_flows(self.exp)[0]
+        self.assertEqual(len(self.e.list_jobs(flow["id"])), 1)
+
+        # No second progressive job may appear while the first is unfinished.
+        for _ in range(3):
+            self.x.tick(self.exp)
+
+        self.assertEqual(len(self.e.list_jobs(flow["id"])), 1)
+
+    def test_generated_jobs_record_balance_snapshot_and_fee_reserve(self):
+        self.x.tick(self.exp)
+        self.x.tick(self.exp)
+
+        flow = self.e.list_flows(self.exp)[0]
+        job = self.e.list_jobs(flow["id"])[0]
+        generated = json.loads(job["generated_from_json"])
+
+        self.assertIn("balance_snapshot_sats", generated)
+        self.assertEqual(
+            generated["fee_reserve_sats"],
+            self.b.max_fee_sats,
+        )
 
 
 class NodeVerifierIntegration(ExecBase):

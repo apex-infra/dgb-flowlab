@@ -10,7 +10,12 @@ is retried automatically.
 import json
 
 from .engine import EngineError, GuardFailed
-from .planner import PlanError, generate_jobs, next_due
+from .planner import (
+    PlanError,
+    generate_experimental_job,
+    generate_jobs,
+    next_due,
+)
 from .rpc import RpcError, to_sats
 from .tx_builder import BuildError, broadcast
 
@@ -57,6 +62,46 @@ class Executor:
         if self.engine.get_experiment(exp_id)["state"] == "RUNNING":
             self.engine.pause(exp_id, reason[:300])
 
+    # ---------------------------------------------------- experiment planning
+    def _config_for_flow(self, flow):
+        exp = self.engine.get_experiment(flow["experiment_id"])
+        return json.loads(exp["config_json"])
+
+    def _is_experimental(self, flow):
+        cfg = self._config_for_flow(flow)
+        return bool(cfg.get("randomization", {}).get("enabled"))
+
+    def _experimental_complete(self, flow):
+        cfg = self._config_for_flow(flow)
+        workload = cfg.get("workload") or {}
+        if workload.get("mode") != "count":
+            raise PlanError("executor v1 currently supports count experimental workloads only")
+        jobs = self.engine.list_jobs(flow["id"])
+        return (
+            len(jobs) >= workload["jobs"]
+            and all(j["state"] == "CONFIRMED" for j in jobs)
+        )
+
+    def _confirmed_balances(self, flow):
+        wallets = [
+            flow["source_wallet"],
+            *json.loads(flow["flow_wallets_json"]),
+        ]
+        return {
+            wallet: to_sats(self.rpc.get_balances(wallet)["mine"]["trusted"])
+            for wallet in wallets
+        }
+
+    def _generate_next_experimental_job(self, flow):
+        balances = self._confirmed_balances(flow)
+        fee_reserve = self.builder.max_fee_sats
+        return generate_experimental_job(
+            self.engine,
+            flow["id"],
+            balances,
+            fee_reserve_sats=fee_reserve,
+        )
+
     # ------------------------------------------------------------ flow steps
     def _tick_flow(self, exp_id, flow_id, actions, waits):
         e = self.engine
@@ -66,9 +111,20 @@ class Executor:
             raise EngineError(f"flow {flow_id} is in error state {flow['error_state']}")
         if st == "START":
             e.advance_flow(flow_id, "PLAN")
-            n = len(generate_jobs(e, flow_id))
-            actions.append(f"planned {n} jobs from the approved config")
+            if self._is_experimental(flow):
+                actions.append("experimental flow entered progressive planning")
+            else:
+                n = len(generate_jobs(e, flow_id))
+                actions.append(f"planned {n} jobs from the approved config")
         elif st == "PLAN":
+            if self._is_experimental(flow):
+                jobs = e.list_jobs(flow_id)
+                if not jobs or all(j["state"] == "CONFIRMED" for j in jobs):
+                    if not self._experimental_complete(flow):
+                        jid = self._generate_next_experimental_job(flow)
+                        actions.append(
+                            f"generated experimental step {self._step(e.get_job(jid))}"
+                        )
             r = next_due(e, flow_id)
             if r["job"]:
                 e.advance_flow(flow_id, "EXECUTE")
@@ -83,7 +139,11 @@ class Executor:
             self._confirm(flow, actions, waits)
         elif st == "NEXT_STATE":
             jobs = e.list_jobs(flow_id)
-            e.advance_flow(flow_id, "COMPLETE" if all(j["state"] == "CONFIRMED" for j in jobs) else "PLAN")
+            if self._is_experimental(flow):
+                target = "COMPLETE" if self._experimental_complete(flow) else "PLAN"
+            else:
+                target = "COMPLETE" if all(j["state"] == "CONFIRMED" for j in jobs) else "PLAN"
+            e.advance_flow(flow_id, target)
 
     @staticmethod
     def _step(job):
