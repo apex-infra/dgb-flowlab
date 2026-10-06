@@ -376,6 +376,69 @@ class ExperimentalRunTests(ExecBase):
                 0,
             )
 
+    def test_unsweepable_positive_worker_balance_pauses_finalization(self):
+        # Drive only the approved randomized workload to completion.
+        for _ in range(200):
+            r = self.x.tick(self.exp)
+
+            flow = self.e.list_flows(self.exp)[0]
+            jobs = self.e.list_jobs(flow["id"])
+            workload = [
+                j for j in jobs
+                if json.loads(j["generated_from_json"] or "{}").get("source")
+                == "seeded experimental generator"
+            ]
+
+            if (
+                len(workload) == EXP_CFG["workload"]["jobs"]
+                and all(j["state"] == "CONFIRMED" for j in workload)
+            ):
+                break
+
+            self.assertFalse(r["done"], r)
+            self.assertIsNone(r["blocked"], r)
+            self.t += timedelta(seconds=r["wait_s"] or 1)
+            self.chain.mine(2)
+        else:
+            self.fail("experimental workload did not finish")
+
+        # Simulate a positive worker remainder that is too small to cover the
+        # approved planning fee reserve. The source balance is irrelevant here.
+        reserve = self.b.planning_fee_reserve_sats()
+        self.assertGreater(reserve, 1)
+
+        def tiny_worker_balances(flow):
+            return {
+                flow["source_wallet"]: 1_000_000_000,
+                "flab_a": reserve - 1,
+                "flab_b": 0,
+            }
+
+        self.x._confirmed_balances = tiny_worker_balances
+
+        # NEXT_STATE must see that a worker is not empty and return to PLAN.
+        r = self.x.tick(self.exp)
+        self.assertFalse(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+
+        # PLAN must refuse to silently complete or attempt an invalid sweep.
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn("finalization fee reserve", r["blocked"])
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "PAUSED",
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+        finalizations = [
+            j for j in self.e.list_jobs(flow["id"])
+            if json.loads(j["generated_from_json"] or "{}").get("source")
+            == "experimental finalization"
+        ]
+        self.assertEqual(finalizations, [])
+
     def test_only_one_experimental_job_exists_before_first_confirmation(self):
         self.x.tick(self.exp)      # START -> PLAN
         self.x.tick(self.exp)      # generate step 1 / possibly PLAN -> EXECUTE

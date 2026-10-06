@@ -9,6 +9,7 @@ from flowlab import ConfigError, Engine
 from flowlab.planner import (
     PlanError,
     experimental_decision,
+    generate_experimental_finalization_job,
     generate_experimental_job,
     generate_jobs,
     next_due,
@@ -509,6 +510,87 @@ class ExperimentalJobTests(ExperimentalDecisionTests):
         self.assertEqual(
             generated["source"],
             "seeded experimental generator",
+        )
+
+    def _finish_experimental_workload(self, flow, balances):
+        cfg = json.loads(self.e.get_experiment(
+            self.e.get_flow(flow)["experiment_id"]
+        )["config_json"])
+
+        for i in range(cfg["workload"]["jobs"]):
+            jid = generate_experimental_job(
+                self.e,
+                flow,
+                balances,
+                fee_reserve_sats=0,
+            )
+            self.confirm(flow, jid, 120 + i)
+
+    def test_finalization_skips_zero_balance_worker(self):
+        _, flow = self.experimental_flow(seed=9010)
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 250_000_000,
+        }
+
+        self._finish_experimental_workload(flow, balances)
+
+        jid = generate_experimental_finalization_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=10_000_000,
+        )
+
+        job = self.e.get_job(jid)
+        plan = json.loads(job["planned_json"])
+        generated = json.loads(job["generated_from_json"])
+
+        self.assertEqual(plan["from"], "w3_flowB")
+        self.assertEqual(plan["to"], "w4_dest")
+        self.assertEqual(plan["amount_sats"], "all")
+        self.assertEqual(generated["phase"], "finalization")
+        self.assertEqual(generated["worker"], "w3_flowB")
+
+    def test_finalization_refuses_positive_balance_below_fee_reserve(self):
+        _, flow = self.experimental_flow(seed=9011)
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 5_000_000,
+            "w3_flowB": 0,
+        }
+
+        self._finish_experimental_workload(flow, balances)
+
+        with self.assertRaisesRegex(
+            PlanError,
+            "does not cover finalization fee reserve",
+        ):
+            generate_experimental_finalization_job(
+                self.e,
+                flow,
+                balances,
+                fee_reserve_sats=10_000_000,
+            )
+
+    def test_finalization_returns_none_when_all_workers_are_empty(self):
+        _, flow = self.experimental_flow(seed=9012)
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        self._finish_experimental_workload(flow, balances)
+
+        self.assertIsNone(
+            generate_experimental_finalization_job(
+                self.e,
+                flow,
+                balances,
+                fee_reserve_sats=10_000_000,
+            )
         )
 
     def test_second_job_requires_first_to_be_confirmed(self):
