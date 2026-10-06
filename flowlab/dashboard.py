@@ -67,6 +67,25 @@ def snapshot(db_path, exp_id=None, now=None):
         con.close()
 
 
+def extras(db_path):
+    """Read-only facts the control panel needs: experiments, emergency flag, interrupted actions."""
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    con.row_factory = sqlite3.Row
+    try:
+        flag = con.execute("SELECT value FROM meta WHERE key='emergency_stop'").fetchone()
+        live = []
+        for r in con.execute("SELECT id, job_id, kind, status, payload_json FROM action_journal "
+                             "WHERE status IN ('intent','unknown') ORDER BY id"):
+            pay = json.loads(r["payload_json"])
+            live.append({"id": r["id"], "job": r["job_id"], "kind": r["kind"], "status": r["status"],
+                         "amount_sats": pay.get("amount_sats"), "txid": pay.get("expected_txid")})
+        exps = [dict(r) for r in con.execute(
+            "SELECT id, state, description FROM experiments ORDER BY created_at DESC LIMIT 30")]
+        return {"emergency": bool(flag and flag[0] == "1"), "unresolved": live, "experiments": exps}
+    finally:
+        con.close()
+
+
 def balances(rpc, wallets):
     """{wallet: sats or None}. A node that cannot be reached just shows dashes."""
     out = {}
@@ -129,7 +148,7 @@ def render(snap, bal=None, width=100, color=True, now=None):
     L.append(p(" ACTIVITY", "b"))
     for ev in snap["events"]:
         stamp = ev["ts"][11:19] if ev["ts"] else ""
-        extra = f"  {dgb(ev['amount_sats'])} DGB" if ev["amount_sats"] else ""
+        extra = f"  {dgb(ev['amount_sats'])} DGB" if isinstance(ev["amount_sats"], int) and ev["amount_sats"] else ""
         L.append(p(f"  {stamp}", "d") + f" {ev['event']}{extra}" + p(f"  {(ev['txid'] or '')[:12]}", "d"))
     return "\n".join(L)
 

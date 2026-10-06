@@ -1,0 +1,279 @@
+import http.client
+import json
+import os
+import re
+import threading
+import time
+from decimal import Decimal
+
+from flowlab.webdash import make_server
+from tests.test_dashboard import DashBase
+from tests.test_sweep import cfg_sweep as _sweep
+
+
+def cfg_sweep():
+    """Like the page builds it: no workload block, no randomization key."""
+    c = _sweep()
+    c.pop("workload", None)
+    c.pop("randomization", None)
+    return c
+
+
+class Rpc:
+    def __init__(self, fail=False):
+        self.fail = fail
+
+    def get_balances(self, w):
+        if self.fail:
+            raise RuntimeError("node down")
+        return {"mine": {"trusted": Decimal("1.5")}}
+
+
+class WebBase(DashBase):
+    control = True
+    use_chain = False
+
+    def serve(self, rpc=None, wallets=("flab_a", "flab_b"), sleep=None, control=True, db=None, builder=None):
+        self.srv = make_server(db or self.db, None, rpc, wallets, port=0, builder=builder, control=control, sleep=sleep)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.server_close)
+        self.addCleanup(self.srv.shutdown)
+        self.addCleanup(self.srv.controller.close)
+        return self.srv
+
+    def request(self, method, path, body=None, headers=None, host=None, raw=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        c.putrequest(method, path, skip_host=True)
+        c.putheader("Host", host or f"127.0.0.1:{self.port}")
+        data = raw if raw is not None else (json.dumps(body).encode() if body is not None else None)
+        for k, v in (headers or {}).items():
+            c.putheader(k, v)
+        if data is not None:
+            c.putheader("Content-Length", str(len(data)))
+        c.endheaders(data)
+        r = c.getresponse()
+        out = r.read()
+        c.close()
+        return r.status, dict(r.getheaders()), out
+
+    def get(self, path="/", **kw):
+        return self.request("GET", path, **kw)
+
+    def do(self, action, body=None, token=True, **kw):
+        h = {"Content-Type": "application/json"}
+        if token:
+            h["X-Flowlab-Token"] = self.srv.token
+        h.update(kw.pop("headers", {}))
+        s, hd, out = self.request("POST", "/api/do/" + action, body or {}, headers=h, **kw)
+        try:
+            return s, json.loads(out)
+        except ValueError:  # plain-text refusals (wrong host)
+            return s, {"text": out}
+
+    def snap(self, exp=None):
+        return json.loads(self.get("/api/snapshot" + (f"?exp={exp}" if exp else ""))[2])
+
+    def until(self, test, timeout=15):
+        end = time.time() + timeout
+        while time.time() < end:
+            v = test()
+            if v:
+                return v
+            time.sleep(0.05)
+        self.fail("timed out waiting")
+
+
+class WebReadTests(WebBase):
+    def start(self, rpc=None, db=None):
+        self.exp = self.make()
+        self.call("run", self.exp)
+        self.serve(rpc, db=db)
+
+    def test_binds_to_loopback_only(self):
+        self.start()
+        self.assertEqual(self.srv.server_address[0], "127.0.0.1")
+
+    def test_page_loads_only_its_own_files_and_carries_the_token(self):
+        self.start()
+        s, h, b = self.get()
+        page = b.decode()
+        self.assertEqual(s, 200)
+        self.assertEqual(sorted(re.findall(r'(?:src|href)="([^"]+)"', page)), ["/app.css", "/app.js", "/form.js"])
+        self.assertNotIn("<script>", page)
+        self.assertIn(self.srv.token, page)
+        self.assertIn("script-src 'self'", h["Content-Security-Policy"])
+        self.assertIn("default-src 'none'", h["Content-Security-Policy"])
+        for p in ("/app.css", "/app.js", "/form.js"):
+            self.assertEqual(self.get(p)[0], 200, p)
+
+    def test_each_server_has_its_own_secret(self):
+        self.start()
+        first = self.srv.token
+        self.serve()
+        self.assertNotEqual(first, self.srv.token)
+        self.assertGreaterEqual(len(first), 24)
+
+    def test_snapshot_is_json_without_the_stored_config(self):
+        self.start(Rpc())
+        data = self.snap()
+        self.assertEqual(set(data["snapshot"]["exp"]), {"id", "description", "state", "state_reason",
+                                                         "started_at", "completed_at"})
+        self.assertNotIn("config_json", json.dumps(data))
+        self.assertEqual(data["balances"], {"flab_a": 150_000_000, "flab_b": 150_000_000})
+        self.assertTrue(data["control"])
+        self.assertEqual(data["runner"]["active"], False)
+
+    def test_unreachable_node_gives_dashes_not_an_error(self):
+        self.start(Rpc(fail=True))
+        self.assertEqual(self.snap()["balances"], {"flab_a": None, "flab_b": None})
+
+    def test_wrong_host_header_is_refused_everywhere(self):
+        self.start()
+        for host in ("evil.example", f"evil.example:{self.port}", "127.0.0.1"):
+            self.assertEqual(self.get("/api/snapshot", host=host)[0], 403, host)
+            self.assertEqual(self.get("/", host=host)[0], 403, host)
+            self.assertEqual(self.do("stop", host=host)[0], 403, host)
+
+    def test_put_delete_patch_options_are_refused(self):
+        self.start()
+        for m in ("PUT", "DELETE", "PATCH", "OPTIONS"):
+            self.assertEqual(self.request(m, "/api/snapshot")[0], 405, m)
+
+    def test_unknown_paths_are_404_and_reads_write_nothing(self):
+        self.start()
+        before = self.digest()
+        for p in ("/etc/passwd", "/../flowlab.db", "/web/index.html", "/app.js/../x"):
+            self.assertEqual(self.get(p)[0], 404, p)
+        self.snap()
+        self.assertEqual(self.digest(), before)
+
+    def test_missing_database_serves_an_empty_snapshot(self):
+        self.serve(db="/nonexistent/none.db")
+        data = self.snap()
+        self.assertIsNone(data["snapshot"])
+
+
+class WebControlTests(WebBase):
+    def setUp(self):
+        super().setUp()
+        from flowlab.tx_builder import TxBuilder
+        self.builder = TxBuilder(self.chain, self.chain.wallets, max_fee_sats=10_000_000)
+
+    def up(self, **kw):
+        kw.setdefault("sleep", lambda s: self.chain.mine(2))
+        return self.serve(self.chain, wallets=tuple(self.chain.wallets), builder=self.builder, **kw)
+
+    def wait_idle(self):
+        self.until(lambda: not self.srv.controller.active())
+
+    def state(self, exp):
+        return self.snap(exp)["snapshot"]["exp"]["state"]
+
+    def test_refusals_token_origin_type_size(self):
+        self.up()
+        self.assertEqual(self.do("stop", token=False)[0], 403)
+        self.assertEqual(self.do("stop", headers={"X-Flowlab-Token": "nope"})[0], 403)
+        self.assertEqual(self.do("stop", headers={"Origin": "http://evil.example"})[0], 403)
+        self.assertEqual(self.do("stop", headers={"Origin": f"http://localhost:{self.port}"})[0], 200)
+        s, h, b = self.request("POST", "/api/do/stop", {}, headers={"X-Flowlab-Token": self.srv.token,
+                                                                      "Content-Type": "text/plain"})
+        self.assertEqual(s, 415)
+        s, h, b = self.request("POST", "/api/do/new", raw=b"x" * 70000, headers={
+            "X-Flowlab-Token": self.srv.token, "Content-Type": "application/json"})
+        self.assertEqual(s, 413)
+        self.assertEqual(self.do("nonsense")[0], 404)
+        self.assertEqual(self.do("stop", headers={"Content-Type": "application/json"})[0], 200)
+
+    def test_read_only_switches_every_action_off(self):
+        self.up(control=False)
+        before = self.digest() if os.path.exists(self.db) else None
+        for a in ("new", "approve", "run", "stop", "clear_stop", "resolve"):
+            self.assertEqual(self.do(a)[0], 403, a)
+        self.assertEqual(self.snap()["control"], False)
+        self.assertEqual(self.digest() if os.path.exists(self.db) else None, before)
+
+    def test_new_approve_run_to_completion_through_the_page(self):
+        self.up()
+        s, out = self.do("new", {"config": cfg_sweep(), "description": "from page"})
+        self.assertEqual(s, 200, out)
+        exp, h = out["exp"], out["hash"]
+        self.assertEqual(self.do("run", {"exp": exp})[0], 400)          # not approved yet
+        self.assertEqual(self.do("approve", {"exp": exp, "hash": "0" * 64})[0], 400)
+        self.assertEqual(self.state(exp), "CONFIGURED")
+        self.assertEqual(self.do("approve", {"exp": exp, "hash": h})[0], 200)
+        self.assertEqual(self.do("approve", {"exp": exp, "hash": h})[0], 400)   # one time only
+        self.assertEqual(self.do("run", {"exp": exp})[0], 200)
+        self.wait_idle()
+        self.assertEqual(self.state(exp), "COMPLETE")
+        self.assertEqual(self.snap(exp)["snapshot"]["flows"][0]["jobs"][-1]["state"], "CONFIRMED")
+        self.assertEqual(self.do("run", {"exp": exp})[0], 400)          # finished
+
+    def test_new_refuses_bad_and_randomising_configs(self):
+        self.up()
+        self.assertEqual(self.do("new", {"config": "x"})[0], 400)
+        bad = cfg_sweep()
+        bad["flows"][0]["repeat"]["randomize"] = True
+        s, out = self.do("new", {"config": bad})
+        self.assertEqual(s, 400)
+        bad = cfg_sweep()
+        bad["flows"][0]["jitter_seconds"] = 5
+        self.assertEqual(self.do("new", {"config": bad})[0], 400)
+
+    def test_second_run_refused_while_active_and_halt_then_continue(self):
+        gate = threading.Event()
+
+        def slow(s):
+            self.chain.mine(2)
+            gate.wait(5)
+        self.up(sleep=slow)
+        exp = self.do("new", {"config": cfg_sweep()})[1]["exp"]
+        self.do("approve", {"exp": exp, "hash": self.do("review", {"exp": exp})[1]["hash"]})
+        self.assertEqual(self.do("run", {"exp": exp})[0], 200)
+        self.until(lambda: self.srv.controller.active())
+        self.assertEqual(self.do("run", {"exp": exp})[0], 400)
+        self.assertEqual(self.do("resume", {"exp": exp})[0], 400)
+        self.do("halt")
+        gate.set()
+        self.wait_idle()
+        self.assertNotEqual(self.state(exp), "COMPLETE")
+        self.assertIn("stopped", " ".join(l["line"] for l in self.snap()["log"]))
+        self.assertEqual(self.do("run", {"exp": exp})[0], 200)          # carries on
+        self.wait_idle()
+        self.assertEqual(self.state(exp), "COMPLETE")
+
+    def test_emergency_stop_aborts_and_clear_needs_a_note(self):
+        self.up()
+        exp = self.do("new", {"config": cfg_sweep()})[1]["exp"]
+        s, out = self.do("stop")
+        self.assertEqual(s, 200)
+        self.assertEqual(self.state(exp), "ABORTED")
+        self.assertTrue(self.snap()["extras"]["emergency"])
+        self.assertEqual(self.do("clear_stop", {"note": " "})[0], 400)
+        self.assertEqual(self.do("clear_stop", {"note": "checked, all good"})[0], 200)
+        self.assertFalse(self.snap()["extras"]["emergency"])
+
+    def test_resolve_validates_its_input(self):
+        self.up()
+        for body in ({}, {"action": "1", "outcome": "broadcast"}, {"action": True, "outcome": "broadcast"},
+                     {"action": 1, "outcome": "maybe"}, {"action": 999, "outcome": "not_broadcast"}):
+            self.assertEqual(self.do("resolve", body)[0], 400, body)
+
+    def test_without_a_node_runs_are_refused(self):
+        self.serve()
+        exp = self.do("new", {"config": cfg_sweep()})[1]["exp"]
+        self.do("approve", {"exp": exp, "hash": self.do("review", {"exp": exp})[1]["hash"]})
+        s, out = self.do("run", {"exp": exp})
+        self.assertEqual(s, 400)
+        self.assertIn("node is not connected", out["error"])
+
+    def test_closing_the_server_halts_and_joins_the_runner(self):
+        gate = threading.Event()
+        self.up(sleep=lambda s: gate.wait(5))
+        exp = self.do("new", {"config": cfg_sweep()})[1]["exp"]
+        self.do("approve", {"exp": exp, "hash": self.do("review", {"exp": exp})[1]["hash"]})
+        self.do("run", {"exp": exp})
+        self.until(lambda: self.srv.controller.active())
+        gate.set()
+        self.srv.controller.close()
+        self.assertFalse(self.srv.controller.active())

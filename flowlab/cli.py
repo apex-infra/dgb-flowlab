@@ -12,6 +12,7 @@ cli.py -- the operator's command line.
     resolve ACTION OUTCOME [--txid T] [--evidence TEXT]   settle an interrupted broadcast
     stop                emergency stop: abort everything, keep all history
     watch [EXP] [--once]   live read-only dashboard (newest experiment if none given)
+    serve [EXP] [--port N] [--read-only]   the dashboard as a web page on 127.0.0.1 only, with controls (default port 8787)
 """
 
 import argparse
@@ -64,8 +65,10 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
     sub.add_parser("list")
     sub.add_parser("stop")
     s = sub.add_parser("watch"); s.add_argument("exp", nargs="?"); s.add_argument("--once", action="store_true")
+    s = sub.add_parser("serve"); s.add_argument("exp", nargs="?"); s.add_argument("--port", type=int, default=8787)
+    s.add_argument("--read-only", action="store_true")
     a = p.parse_args(argv)
-    if a.cmd == "watch":
+    if a.cmd in ("watch", "serve"):
         return _watch(a, rpc, out, sleep, db, local_path)
 
     needs_node = a.cmd in ("run", "resume", "recover")
@@ -93,17 +96,21 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
 
 
 def _watch(a, rpc, out, sleep, db, local_path):
-    """Read-only: never opens the engine, never approves or sends anything."""
-    wallets = list(getattr(rpc, "wallets", []))
+    """watch is read-only. serve shows the same page; unless --read-only it also offers the operator actions."""
+    wallets, max_fee = list(getattr(rpc, "wallets", [])), 10_000_000
     if rpc is None:
         try:
             local = _load(local_path)
             rpc = RpcClient(local["rpc_user"], local["rpc_password"], local["rpc_port"],
                             local["rpc_host"], allowed_wallets=local["wallets"])
-            wallets = list(local["wallets"])
+            wallets, max_fee = list(local["wallets"]), local.get("max_fee_sats", 10_000_000)
         except (OSError, KeyError, ValueError):
             rpc = None
     try:
+        if a.cmd == "serve":
+            from . import webdash  # late: webctl imports this module
+            builder = TxBuilder(rpc, wallets, max_fee_sats=max_fee) if rpc else None
+            return webdash.serve(db, a.exp, rpc, wallets, a.port, builder, not a.read_only, out)
         return dashboard.watch(db, a.exp, rpc, wallets, out, sleep, once=a.once,
                                width=shutil.get_terminal_size((100, 30)).columns - 1)
     except sqlite3.OperationalError:

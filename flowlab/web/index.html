@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="flowlab-token" content="{{TOKEN}}">
+<meta name="flowlab-control" content="{{CONTROL}}">
+<title>flowlab</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <span class="mark">flowlab</span>
+  <select id="exp-pick" aria-label="Experiment"></select>
+  <span class="pill" id="state">-</span>
+  <span class="desc" id="desc"></span>
+  <span class="actions" id="actions"></span>
+</header>
+<nav id="tabs" aria-label="Sections">
+  <button data-tab="monitor" class="on">Monitor</button>
+  <button data-tab="new" id="tab-btn-new">New experiment</button>
+  <button data-tab="log">Console</button>
+</nav>
+<div id="banner" hidden></div>
+<div id="toast" role="status" aria-live="polite" hidden></div>
+
+<div id="tab-monitor">
+  <div class="metrics">
+    <div class="metric"><b id="m-hops">-</b><span>hops confirmed</span></div>
+    <div class="metric"><b id="m-fees">-</b><span>DGB paid in fees</span></div>
+    <div class="metric"><b id="m-time">-</b><span>elapsed</span></div>
+    <div class="metric"><b id="m-next">-</b><span id="m-next-l">next hop</span></div>
+  </div>
+  <div id="alert"></div>
+  <div class="stage"><svg id="stage" viewBox="0 0 1000 330" role="img" aria-label="Flow of coins between wallets"></svg></div>
+  <div id="panel-approve" class="panel" hidden></div>
+  <div id="panel-unresolved" class="panel" hidden></div>
+  <div class="cols">
+    <section><h2>Hops</h2><div id="hops"></div></section>
+    <section><h2>Wallets</h2><div id="wallets"></div></section>
+    <section><h2>Activity</h2><div id="events"></div></section>
+  </div>
+</div>
+
+<div id="tab-new" class="page" hidden>
+  <h2>New experiment</h2>
+  <form id="newform" autocomplete="off"></form>
+  <div id="newreview"></div>
+</div>
+
+<div id="tab-log" class="page" hidden>
+  <h2>Console</h2>
+  <pre id="console" class="mono"></pre>
+</div>
+
+<footer id="foot">connecting...</footer>
+<script src="/app.js"></script>
+<script src="/form.js"></script>
+</body>
+</html>
