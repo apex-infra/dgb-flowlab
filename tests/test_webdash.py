@@ -323,6 +323,22 @@ class WebControlTests(WebBase):
         self.assertEqual(self.do("new", {"config": cfg})[0], 200)
 
 
+    def test_experimental_review_shows_approved_topology(self):
+        self.up()
+
+        s, out = self.do("new", {"config": cfg_experimental()})
+
+        self.assertEqual(s, 200, out)
+        text = out["text"]
+
+        self.assertIn("experimental topology:", text)
+        self.assertIn("flab_source -> flab_a", text)
+        self.assertIn("flab_source -> flab_b", text)
+        self.assertIn("flab_a -> flab_a", text)
+        self.assertIn("flab_a -> flab_b", text)
+        self.assertIn("flab_b -> flab_a", text)
+        self.assertIn("flab_b -> flab_b", text)
+
     def test_second_run_refused_while_active_and_halt_then_continue(self):
         gate = threading.Event()
 

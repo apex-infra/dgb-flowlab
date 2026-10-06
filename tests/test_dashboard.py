@@ -122,6 +122,8 @@ class DashboardTests(DashBase):
                 "observed_balance_sats",
                 "fee_reserve_sats",
                 "balance_snapshot_sats",
+                "source_budget_used_sats",
+                "source_budget_remaining_sats",
             })
 
     def test_deterministic_snapshot_reports_deterministic_mode(self):

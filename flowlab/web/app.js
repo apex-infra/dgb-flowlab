@@ -208,6 +208,8 @@ function renderExperimental(data) {
     item("Delay", String(current.delay_s || 0) + " s"),
     item("Eligible routes", String(g.eligible_transition_count ?? "-")),
     item("Observed source balance", g.observed_balance_sats != null ? dgb(g.observed_balance_sats) + " DGB" : "-"),
+    item("Source budget used", g.source_budget_used_sats != null ? dgb(g.source_budget_used_sats) + " DGB" : "-"),
+    item("Source budget remaining", g.source_budget_remaining_sats != null ? dgb(g.source_budget_remaining_sats) + " DGB" : "-"),
     item("Fee reserve", g.fee_reserve_sats != null ? dgb(g.fee_reserve_sats) + " DGB" : "-"),
     item("Generator", "v" + (g.generator_version ?? "-"))
   );

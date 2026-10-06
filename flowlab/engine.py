@@ -208,6 +208,12 @@ class Engine:
             for k, t in enumerate(fl.get("transfers", []), 1):
                 amt = "ENTIRE BALANCE minus fee" if t["amount_sats"] == "all" else f"{t['amount_sats']} sats"
                 lines.append(f"    {k:>3}. {t['from']} -> {t['to']}   {amt}   wait {t['delay_seconds']}s")
+
+            topology = fl.get("experimental_topology")
+            if topology:
+                lines.append("    experimental topology:")
+                for k, t in enumerate(topology["transitions"], 1):
+                    lines.append(f"      {k:>3}. {t['from']} -> {t['to']}")
         wl = cfg.get("workload")
         if wl:
             lines += [
