@@ -15,10 +15,25 @@ from .cli import _open, _run
 from .config_schema import validate
 
 FINISHED = ("COMPLETE", "IDLE", "ABORTED")
-# The dashboard only builds explicit, deterministic flows: any other key is refused, not ignored.
-TOP_KEYS = {"flows", "confirmations_required", "fee_policy", "address_policy"}
-FLOW_KEYS = {"description", "source_wallet", "flow_wallets", "destination_wallet", "allocation_sats",
-             "repeat", "transfers"}
+# The dashboard accepts only the config fields it knows how to present and review.
+TOP_KEYS = {
+    "flows",
+    "workload",
+    "confirmations_required",
+    "fee_policy",
+    "address_policy",
+    "randomization",
+}
+FLOW_KEYS = {
+    "description",
+    "source_wallet",
+    "flow_wallets",
+    "destination_wallet",
+    "allocation_sats",
+    "repeat",
+    "transfers",
+    "experimental_topology",
+}
 
 
 class ControlError(Exception):
@@ -92,10 +107,13 @@ class Controller:
         if extra:
             raise ControlError("not supported here: " + ", ".join(sorted(extra)))
         cfg = validate(cfg)
-        for fl in cfg["flows"]:
-            ts = fl.get("transfers") or []
-            if not ts or ts[-1]["to"] != fl["destination_wallet"]:
-                raise ControlError("the last hop must end in the destination wallet")
+
+        experimental = bool(cfg.get("randomization", {}).get("enabled"))
+        if not experimental:
+            for fl in cfg["flows"]:
+                ts = fl.get("transfers") or []
+                if not ts or ts[-1]["to"] != fl["destination_wallet"]:
+                    raise ControlError("the last hop must end in the destination wallet")
 
         def go(e):
             exp = e.create_experiment(_text(body, "description", required=False, limit=200))

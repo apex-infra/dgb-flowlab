@@ -20,6 +20,19 @@ STATE_COLOR = {"CONFIRMED": "g", "BROADCAST": "y", "PLANNED": "c", "COMPLETE": "
                "APPROVED": "c", "IDLE": "d"}
 FINISHED = ("COMPLETE", "IDLE", "ABORTED")
 
+SAFE_GENERATED_KEYS = {
+    "source",
+    "generator_version",
+    "model",
+    "seed",
+    "flow_index",
+    "decision_index",
+    "eligible_transition_count",
+    "observed_balance_sats",
+    "fee_reserve_sats",
+    "balance_snapshot_sats",
+}
+
 
 def _iso(s):
     return datetime.fromisoformat(s) if s else None
@@ -40,16 +53,55 @@ def snapshot(db_path, exp_id=None, now=None):
         exp = con.execute(q, (exp_id,) if exp_id else ()).fetchone()
         if exp is None:
             return None
-        snap = {"exp": dict(exp), "flows": [], "events": [], "next_due_s": None}
+
+        cfg = json.loads(exp["config_json"] or "{}")
+        rnd = cfg.get("randomization") or {"enabled": False}
+        experimental = bool(rnd.get("enabled"))
+        workload = cfg.get("workload") or {}
+
+        snap = {
+            "exp": dict(exp),
+            "flows": [],
+            "events": [],
+            "next_due_s": None,
+            "mode": "experimental" if experimental else "deterministic",
+            "target_jobs": (
+                workload.get("jobs")
+                if experimental and workload.get("mode") == "count"
+                else None
+            ),
+            "randomization": (
+                {"model": rnd.get("model"), "seed": rnd.get("seed")}
+                if experimental
+                else None
+            ),
+        }
         for f in con.execute("SELECT * FROM flows WHERE experiment_id=? ORDER BY created_at", (exp["id"],)):
             jobs, prev = [], None
             rows = con.execute("SELECT j.*, t.confirmations AS confs FROM jobs j LEFT JOIN flow_txids t "
                                "ON t.txid=j.txid WHERE j.flow_id=? ORDER BY j.seq", (f["id"],)).fetchall()
             for j in rows:
-                plan, res = json.loads(j["planned_json"]), json.loads(j["result_json"] or "{}")
-                jobs.append({"seq": j["seq"], "state": j["state"], "from": plan["from"], "to": plan["to"],
-                             "planned": plan["amount_sats"], "amount": res.get("amount_sats"),
-                             "fee": res.get("fee_sats"), "txid": j["txid"], "confs": j["confs"]})
+                plan = json.loads(j["planned_json"])
+                res = json.loads(j["result_json"] or "{}")
+                generated_raw = json.loads(j["generated_from_json"] or "{}")
+                generated = {
+                    k: generated_raw[k]
+                    for k in SAFE_GENERATED_KEYS
+                    if k in generated_raw
+                }
+                jobs.append({
+                    "seq": j["seq"],
+                    "state": j["state"],
+                    "from": plan["from"],
+                    "to": plan["to"],
+                    "planned": plan["amount_sats"],
+                    "amount": res.get("amount_sats"),
+                    "fee": res.get("fee_sats"),
+                    "txid": j["txid"],
+                    "confs": j["confs"],
+                    "delay_s": j["planned_delay_s"],
+                    "generated": generated or None,
+                })
                 if j["state"] == "PLANNED" and snap["next_due_s"] is None and now is not None:
                     base = _iso(prev["updated_at"] if prev else j["created_at"])
                     snap["next_due_s"] = max(0, int((base - now).total_seconds() + (j["planned_delay_s"] or 0)))

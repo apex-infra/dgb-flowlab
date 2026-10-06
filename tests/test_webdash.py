@@ -19,6 +19,45 @@ def cfg_loop():
     return c
 
 
+def cfg_experimental():
+    c = {
+        "flows": [{
+            "description": "experimental",
+            "source_wallet": "flab_source",
+            "flow_wallets": ["flab_a", "flab_b"],
+            "destination_wallet": "flab_dest",
+            "allocation_sats": 300_000_000,
+            "experimental_topology": {
+                "transitions": [
+                    {"from": "flab_source", "to": "flab_a"},
+                    {"from": "flab_source", "to": "flab_b"},
+                    {"from": "flab_a", "to": "flab_a"},
+                    {"from": "flab_a", "to": "flab_b"},
+                    {"from": "flab_b", "to": "flab_a"},
+                    {"from": "flab_b", "to": "flab_b"},
+                ]
+            },
+        }],
+        "workload": {
+            "mode": "count",
+            "jobs": 4,
+            "amount_sats_min": 50_000_000,
+            "amount_sats_max": 100_000_000,
+            "delay_seconds_min": 0,
+            "delay_seconds_max": 5,
+        },
+        "confirmations_required": 2,
+        "fee_policy": {"type": "minimum"},
+        "address_policy": "new",
+        "randomization": {
+            "enabled": True,
+            "model": "uniform",
+            "seed": 2262026,
+        },
+    }
+    return c
+
+
 def cfg_sweep():
     """What the page builds: source -> a -> b -> destination, then everything swept on."""
     c = cfg_loop()
@@ -232,6 +271,29 @@ class WebControlTests(WebBase):
         bad = cfg_sweep()
         bad["flows"][0]["jitter_seconds"] = 5
         self.assertEqual(self.do("new", {"config": bad})[0], 400)
+
+    def test_new_accepts_experimental_config(self):
+        self.up()
+
+        s, out = self.do("new", {
+            "config": cfg_experimental(),
+            "description": "experimental from page",
+        })
+
+        self.assertEqual(s, 200, out)
+        self.assertIn("exp", out)
+        self.assertIn("hash", out)
+        self.assertIn("randomization: ENABLED", out["text"])
+
+    def test_experimental_config_does_not_require_destination_as_last_workload_hop(self):
+        self.up()
+
+        cfg = cfg_experimental()
+        transitions = cfg["flows"][0]["experimental_topology"]["transitions"]
+
+        self.assertTrue(all(t["to"] != "flab_dest" for t in transitions))
+        self.assertEqual(self.do("new", {"config": cfg})[0], 200)
+
 
     def test_second_run_refused_while_active_and_halt_then_continue(self):
         gate = threading.Event()

@@ -6,9 +6,9 @@ import unittest
 
 from flowlab import Engine
 from flowlab.cli import main
-from flowlab.dashboard import dgb
+from flowlab.dashboard import dgb, snapshot
 from tests.fake_chain import FakeChain
-from tests.test_executor import W
+from tests.test_executor import EXP_CFG, W
 from tests.test_sweep import cfg_sweep
 
 
@@ -73,6 +73,65 @@ class DashboardTests(DashBase):
         text = self.call("watch", exp, "--once")[1]
         self.assertIn("CONFIRMED", text)
         self.assertIn("PLANNED", text)
+
+    def test_experimental_snapshot_exposes_safe_progress_metadata(self):
+        with open(self.cf, "w") as f:
+            json.dump(EXP_CFG, f)
+
+        exp = self.make()
+        before = snapshot(self.db, exp)
+
+        self.assertEqual(before["mode"], "experimental")
+        self.assertEqual(before["target_jobs"], EXP_CFG["workload"]["jobs"])
+        self.assertEqual(before["randomization"], {
+            "model": EXP_CFG["randomization"]["model"],
+            "seed": EXP_CFG["randomization"]["seed"],
+        })
+        self.assertEqual(before["flows"][0]["jobs"], [])
+
+        self.assertEqual(self.call("run", exp)[0], 0)
+
+        after = snapshot(self.db, exp)
+        jobs = after["flows"][0]["jobs"]
+
+        self.assertEqual(len(jobs), EXP_CFG["workload"]["jobs"])
+        self.assertTrue(all(j["generated"] for j in jobs))
+        self.assertEqual(
+            [j["generated"]["decision_index"] for j in jobs],
+            list(range(EXP_CFG["workload"]["jobs"])),
+        )
+
+        for job in jobs:
+            generated = job["generated"]
+            self.assertIn("generator_version", generated)
+            self.assertIn("model", generated)
+            self.assertIn("seed", generated)
+            self.assertIn("balance_snapshot_sats", generated)
+            self.assertIn("fee_reserve_sats", generated)
+            self.assertIn("delay_s", job)
+
+            # Snapshot exposure is explicitly whitelisted.
+            self.assertLessEqual(set(generated), {
+                "source",
+                "generator_version",
+                "model",
+                "seed",
+                "flow_index",
+                "decision_index",
+                "eligible_transition_count",
+                "observed_balance_sats",
+                "fee_reserve_sats",
+                "balance_snapshot_sats",
+            })
+
+    def test_deterministic_snapshot_reports_deterministic_mode(self):
+        exp = self.make()
+        snap = snapshot(self.db, exp)
+
+        self.assertEqual(snap["mode"], "deterministic")
+        self.assertIsNone(snap["target_jobs"])
+        self.assertIsNone(snap["randomization"])
+
 
     def test_watching_changes_nothing(self):
         exp = self.make()
