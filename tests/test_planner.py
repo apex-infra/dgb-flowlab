@@ -5,7 +5,12 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from flowlab import ConfigError, Engine
-from flowlab.planner import PlanError, generate_jobs, next_due
+from flowlab.planner import (
+    PlanError,
+    experimental_decision,
+    generate_jobs,
+    next_due,
+)
 from tests.test_engine import CFG, FakeVerifier
 
 T = [
@@ -74,6 +79,66 @@ class SchemaTests(PlannerBase):
         self.bad([dict(T[0], delay_seconds=-1)])
         self.bad([dict(T[0], amount_sats=100_000_000_001)])
         self.bad([{"from": "w1_source", "to": "w2_flowA", "amount_sats": 5}])
+
+
+class ExperimentalDecisionTests(PlannerBase):
+    def experimental_flow(self, seed=12345, model="uniform"):
+        cfg = copy.deepcopy(CFG)
+        cfg["randomization"] = {
+            "enabled": True,
+            "model": model,
+            "seed": seed,
+        }
+
+        exp = self.e.create_experiment("experimental planner")
+        h = self.e.configure_experiment(exp, cfg)
+        self.e.approve(exp, h)
+        self.e.start(exp)
+
+        flow = self.e.list_flows(exp)[0]["id"]
+        self.e.advance_flow(flow, "PLAN")
+        return exp, flow
+
+    def test_same_seed_and_index_reproduce_same_decision(self):
+        _, flow = self.experimental_flow(seed=2262026)
+
+        a = experimental_decision(self.e, flow, 0)
+        b = experimental_decision(self.e, flow, 0)
+
+        self.assertEqual(a, b)
+
+    def test_decision_stays_inside_approved_bounds(self):
+        _, flow = self.experimental_flow(seed=777)
+
+        for i in range(50):
+            d = experimental_decision(self.e, flow, i)
+            self.assertGreaterEqual(d["amount_sats"], CFG["workload"]["amount_sats_min"])
+            self.assertLessEqual(d["amount_sats"], CFG["workload"]["amount_sats_max"])
+            self.assertGreaterEqual(d["delay_seconds"], CFG["workload"]["delay_seconds_min"])
+            self.assertLessEqual(d["delay_seconds"], CFG["workload"]["delay_seconds_max"])
+
+    def test_decision_records_replay_metadata(self):
+        _, flow = self.experimental_flow(seed=999)
+
+        d = experimental_decision(self.e, flow, 7)
+
+        self.assertEqual(d["generated_from"]["seed"], 999)
+        self.assertEqual(d["generated_from"]["decision_index"], 7)
+        self.assertEqual(d["generated_from"]["flow_index"], 0)
+        self.assertEqual(d["generated_from"]["generator_version"], 1)
+        self.assertEqual(d["generated_from"]["model"], "uniform")
+
+    def test_disabled_randomization_is_refused(self):
+        _, flow = self.planned()
+
+        with self.assertRaises(PlanError):
+            experimental_decision(self.e, flow, 0)
+
+    def test_unsupported_generator_model_is_refused(self):
+        _, flow = self.experimental_flow(seed=123, model="weighted")
+
+        with self.assertRaises(PlanError):
+            experimental_decision(self.e, flow, 0)
 
 
 class PlanTests(PlannerBase):
