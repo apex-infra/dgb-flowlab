@@ -213,6 +213,42 @@ class RunTests(ExecBase):
         self.assertEqual(stats["total_fees_sats"], FEE)
         self.assertIn("flab_a", final_state["balances_sats"])
 
+    def test_self_transfer_reconciliation_does_not_require_getrawtransaction(self):
+        self.chain.fund("flab_a", 500_000_000)
+        self.chain.mine(3)
+
+        flow = self.e.list_flows(self.exp)[0]["id"]
+        self.e.advance_flow(flow, "PLAN")
+
+        jid = self.e.add_job(
+            flow,
+            {
+                "from": "flab_a",
+                "to": "flab_a",
+                "amount_sats": 100_000_000,
+                "step": 0,
+            },
+            planned_delay_s=0,
+            generated_from={"source": "self-transfer reconciliation test"},
+        )
+
+        self.e.advance_flow(flow, "EXECUTE")
+        self.x.tick(self.exp)
+
+        self.chain.mine(2)
+        self.x.tick(self.exp)
+
+        def unavailable(*args, **kwargs):
+            raise RpcError("getrawtransaction unavailable without txindex", -5)
+
+        self.chain.get_raw_transaction = unavailable
+
+        ok, _, stats = self.x.reconcile(self.exp)
+
+        self.assertTrue(ok, stats)
+        self.assertEqual(stats["issues"], [])
+        self.assertEqual(self.e.get_job(jid)["state"], "CONFIRMED")
+
     def test_self_transfer_reconciliation_catches_wrong_output_amount(self):
         self.chain.fund("flab_a", 500_000_000)
         self.chain.mine(3)
@@ -242,21 +278,17 @@ class RunTests(ExecBase):
         recorded = json.loads(job["result_json"])
         target = recorded["address"]
 
-        real = self.chain.get_raw_transaction
+        real = self.chain.decode_raw_transaction
 
-        def liar(txid, verbose=True):
-            result = real(txid, verbose)
-            if not verbose:
-                return result
-
-            result = copy.deepcopy(result)
+        def liar(txhex):
+            result = copy.deepcopy(real(txhex))
             for output in result["vout"]:
                 if output["scriptPubKey"].get("address") == target:
                     output["value"] -= Decimal("0.00000001")
                     break
             return result
 
-        self.chain.get_raw_transaction = liar
+        self.chain.decode_raw_transaction = liar
 
         ok, _, stats = self.x.reconcile(self.exp)
 

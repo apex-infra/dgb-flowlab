@@ -117,7 +117,12 @@ class FakeChain:
             self.utxos[i]["spent"] = True
         for v, (a, s) in enumerate(r["ordered"]):
             self.utxos[(txid, v)] = {"addr": a, "sats": s, "spent": False, "txid": txid}
-        self.txs[txid] = {"inputs": ins, "outputs": r["ordered"], "height": None}
+        self.txs[txid] = {
+            "inputs": ins,
+            "outputs": r["ordered"],
+            "height": None,
+            "hex": hexstr,
+        }
         return txid
 
     def get_raw_transaction(self, txid, verbose=True):
@@ -145,7 +150,11 @@ class FakeChain:
         if t is None or (mine_in == 0 and mine_out == 0):
             raise RpcError("Invalid or non-wallet transaction id", -5)
         net = mine_out - mine_in
-        res = {"confirmations": self._confs(txid), "blockheight": t["height"]}
+        res = {
+            "confirmations": self._confs(txid),
+            "blockheight": t["height"],
+            "hex": t["hex"],
+        }
         if mine_in:
             res["fee"] = -Decimal(FEE) / SATS
             res["amount"] = Decimal(net + FEE) / SATS

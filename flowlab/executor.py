@@ -243,7 +243,10 @@ class Executor:
                         issues.append(f"{tag}: self-transfer has no recorded destination address")
                     else:
                         try:
-                            raw = self.rpc.get_raw_transaction(job["txid"], True)
+                            txhex = sent.get("hex")
+                            if not txhex:
+                                raise RpcError("wallet transaction has no raw hex")
+                            raw = self.rpc.decode_raw_transaction(txhex)
                             actual = sum(
                                 to_sats(o["value"])
                                 for o in raw.get("vout", [])
