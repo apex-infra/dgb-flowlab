@@ -18,13 +18,21 @@ class NodeCase:
         self.sent = []
         h = self.n.handlers
         h["getnetworkinfo"] = lambda: {"relayfee": Decimal("0.001")}
+        h["estimatesmartfee"] = lambda blocks: {
+            "feerate": Decimal("0.00328494"),
+            "blocks": blocks,
+        }
         h["getaddressinfo"] = lambda a: {"ismine": a in (DEST, CHANGE)}
         h["getnewaddress"] = lambda label: CHANGE
         h["listunspent"] = lambda m: [
             {"txid": "11" * 32, "vout": 0, "amount": Decimal("5.0"), "spendable": True, "safe": True},
             {"txid": "22" * 32, "vout": 1, "amount": Decimal("0.5"), "spendable": True, "safe": True}]
         h["createrawtransaction"] = lambda i, o: "aa"
-        h["fundrawtransaction"] = lambda hx, o: {"hex": "bb", "fee": Decimal("0.001")}
+        self.fund_opts = []
+        h["fundrawtransaction"] = lambda hx, o: (
+            self.fund_opts.append(o),
+            {"hex": "bb", "fee": Decimal("0.001")},
+        )[1]
         h["signrawtransactionwithwallet"] = lambda hx: {"hex": "cc", "complete": True}
         self.vout = [{"value": Decimal("1.0"), "scriptPubKey": {"address": DEST}},
                      {"value": Decimal("3.999"), "scriptPubKey": {"address": CHANGE}}]
@@ -50,11 +58,12 @@ class BuildTests(NodeCase, unittest.TestCase):
         self.assertIn("to address", p.summary())
         self.assertEqual(self.sent, [])  # build never broadcasts
 
-    def test_planning_fee_reserve_uses_relay_fee_not_maximum_cap(self):
+    def test_planning_fee_reserve_uses_smart_fee_estimate(self):
         reserve = self.b.planning_fee_reserve_sats()
 
-        self.assertGreater(reserve, 0)
+        self.assertEqual(reserve, 204_324)
         self.assertLess(reserve, self.b.max_fee_sats)
+
 
     def test_planning_fee_reserve_rejects_bad_input_counts(self):
         for n in (0, -1, 1.5, True):

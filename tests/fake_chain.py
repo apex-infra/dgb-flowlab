@@ -46,6 +46,13 @@ class FakeChain:
     def get_network_info(self):
         return {"relayfee": Decimal("0.1")}
 
+
+    def estimate_smart_fee(self, blocks=6):
+        return {
+            "feerate": Decimal("0.001"),
+            "blocks": int(blocks),
+        }
+
     def list_wallets(self):
         return list(self.wallets)
 

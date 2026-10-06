@@ -53,17 +53,33 @@ class TxBuilder:
         self.wallets = list(wallets)
         self.max_fee_sats = int(max_fee_sats)
 
-    def _fee_reserve(self, n_inputs):
-        """Sats to keep back for the fee: the node's relay fee on a typical segwit
-        size estimate, never above the cap. If the node will not say, fall back to
-        the whole cap (conservative). The node still has the final word: funding
-        fails cleanly if this was too optimistic."""
+    def _smart_fee_rate_sat_vb(self, blocks=6):
+        """Return the node's smart fee estimate in sat/vB.
+
+        estimatesmartfee reports DGB/kvB. Convert that exact rate to sat/vB.
+        If the node cannot provide a usable estimate, return None.
+        """
         try:
-            rate = to_sats(self.rpc.get_network_info()["relayfee"])  # sats per kB
+            estimate = self.rpc.estimate_smart_fee(blocks)
+            feerate = estimate.get("feerate")
+            if feerate is None:
+                return None
+            sats_per_kvb = to_sats(feerate)
+            if sats_per_kvb <= 0:
+                return None
+            return sats_per_kvb / 1000
         except Exception:  # noqa: BLE001
+            return None
+
+    def _fee_reserve(self, n_inputs):
+        """Sats to keep back for the fee using the same smart-fee source that
+        transaction funding uses. If the node cannot provide an estimate, fall
+        back to the full configured fee cap."""
+        rate_sat_vb = self._smart_fee_rate_sat_vb()
+        if rate_sat_vb is None:
             return self.max_fee_sats
         size = 10 + 68 * n_inputs + 2 * 34
-        return min(self.max_fee_sats, ceil(rate * size / 1000))
+        return min(self.max_fee_sats, ceil(rate_sat_vb * size))
 
     def planning_fee_reserve_sats(self, n_inputs=8):
         """Conservative fee reserve used during planning.

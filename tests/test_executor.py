@@ -483,7 +483,7 @@ class NodeVerifierIntegration(ExecBase):
 
 
 class FeeReserveTests(unittest.TestCase):
-    def test_reserve_is_small_when_node_reports_relay_fee(self):
+    def test_reserve_is_small_when_node_reports_smart_fee(self):
         c = FakeChain(W)
         c.fund("flab_source", 100_000_000)
         c.mine(3)
@@ -495,8 +495,11 @@ class FeeReserveTests(unittest.TestCase):
         c = FakeChain(W)
         c.fund("flab_source", 100_000_000)
         c.mine(3)
-        def nope(): raise RpcError("no")
-        c.get_network_info = nope
+
+        def nope(blocks=6):
+            raise RpcError("no")
+
+        c.estimate_smart_fee = nope
         b = TxBuilder(c, W, max_fee_sats=10_000_000)
         with self.assertRaises(BuildError):
             b.build("flab_source", c.get_new_address("flab_a"), 95_000_000)
