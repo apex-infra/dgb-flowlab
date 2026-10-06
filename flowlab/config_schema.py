@@ -158,9 +158,18 @@ def validate(cfg):
             _need(fl.get("transfers") is None, f"{where}: use either repeat or transfers, not both")
             fl["transfers"] = _expand_repeat(fl, names, where)
             del fl["repeat"]
-        if fl.get("transfers") is not None:
+
+        has_transfers = fl.get("transfers") is not None
+        has_experimental = fl.get("experimental_topology") is not None
+
+        _need(
+            not (has_transfers and has_experimental),
+            f"{where}: use either explicit transfers or experimental_topology, not both",
+        )
+
+        if has_transfers:
             _validate_transfers(fl, names, where)
-        if fl.get("experimental_topology") is not None:
+        if has_experimental:
             _validate_experimental_topology(fl, where)
 
     wl = cfg.get("workload")

@@ -62,6 +62,18 @@ class RepeatTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             validate(c)
 
+    def test_cannot_mix_explicit_transfers_and_experimental_topology(self):
+        c = cfg_repeat()
+        c["flows"][0]["experimental_topology"] = {
+            "transitions": [
+                {"from": "flab_source", "to": "flab_a"},
+                {"from": "flab_a", "to": "flab_b"},
+            ]
+        }
+
+        with self.assertRaises(ConfigError):
+            validate(c)
+
     def test_randomization_requires_a_seed(self):
         with self.assertRaises(ConfigError):
             validate(dict(cfg_repeat(), randomization={"enabled": True, "model": "uniform"}))
@@ -71,6 +83,8 @@ class RepeatTests(unittest.TestCase):
             cfg_repeat(),
             randomization={"enabled": True, "model": "uniform", "seed": 12345},
         )
+        del cfg["flows"][0]["repeat"]
+
         cfg["workload"] = {
             "mode": "count",
             "jobs": 7,
