@@ -11,11 +11,24 @@ from tests.test_dashboard import DashBase
 from tests.test_sweep import cfg_sweep as _sweep
 
 
-def cfg_sweep():
-    """Like the page builds it: no workload block, no randomization key."""
+def cfg_loop():
+    """A repeat config that loops back to the source: valid for the CLI, refused by the page."""
     c = _sweep()
     c.pop("workload", None)
     c.pop("randomization", None)
+    return c
+
+
+def cfg_sweep():
+    """What the page builds: source -> a -> b -> destination, then everything swept on."""
+    c = cfg_loop()
+    fl = c["flows"][0]
+    fl.pop("repeat", None)
+    fl["flow_wallets"], fl["destination_wallet"] = ["flab_a", "flab_b"], "flab_dest"
+    fl["allocation_sats"] = 200_000_000
+    fl["transfers"] = [{"from": "flab_source", "to": "flab_a", "amount_sats": 200_000_000, "delay_seconds": 0},
+                       {"from": "flab_a", "to": "flab_b", "amount_sats": "all", "delay_seconds": 0},
+                       {"from": "flab_b", "to": "flab_dest", "amount_sats": "all", "delay_seconds": 0}]
     return c
 
 
@@ -212,7 +225,7 @@ class WebControlTests(WebBase):
     def test_new_refuses_bad_and_randomising_configs(self):
         self.up()
         self.assertEqual(self.do("new", {"config": "x"})[0], 400)
-        bad = cfg_sweep()
+        bad = cfg_loop()
         bad["flows"][0]["repeat"]["randomize"] = True
         s, out = self.do("new", {"config": bad})
         self.assertEqual(s, 400)
@@ -277,3 +290,13 @@ class WebControlTests(WebBase):
         gate.set()
         self.srv.controller.close()
         self.assertFalse(self.srv.controller.active())
+
+    def test_funds_must_end_in_the_destination(self):
+        self.up()
+        s, out = self.do("new", {"config": cfg_loop()})          # ends back at the source
+        self.assertEqual(s, 400)
+        self.assertIn("destination", out["error"])
+        bad = cfg_sweep()
+        bad["flows"][0]["transfers"].pop()                       # stops at flab_b
+        self.assertEqual(self.do("new", {"config": bad})[0], 400)
+        self.assertEqual(self.do("new", {"config": cfg_sweep()})[0], 200)

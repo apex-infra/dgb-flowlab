@@ -71,3 +71,6 @@ label{display:inline-flex;gap:8px;align-items:center;margin-right:16px}
 @media(max-width:900px){.field{grid-template-columns:1fr}.hoprow{grid-template-columns:1fr 1fr}}
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 [hidden]{display:none!important}
+.midrow{display:flex;gap:8px;align-items:center;margin:2px 0}.midrow label{min-width:130px}
+.midrow button{padding:2px 8px;font-size:12px}.route{color:var(--fg);overflow-wrap:anywhere}
+details#f-adv{margin:0 0 16px}details#f-adv .hoprow{margin-top:8px}
