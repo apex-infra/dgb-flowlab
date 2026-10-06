@@ -8,7 +8,7 @@ header{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 28px;padding:20p
 .id{color:var(--mute)}
 .pill{padding:2px 12px;border-radius:99px;font-weight:600;font-size:13px;border:1px solid currentColor}
 .desc{color:var(--mute);flex:1 1 220px}
-.metrics{display:flex;flex-wrap:wrap;gap:6px 36px;padding:0 28px 8px}
+.metrics{display:flex;flex-wrap:wrap;gap:6px 36px;padding:16px 28px 10px}
 .metric b{display:block;font-size:26px;font-weight:600;line-height:1.1}
 .metric span{color:var(--mute);font-size:12.5px}
 #alert{margin:6px 28px 0;padding:8px 12px;border-left:3px solid var(--coral);background:#2a1a22;display:none}
@@ -74,3 +74,5 @@ label{display:inline-flex;gap:8px;align-items:center;margin-right:16px}
 .midrow{display:flex;gap:8px;align-items:center;margin:2px 0}.midrow label{min-width:130px}
 .midrow button{padding:2px 8px;font-size:12px}.route{color:var(--fg);overflow-wrap:anywhere}
 details#f-adv{margin:0 0 16px}details#f-adv .hoprow{margin-top:8px}
+.exports{display:inline-flex;gap:8px}a.btn{color:var(--mute);border:1px solid var(--line);border-radius:4px;padding:5px 10px;font-size:13px;text-decoration:none}
+a.btn:hover{color:var(--fg)}

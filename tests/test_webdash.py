@@ -300,3 +300,31 @@ class WebControlTests(WebBase):
         bad["flows"][0]["transfers"].pop()                       # stops at flab_b
         self.assertEqual(self.do("new", {"config": bad})[0], 400)
         self.assertEqual(self.do("new", {"config": cfg_sweep()})[0], 200)
+
+
+class ExportTests(WebBase):
+    def test_export_csv_and_json_match_the_run_and_hold_no_secrets(self):
+        self.exp = self.make()
+        self.call("run", self.exp)
+        self.serve(self.chain, wallets=tuple(self.chain.wallets))
+        s, h, body = self.get(f"/api/export?exp={self.exp}&fmt=csv")
+        self.assertEqual(s, 200)
+        self.assertIn("text/csv", h["Content-Type"])
+        self.assertIn(f'{self.exp}.csv', h["Content-Disposition"])
+        rows = body.decode().strip().splitlines()
+        self.assertEqual(rows[0], "hop,from,to,state,planned_sats,sent_sats,fee_sats,txid,confirmations")
+        self.assertEqual(len(rows), 5)                       # header + 4 hops
+        s, h, body = self.get(f"/api/export?exp={self.exp}&fmt=json")
+        doc = json.loads(body)
+        self.assertEqual(doc["totals"]["hops"], 4)
+        self.assertEqual(doc["totals"]["confirmed"], 4)
+        self.assertEqual(doc["totals"]["fee_sats"], sum(x["fee_sats"] for x in doc["hops"]))
+        self.assertNotIn("config_json", json.dumps(doc))
+        self.assertNotIn(self.srv.token, body.decode())
+
+    def test_export_refuses_bad_format_unknown_run_and_wrong_host(self):
+        self.exp = self.make()
+        self.serve()
+        self.assertEqual(self.get(f"/api/export?exp={self.exp}&fmt=xml")[0], 404)
+        self.assertEqual(self.get("/api/export?exp=EXP-NOPE&fmt=csv")[0], 404)
+        self.assertEqual(self.get(f"/api/export?exp={self.exp}&fmt=csv", host="evil.example")[0], 403)

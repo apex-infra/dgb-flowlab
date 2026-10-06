@@ -187,6 +187,15 @@ function renderActions(data) {
   box.append(stop);
 }
 
+function renderExports(data) {
+  const e = data.snapshot && data.snapshot.exp;
+  if (!changed("exports", [e && e.id])) return;
+  const box = $("exports"); box.replaceChildren();
+  if (!e) return;
+  ["csv", "json"].forEach(f => { const a = h("a", "btn", "Export " + f.toUpperCase());
+    a.href = "/api/export?exp=" + encodeURIComponent(e.id) + "&fmt=" + f; a.setAttribute("download", ""); box.append(a); });
+}
+
 function renderPicker(data) {
   const list = (data.extras && data.extras.experiments) || [], cur = data.snapshot ? data.snapshot.exp.id : "";
   if (!changed("pick", [list.map(x => x.id + x.state), cur])) return;
@@ -207,7 +216,7 @@ function renderConsole(data) {
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
-  renderPicker(data); renderBanner(data); renderActions(data); renderUnresolved(data); renderConsole(data);
+  renderPicker(data); renderExports(data); renderBanner(data); renderActions(data); renderUnresolved(data); renderConsole(data);
   const s = data.snapshot;
   if (!s) { $("state").textContent = "none"; $("state").className = "pill mute"; $("desc").textContent = CONTROL ? "No experiment yet. Open New experiment to create one." : "No experiment yet."; return; }
   const e = s.exp, jobs = s.flows.flatMap(f => f.jobs);

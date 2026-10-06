@@ -13,7 +13,9 @@ Safety, in layers:
 Start it with --read-only to switch every action off.
 """
 
+import csv
 import hmac
+import io
 import json
 import secrets
 import time
@@ -31,6 +33,25 @@ BALANCE_TTL = 4.0
 MAX_BODY = 65536
 CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src data:; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+
+
+def export_run(snap, fmt):
+    """A finished picture of one run: hops, fees, txids and events. Integer satoshis, no credentials."""
+    keep = ("id", "description", "state", "state_reason", "started_at", "completed_at")
+    hops = [{"hop": j["seq"], "from": j["from"], "to": j["to"], "state": j["state"], "planned_sats": j["planned"],
+             "sent_sats": j["amount"], "fee_sats": j["fee"], "txid": j["txid"], "confirmations": j["confs"]}
+            for f in snap["flows"] for j in f["jobs"]]
+    if fmt == "csv":
+        out = io.StringIO()
+        w = csv.DictWriter(out, fieldnames=list(hops[0]) if hops else ["hop"], lineterminator="\n")
+        w.writeheader()
+        w.writerows(hops)
+        return out.getvalue().encode(), "text/csv; charset=utf-8"
+    doc = {"experiment": {k: snap["exp"][k] for k in keep},
+           "totals": {"hops": len(hops), "confirmed": sum(h["state"] == "CONFIRMED" for h in hops),
+                      "fee_sats": sum(h["fee_sats"] or 0 for h in hops)},
+           "hops": hops, "events": snap["events"]}
+    return json.dumps(doc, indent=2).encode(), "application/json"
 
 
 def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None,
@@ -104,6 +125,18 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                                         "wallets": list(wallets), "control": control,
                                         "runner": {"active": ctl.active(), "exp": ctl.exp},
                                         "log": list(ctl.log), "server_time": now.isoformat()})
+            if path == "/api/export":
+                q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
+                fmt = q.get("fmt", "json")
+                try:
+                    snap = dashboard.snapshot(db_path, q.get("exp") or exp_id, datetime.now(timezone.utc))
+                except Exception:  # noqa: BLE001
+                    snap = None
+                if fmt not in ("json", "csv") or not snap:
+                    return self._send(404, b"not found", "text/plain")
+                body, ctype = export_run(snap, fmt)
+                name = "".join(c for c in snap["exp"]["id"] if c.isalnum() or c in "-_")
+                return self._send(200, body, ctype, {"Content-Disposition": f'attachment; filename="{name}.{fmt}"'})
             return self._send(404, b"not found", "text/plain")
 
         do_GET = do_HEAD = _handle
