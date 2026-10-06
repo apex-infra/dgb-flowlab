@@ -8,7 +8,7 @@ from flowlab import Engine
 from flowlab.cli import main
 from flowlab.dashboard import dgb, snapshot
 from tests.fake_chain import FakeChain
-from tests.test_executor import EXP_CFG, W
+from tests.test_executor import EXP_CFG, STAGED_EXP_CFG, W
 from tests.test_sweep import cfg_sweep
 
 
@@ -148,6 +148,82 @@ class DashboardTests(DashBase):
                 "phase",
                 "worker",
             })
+
+    def test_staged_snapshot_reports_principal_accounting(self):
+        with open(self.cf, "w") as f:
+            json.dump(STAGED_EXP_CFG, f)
+
+        exp = self.make()
+
+        before = snapshot(self.db, exp)
+        allocation = STAGED_EXP_CFG["flows"][0]["allocation_sats"]
+
+        self.assertTrue(before["staged"])
+        self.assertEqual(before["staged_accounting"], {
+            "approved_principal_sats": allocation,
+            "committed_principal_sats": 0,
+            "commitment_status": "not started",
+            "principal_after_fees_sats": 0,
+            "cumulative_workload_sats": 0,
+            "experiment_fees_sats": 0,
+            "commitment_fee_sats": 0,
+            "destination_receipts_sats": 0,
+            "accounting_delta_sats": None,
+            "accounting_reconciled": None,
+        })
+
+        self.assertEqual(self.call("run", exp)[0], 0)
+
+        after = snapshot(self.db, exp)
+        jobs = after["flows"][0]["jobs"]
+
+        allocation_jobs = [
+            j for j in jobs
+            if j["generated"]
+            and j["generated"].get("source") == "experimental allocation commit"
+        ]
+        workload_jobs = [
+            j for j in jobs
+            if j["generated"]
+            and isinstance(j["generated"].get("decision_index"), int)
+        ]
+
+        self.assertEqual(len(allocation_jobs), 1)
+
+        commitment_fee = allocation_jobs[0]["fee"]
+        experiment_fees = sum(
+            j["fee"] or 0
+            for j in jobs
+            if j is not allocation_jobs[0]
+        )
+        cumulative_workload = sum(
+            j["amount"]
+            for j in workload_jobs
+        )
+
+        finalization_jobs = [
+            j for j in jobs
+            if j["generated"]
+            and j["generated"].get("phase") == "finalization"
+        ]
+        destination_receipts = sum(
+            j["amount"]
+            for j in finalization_jobs
+            if j["state"] == "CONFIRMED"
+        )
+
+        self.assertEqual(after["staged_accounting"], {
+            "approved_principal_sats": allocation,
+            "committed_principal_sats": allocation,
+            "commitment_status": "confirmed",
+            "principal_after_fees_sats": allocation - experiment_fees,
+            "cumulative_workload_sats": cumulative_workload,
+            "experiment_fees_sats": experiment_fees,
+            "commitment_fee_sats": commitment_fee,
+            "destination_receipts_sats": destination_receipts,
+            "accounting_delta_sats": 0,
+            "accounting_reconciled": True,
+        })
 
     def test_deterministic_snapshot_reports_deterministic_mode(self):
         exp = self.make()

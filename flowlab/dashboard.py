@@ -62,6 +62,11 @@ def snapshot(db_path, exp_id=None, now=None):
         rnd = cfg.get("randomization") or {"enabled": False}
         experimental = bool(rnd.get("enabled"))
         workload = cfg.get("workload") or {}
+        staged = experimental and any(
+            f.get("allocation_wallet")
+            for f in cfg.get("flows", [])
+            if isinstance(f, dict)
+        )
 
         snap = {
             "exp": dict(exp),
@@ -69,6 +74,8 @@ def snapshot(db_path, exp_id=None, now=None):
             "events": [],
             "next_due_s": None,
             "mode": "experimental" if experimental else "deterministic",
+            "staged": staged,
+            "staged_accounting": None,
             "target_jobs": (
                 workload.get("jobs")
                 if experimental and workload.get("mode") == "count"
@@ -115,6 +122,114 @@ def snapshot(db_path, exp_id=None, now=None):
                                   "required": f["confirmations_required"], "source": f["source_wallet"],
                                   "wallets": json.loads(f["flow_wallets_json"]),
                                   "dest": f["destination_wallet"], "jobs": jobs})
+        if staged:
+            all_jobs = [
+                job
+                for flow in snap["flows"]
+                for job in flow["jobs"]
+            ]
+
+            allocation_jobs = [
+                job for job in all_jobs
+                if job["generated"]
+                and job["generated"].get("source") == "experimental allocation commit"
+            ]
+
+            workload_jobs = [
+                job for job in all_jobs
+                if job["generated"]
+                and isinstance(job["generated"].get("decision_index"), int)
+            ]
+
+            finalization_jobs = [
+                job for job in all_jobs
+                if job["generated"]
+                and job["generated"].get("phase") == "finalization"
+            ]
+
+            approved_principal = sum(
+                f.get("allocation_sats", 0)
+                for f in cfg.get("flows", [])
+                if isinstance(f, dict) and f.get("allocation_wallet")
+            )
+
+            confirmed_allocations = [
+                job for job in allocation_jobs
+                if job["state"] == "CONFIRMED"
+            ]
+
+            committed_principal = (
+                approved_principal
+                if confirmed_allocations
+                else 0
+            )
+
+            if any(job["state"] == "CONFIRMED" for job in allocation_jobs):
+                commitment_status = "confirmed"
+            elif any(job["state"] == "BROADCAST" for job in allocation_jobs):
+                commitment_status = "broadcast"
+            elif allocation_jobs:
+                commitment_status = "planned"
+            else:
+                commitment_status = "not started"
+
+            commitment_fees = sum(
+                job["fee"] or 0
+                for job in allocation_jobs
+            )
+
+            experiment_fees = sum(
+                job["fee"] or 0
+                for job in all_jobs
+                if not (
+                    job["generated"]
+                    and job["generated"].get("source")
+                    == "experimental allocation commit"
+                )
+            )
+
+            cumulative_workload = sum(
+                job["amount"]
+                for job in workload_jobs
+                if isinstance(job["amount"], int)
+            )
+
+            destination_receipts = sum(
+                job["amount"]
+                for job in finalization_jobs
+                if job["state"] == "CONFIRMED"
+                and isinstance(job["amount"], int)
+            )
+
+            principal_after_fees = max(
+                0,
+                committed_principal - experiment_fees,
+            )
+
+            accounting_delta = None
+            accounting_reconciled = None
+
+            if exp["state"] == "COMPLETE" and committed_principal:
+                accounting_delta = (
+                    committed_principal
+                    - experiment_fees
+                    - destination_receipts
+                )
+                accounting_reconciled = accounting_delta == 0
+
+            snap["staged_accounting"] = {
+                "approved_principal_sats": approved_principal,
+                "committed_principal_sats": committed_principal,
+                "commitment_status": commitment_status,
+                "principal_after_fees_sats": principal_after_fees,
+                "cumulative_workload_sats": cumulative_workload,
+                "experiment_fees_sats": experiment_fees,
+                "commitment_fee_sats": commitment_fees,
+                "destination_receipts_sats": destination_receipts,
+                "accounting_delta_sats": accounting_delta,
+                "accounting_reconciled": accounting_reconciled,
+            }
+
         snap["events"] = [dict(r) for r in con.execute(
             "SELECT ts, event, amount_sats, txid, resulting_state FROM audit_log "
             "WHERE experiment_id=? ORDER BY id DESC LIMIT 8", (exp["id"],))]

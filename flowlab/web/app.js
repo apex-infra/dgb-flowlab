@@ -194,12 +194,46 @@ function renderExperimental(data) {
     return d;
   };
 
+  const accounting = s.staged_accounting;
+
+  const appendAccounting = () => {
+    if (!accounting) return;
+
+    grid.append(
+      item("Approved principal", dgb(accounting.approved_principal_sats) + " DGB"),
+      item(
+        "Commitment",
+        accounting.commitment_status
+        + (accounting.committed_principal_sats
+          ? " · " + dgb(accounting.committed_principal_sats) + " DGB"
+          : "")
+      ),
+      item("Principal after fees", dgb(accounting.principal_after_fees_sats) + " DGB"),
+      item("Cumulative workload", dgb(accounting.cumulative_workload_sats) + " DGB"),
+      item("Experiment fees", dgb(accounting.experiment_fees_sats) + " DGB"),
+      item("Destination receipts", dgb(accounting.destination_receipts_sats) + " DGB"),
+      item("Reserve commit fee", dgb(accounting.commitment_fee_sats) + " DGB")
+    );
+
+    if (accounting.accounting_reconciled === true) {
+      grid.append(item("Accounting", "reconciled ✓"));
+    } else if (accounting.accounting_reconciled === false) {
+      grid.append(
+        item(
+          "Accounting",
+          "mismatch " + dgb(accounting.accounting_delta_sats) + " DGB"
+        )
+      );
+    }
+  };
+
   if (!current) {
     grid.append(
       item("Approved workload", String(s.target_jobs || "-") + " decisions"),
       item("Generated", String(decisions.length)),
       item("Current decision", "not generated yet")
     );
+    appendAccounting();
     box.append(grid);
     return;
   }
@@ -213,9 +247,19 @@ function renderExperimental(data) {
     item("Planned amount", current.planned === "all" ? "entire balance" : dgb(current.planned) + " DGB"),
     item("Delay", String(current.delay_s || 0) + " s"),
     item("Eligible routes", String(g.eligible_transition_count ?? "-")),
-    item("Observed source balance", g.observed_balance_sats != null ? dgb(g.observed_balance_sats) + " DGB" : "-"),
-    item("Source budget used", g.source_budget_used_sats != null ? dgb(g.source_budget_used_sats) + " DGB" : "-"),
-    item("Source budget remaining", g.source_budget_remaining_sats != null ? dgb(g.source_budget_remaining_sats) + " DGB" : "-"),
+    item("Observed sender balance", g.observed_balance_sats != null ? dgb(g.observed_balance_sats) + " DGB" : "-")
+  );
+
+  if (accounting) {
+    appendAccounting();
+  } else {
+    grid.append(
+      item("Source budget used", g.source_budget_used_sats != null ? dgb(g.source_budget_used_sats) + " DGB" : "-"),
+      item("Source budget remaining", g.source_budget_remaining_sats != null ? dgb(g.source_budget_remaining_sats) + " DGB" : "-")
+    );
+  }
+
+  grid.append(
     item("Fee reserve", g.fee_reserve_sats != null ? dgb(g.fee_reserve_sats) + " DGB" : "-"),
     item("Generator", "v" + (g.generator_version ?? "-")),
     item(
@@ -314,6 +358,49 @@ function renderConsole(data) {
   if (stick) c.scrollTop = c.scrollHeight;
 }
 
+function orderedWalletNames(bal, roles) {
+  if (!bal) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  for (const role of ["reserve", "stage", "workers", "hubs", "destinations"]) {
+    const names = roles && Array.isArray(roles[role]) ? roles[role] : [];
+    for (const w of names) {
+      if (Object.prototype.hasOwnProperty.call(bal, w) && !seen.has(w)) {
+        out.push(w);
+        seen.add(w);
+      }
+    }
+  }
+
+  // Preserve visibility of any allowlisted wallet that has not yet been
+  // assigned a dashboard role.
+  for (const w of Object.keys(bal)) {
+    if (!seen.has(w)) out.push(w);
+  }
+
+  return out;
+}
+
+function walletRoleName(wallet, roles) {
+  const labels = {
+    reserve: "reserve",
+    stage: "stage",
+    workers: "worker",
+    hubs: "hub",
+    destinations: "destination"
+  };
+
+  for (const role of ["reserve", "stage", "workers", "hubs", "destinations"]) {
+    if (roles && Array.isArray(roles[role]) && roles[role].includes(wallet))
+      return labels[role];
+  }
+
+  return null;
+}
+
+
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
@@ -349,10 +436,20 @@ function render(data) {
   if (e.state === "CONFIGURED") hops.append(h("div", "mute", "Not approved yet. The plan is shown above the table."));
   const bal = data.balances, tot = bal ? Object.values(bal).reduce((a, v) => a + (v || 0), 0) : 0;
   if (!bal) wal.appendChild(h("div", "mute", "Balances need the node, which is not answering."));
-  else for (const w in bal) {
+  else for (const w of orderedWalletNames(bal, data.wallet_roles || {})) {
     const r = h("div", "w"), bar = h("div", "bar"), i = h("i");
-    i.style.width = (tot && bal[w] ? Math.round(100 * bal[w] / tot) : 0) + "%"; bar.appendChild(i);
-    r.append(h("span", null, w), h("span", null, bal[w] == null ? "-" : dgb(bal[w]) + " DGB"), bar); wal.appendChild(r);
+    const role = walletRoleName(w, data.wallet_roles || {});
+    const name = role ? w + " · " + role : w;
+
+    i.style.width = (tot && bal[w] ? Math.round(100 * bal[w] / tot) : 0) + "%";
+    bar.appendChild(i);
+
+    r.append(
+      h("span", null, name),
+      h("span", null, bal[w] == null ? "-" : dgb(bal[w]) + " DGB"),
+      bar
+    );
+    wal.appendChild(r);
   }
   s.events.forEach(x => {
     const d = h("div", "ev"), e1 = x.event.charAt(0) + x.event.slice(1).toLowerCase();

@@ -311,6 +311,13 @@ class WebReadTests(WebBase):
         self.assertIn('roleWallets("reserve")', form)
         self.assertIn('roleWallets("stage")', form)
         self.assertIn('roleWallets("destinations")', form)
+        self.assertIn("orderedWalletNames", app)
+        self.assertIn("walletRoleName", app)
+        self.assertIn("staged_accounting", app)
+        self.assertIn("Approved principal", app)
+        self.assertIn("Principal after fees", app)
+        self.assertIn("Destination receipts", app)
+        self.assertIn("reconciled ✓", app)
 
     def test_snapshot_exposes_wallet_roles(self):
         roles = {
