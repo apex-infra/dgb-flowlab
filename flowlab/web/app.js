@@ -325,10 +325,16 @@ function render(data) {
   $("desc").textContent = e.description || "";
   const st = $("state"); st.textContent = e.state; st.className = "pill " + (PILL[e.state] || "mute");
   const confirmed = jobs.filter(j => j.state === "CONFIRMED").length;
+  const decisions = s.mode === "experimental"
+    ? jobs.filter(j => j.generated && Number.isInteger(j.generated.decision_index))
+    : [];
+  const confirmedDecisions = decisions.filter(j => j.state === "CONFIRMED").length;
   const target = s.mode === "experimental" && Number.isInteger(s.target_jobs) ? s.target_jobs : jobs.length;
-  $("m-hops").textContent = confirmed + " / " + target;
+  $("m-hops").textContent = s.mode === "experimental"
+    ? confirmedDecisions + " / " + target
+    : confirmed + " / " + target;
   $("m-hops-l").textContent = s.mode === "experimental" ? "decisions confirmed" : "hops confirmed";
-  $("m-generated").textContent = s.mode === "experimental" ? jobs.length + " / " + target : String(jobs.length);
+  $("m-generated").textContent = String(jobs.length);
   $("m-mode").textContent = s.mode || "deterministic";
   $("m-fees").textContent = dgb(jobs.reduce((a, j) => a + (j.fee || 0), 0));
   const al = $("alert"), bad = ["PAUSED", "ERROR", "ABORTED", "RECOVERY"].includes(e.state);
