@@ -487,6 +487,66 @@ class ExperimentalRunTests(ExecBase):
 class StagedAllocationRunTests(ExecBase):
     config = STAGED_EXP_CFG
 
+    def test_allocation_refuses_nonempty_trusted_stage(self):
+        self.chain.fund("flab_stage", 12_345_678)
+
+        self.x.tick(self.exp)  # START -> PLAN
+        r = self.x.tick(self.exp)
+
+        self.assertIn(
+            "allocation wallet flab_stage must be empty before commitment",
+            r["blocked"],
+        )
+        self.assertIn("trusted=12345678 sats", r["blocked"])
+        self.assertEqual(self.e.get_experiment(self.exp)["state"], "PAUSED")
+        self.assertEqual(self.sent(), [])
+
+    def test_allocation_refuses_untrusted_pending_stage(self):
+        original = self.chain.get_balances
+
+        def contaminated(wallet):
+            result = original(wallet)
+            if wallet == "flab_stage":
+                result = copy.deepcopy(result)
+                result["mine"]["untrusted_pending"] = Decimal("0.12345678")
+            return result
+
+        self.chain.get_balances = contaminated
+
+        self.x.tick(self.exp)  # START -> PLAN
+        r = self.x.tick(self.exp)
+
+        self.assertIn(
+            "allocation wallet flab_stage must be empty before commitment",
+            r["blocked"],
+        )
+        self.assertIn("untrusted_pending=12345678 sats", r["blocked"])
+        self.assertEqual(self.e.get_experiment(self.exp)["state"], "PAUSED")
+        self.assertEqual(self.sent(), [])
+
+    def test_allocation_refuses_immature_stage(self):
+        original = self.chain.get_balances
+
+        def contaminated(wallet):
+            result = original(wallet)
+            if wallet == "flab_stage":
+                result = copy.deepcopy(result)
+                result["mine"]["immature"] = Decimal("0.12345678")
+            return result
+
+        self.chain.get_balances = contaminated
+
+        self.x.tick(self.exp)  # START -> PLAN
+        r = self.x.tick(self.exp)
+
+        self.assertIn(
+            "allocation wallet flab_stage must be empty before commitment",
+            r["blocked"],
+        )
+        self.assertIn("immature=12345678 sats", r["blocked"])
+        self.assertEqual(self.e.get_experiment(self.exp)["state"], "PAUSED")
+        self.assertEqual(self.sent(), [])
+
     def test_full_allocation_is_committed_before_randomized_work(self):
         allocation = STAGED_EXP_CFG["flows"][0]["allocation_sats"]
 

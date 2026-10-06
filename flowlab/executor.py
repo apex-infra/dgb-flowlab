@@ -125,6 +125,42 @@ class Executor:
         }
 
     def _generate_allocation_job(self, flow):
+        cfg = self._config_for_flow(flow)
+        matches = [
+            f for f in cfg["flows"]
+            if f["source_wallet"] == flow["source_wallet"]
+            and f["destination_wallet"] == flow["destination_wallet"]
+        ]
+        if len(matches) != 1:
+            raise PlanError("cannot match this flow to exactly one flow in the approved config")
+
+        allocation_wallet = matches[0].get("allocation_wallet")
+
+        if allocation_wallet is not None:
+            mine = self.rpc.get_balances(allocation_wallet).get("mine", {})
+
+            balances = {
+                "trusted": to_sats(mine.get("trusted", 0)),
+                "untrusted_pending": to_sats(mine.get("untrusted_pending", 0)),
+                "immature": to_sats(mine.get("immature", 0)),
+            }
+
+            nonzero = {
+                name: sats
+                for name, sats in balances.items()
+                if sats != 0
+            }
+
+            if nonzero:
+                detail = ", ".join(
+                    f"{name}={sats} sats"
+                    for name, sats in nonzero.items()
+                )
+                raise PlanError(
+                    f"allocation wallet {allocation_wallet} must be empty "
+                    f"before commitment ({detail})"
+                )
+
         return generate_experimental_allocation_job(
             self.engine,
             flow["id"],
