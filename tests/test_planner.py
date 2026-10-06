@@ -172,6 +172,64 @@ class ExperimentalDecisionTests(PlannerBase):
         self.assertTrue(seen_self)
 
 
+    def test_empty_wallet_routes_are_filtered_out(self):
+        _, flow = self.experimental_flow(seed=4242)
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 250_000_000,
+            "w3_flowB": 0,
+        }
+
+        for i in range(100):
+            d = experimental_decision(self.e, flow, i, balances)
+            self.assertNotEqual(d["from"], "w3_flowB")
+
+    def test_generated_amount_is_capped_by_observed_balance(self):
+        _, flow = self.experimental_flow(seed=5150)
+
+        balances = {
+            "w1_source": 150_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        for i in range(30):
+            d = experimental_decision(self.e, flow, i, balances)
+            self.assertEqual(d["from"], "w1_source")
+            self.assertLessEqual(d["amount_sats"], 150_000_000)
+            self.assertGreaterEqual(
+                d["amount_sats"],
+                CFG["workload"]["amount_sats_min"],
+            )
+
+    def test_no_fundable_route_is_refused(self):
+        _, flow = self.experimental_flow(seed=600)
+
+        balances = {
+            "w1_source": 0,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        with self.assertRaises(PlanError):
+            experimental_decision(self.e, flow, 0, balances)
+
+    def test_balance_snapshot_metadata_is_recorded(self):
+        _, flow = self.experimental_flow(seed=700)
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 0,
+            "w3_flowB": 0,
+        }
+
+        d = experimental_decision(self.e, flow, 0, balances)
+
+        self.assertEqual(d["generated_from"]["observed_balance_sats"], 500_000_000)
+        self.assertEqual(d["generated_from"]["eligible_transition_count"], 2)
+
+
     def test_decision_records_replay_metadata(self):
         _, flow = self.experimental_flow(seed=999)
 

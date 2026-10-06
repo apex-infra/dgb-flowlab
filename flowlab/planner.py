@@ -33,11 +33,12 @@ def transfers_for(engine, flow_id):
     return transfers
 
 
-def experimental_decision(engine, flow_id, decision_index):
-    """Return one reproducible experimental amount/delay decision.
+def experimental_decision(engine, flow_id, decision_index, balances_sats=None):
+    """Return one reproducible experimental decision.
 
-    This is deliberately pure planning logic: it does not create a job,
-    inspect live UTXOs, call RPC, or broadcast anything.
+    balances_sats, when supplied, is a caller-provided snapshot of confirmed
+    wallet balances. The planner itself remains pure: no RPC, UTXO reads,
+    job creation, or broadcasting occurs here.
     """
     if not isinstance(decision_index, int) or isinstance(decision_index, bool) or decision_index < 0:
         raise PlanError("decision_index must be a non-negative integer")
@@ -76,11 +77,38 @@ def experimental_decision(engine, flow_id, decision_index):
         raise PlanError("experimental decision requires an approved topology")
 
     transitions = topology["transitions"]
-    route = transitions[rng.randrange(len(transitions))]
+
+    if balances_sats is None:
+        eligible = list(transitions)
+    else:
+        if not isinstance(balances_sats, dict):
+            raise PlanError("balances_sats must be a wallet -> integer sats mapping")
+        for wallet, value in balances_sats.items():
+            if not isinstance(wallet, str) or not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise PlanError("balances_sats must contain non-negative integer satoshi balances")
+
+        minimum = workload["amount_sats_min"]
+        eligible = [
+            t for t in transitions
+            if balances_sats.get(t["from"], 0) >= minimum
+        ]
+
+    if not eligible:
+        raise PlanError("no approved experimental transition currently has enough confirmed balance")
+
+    route = eligible[rng.randrange(len(eligible))]
+
+    available = (
+        workload["amount_sats_max"]
+        if balances_sats is None
+        else min(workload["amount_sats_max"], balances_sats.get(route["from"], 0))
+    )
+    if available < workload["amount_sats_min"]:
+        raise PlanError("selected route cannot satisfy the approved minimum amount")
 
     amount = rng.randint(
         workload["amount_sats_min"],
-        workload["amount_sats_max"],
+        available,
     )
     delay = rng.randint(
         workload["delay_seconds_min"],
@@ -99,6 +127,11 @@ def experimental_decision(engine, flow_id, decision_index):
             "seed": rnd["seed"],
             "flow_index": flow_index,
             "decision_index": decision_index,
+            "eligible_transition_count": len(eligible),
+            "observed_balance_sats": (
+                None if balances_sats is None
+                else balances_sats.get(route["from"], 0)
+            ),
         },
     }
 
