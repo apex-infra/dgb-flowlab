@@ -205,13 +205,19 @@ class Engine:
         for i, fl in enumerate(cfg["flows"], 1):
             path = " -> ".join([fl["source_wallet"], *fl["flow_wallets"], fl["destination_wallet"]])
             lines.append(f"  flow {i}: {path}   allocation {fl['allocation_sats']} sats")
-        wl = cfg["workload"]
+            for k, t in enumerate(fl.get("transfers", []), 1):
+                amt = "ENTIRE BALANCE minus fee" if t["amount_sats"] == "all" else f"{t['amount_sats']} sats"
+                lines.append(f"    {k:>3}. {t['from']} -> {t['to']}   {amt}   wait {t['delay_seconds']}s")
+        wl = cfg.get("workload")
+        if wl:
+            lines += [
+                f"  workload: {wl['mode']}"
+                + (f" ({wl['jobs']} jobs)" if wl["mode"] == "count" else "")
+                + (f" ({wl['duration_seconds']}s window)" if wl["mode"] == "duration" else ""),
+                f"  amount bounds: {wl['amount_sats_min']}..{wl['amount_sats_max']} sats",
+                f"  delay bounds: {wl['delay_seconds_min']}..{wl['delay_seconds_max']} s",
+            ]
         lines += [
-            f"  workload: {wl['mode']}"
-            + (f" ({wl['jobs']} jobs)" if wl["mode"] == "count" else "")
-            + (f" ({wl['duration_seconds']}s window)" if wl["mode"] == "duration" else ""),
-            f"  amount bounds: {wl['amount_sats_min']}..{wl['amount_sats_max']} sats",
-            f"  delay bounds: {wl['delay_seconds_min']}..{wl['delay_seconds_max']} s",
             f"  address policy: {cfg['address_policy']}",
             f"  confirmations required: {cfg['confirmations_required']}",
             f"  fee policy: {json.dumps(cfg['fee_policy'], sort_keys=True)}",
