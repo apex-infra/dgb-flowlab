@@ -538,6 +538,9 @@ const whole = (text, what, min) => {
         enabled: true,
         model: $("f-model").value,
         seed
+      },
+      finalization: {
+        mode: "sweep_workers_to_destination"
       }
     };
   }

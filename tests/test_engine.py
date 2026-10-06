@@ -177,6 +177,9 @@ class ApprovalTests(Base):
             "model": "uniform",
             "seed": 2262026,
         }
+        cfg["finalization"] = {
+            "mode": "sweep_workers_to_destination",
+        }
         cfg["flows"][0]["experimental_topology"] = {
             "transitions": [
                 {"from": "w1_source", "to": "w2_flowA"},

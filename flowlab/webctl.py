@@ -23,6 +23,7 @@ TOP_KEYS = {
     "fee_policy",
     "address_policy",
     "randomization",
+    "finalization",
 }
 FLOW_KEYS = {
     "description",

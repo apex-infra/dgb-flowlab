@@ -54,6 +54,9 @@ def cfg_experimental():
             "model": "uniform",
             "seed": 2262026,
         },
+        "finalization": {
+            "mode": "sweep_workers_to_destination",
+        },
     }
     return c
 
@@ -188,6 +191,15 @@ class WebReadTests(WebBase):
             self.assertIn(want, script)
 
 
+    def test_experimental_form_includes_finalization_contract(self):
+        self.start()
+        status, _, body = self.get("/form.js")
+        self.assertEqual(status, 200)
+
+        text = body.decode()
+        self.assertIn("finalization:", text)
+        self.assertIn('mode: "sweep_workers_to_destination"', text)
+
     def test_experimental_form_generates_fresh_seed(self):
         self.start()
         status, _, body = self.get("/form.js")
@@ -313,6 +325,28 @@ class WebControlTests(WebBase):
         bad["flows"][0]["jitter_seconds"] = 5
         self.assertEqual(self.do("new", {"config": bad})[0], 400)
 
+    def test_experimental_config_requires_finalization(self):
+        self.up()
+
+        cfg = cfg_experimental()
+        del cfg["finalization"]
+
+        s, out = self.do("new", {"config": cfg})
+
+        self.assertEqual(s, 400)
+        self.assertIn("finalization required", out["error"])
+
+    def test_experimental_config_rejects_unknown_finalization_mode(self):
+        self.up()
+
+        cfg = cfg_experimental()
+        cfg["finalization"]["mode"] = "something_else"
+
+        s, out = self.do("new", {"config": cfg})
+
+        self.assertEqual(s, 400)
+        self.assertIn("finalization.mode", out["error"])
+
     def test_new_accepts_experimental_config(self):
         self.up()
 
@@ -335,6 +369,28 @@ class WebControlTests(WebBase):
         self.assertTrue(all(t["to"] != "flab_dest" for t in transitions))
         self.assertEqual(self.do("new", {"config": cfg})[0], 200)
 
+
+    def test_experimental_review_shows_finalization_contract(self):
+        self.up()
+
+        s, out = self.do("new", {"config": cfg_experimental()})
+
+        self.assertEqual(s, 200, out)
+        text = out["text"]
+
+        self.assertIn("finalization: sweep_workers_to_destination", text)
+        self.assertIn(
+            "flab_a -> flab_dest   ENTIRE BALANCE minus fee",
+            text,
+        )
+        self.assertIn(
+            "flab_b -> flab_dest   ENTIRE BALANCE minus fee",
+            text,
+        )
+        self.assertIn(
+            "source flab_source is not swept",
+            text,
+        )
 
     def test_experimental_review_shows_approved_topology(self):
         self.up()

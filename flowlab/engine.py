@@ -214,6 +214,20 @@ class Engine:
                 lines.append("    experimental topology:")
                 for k, t in enumerate(topology["transitions"], 1):
                     lines.append(f"      {k:>3}. {t['from']} -> {t['to']}")
+
+                finalization = cfg.get("finalization")
+                if finalization:
+                    lines.append(
+                        f"    finalization: {finalization['mode']}"
+                    )
+                    for worker in fl["flow_wallets"]:
+                        lines.append(
+                            f"      {worker} -> {fl['destination_wallet']}   "
+                            "ENTIRE BALANCE minus fee"
+                        )
+                    lines.append(
+                        f"      source {fl['source_wallet']} is not swept"
+                    )
         wl = cfg.get("workload")
         if wl:
             lines += [

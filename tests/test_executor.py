@@ -54,6 +54,9 @@ EXP_CFG["randomization"] = {
     "model": "uniform",
     "seed": 2262026,
 }
+EXP_CFG["finalization"] = {
+    "mode": "sweep_workers_to_destination",
+}
 
 
 class ExecBase(unittest.TestCase):

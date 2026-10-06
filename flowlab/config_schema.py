@@ -16,6 +16,7 @@ from . import audit
 WORKLOAD_MODES = ("count", "duration", "automatic")
 ADDRESS_POLICIES = ("existing", "new")
 RANDOM_MODELS = ("uniform", "weighted", "bounded_random", "seeded_deterministic")
+FINALIZATION_MODES = ("sweep_workers_to_destination",)
 
 
 class ConfigError(ValueError):
@@ -209,7 +210,17 @@ def validate(cfg):
         for i, fl in enumerate(flows):
             _need(fl.get("experimental_topology") is not None,
                   f"flows[{i}].experimental_topology required when randomization is enabled")
+
+        finalization = cfg.get("finalization")
+        _need(isinstance(finalization, dict),
+              "finalization required when randomization is enabled")
+        _need(set(finalization) == {"mode"},
+              "finalization must contain exactly: mode")
+        _need(finalization.get("mode") in FINALIZATION_MODES,
+              f"finalization.mode must be one of {FINALIZATION_MODES}")
     else:
+        _need(cfg.get("finalization") is None,
+              "finalization is only valid for randomized experimental configs")
         cfg["randomization"] = {"enabled": False}
     return cfg
 

@@ -82,6 +82,7 @@ class RepeatTests(unittest.TestCase):
         cfg = dict(
             cfg_repeat(),
             randomization={"enabled": True, "model": "uniform", "seed": 12345},
+            finalization={"mode": "sweep_workers_to_destination"},
         )
         del cfg["flows"][0]["repeat"]
 
