@@ -177,6 +177,16 @@ class ApprovalTests(Base):
             "model": "uniform",
             "seed": 2262026,
         }
+        cfg["flows"][0]["experimental_topology"] = {
+            "transitions": [
+                {"from": "w1_source", "to": "w2_flowA"},
+                {"from": "w1_source", "to": "w3_flowB"},
+                {"from": "w2_flowA", "to": "w2_flowA"},
+                {"from": "w2_flowA", "to": "w3_flowB"},
+                {"from": "w3_flowB", "to": "w2_flowA"},
+                {"from": "w3_flowB", "to": "w3_flowB"},
+            ]
+        }
 
         h = self.e.configure_experiment(exp, cfg)
         row = self.e.get_experiment(exp)

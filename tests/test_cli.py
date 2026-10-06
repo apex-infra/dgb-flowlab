@@ -79,6 +79,15 @@ class RepeatTests(unittest.TestCase):
             "delay_seconds_min": 0,
             "delay_seconds_max": 30,
         }
+        cfg["flows"][0]["experimental_topology"] = {
+            "transitions": [
+                {"from": "flab_source", "to": "flab_a"},
+                {"from": "flab_a", "to": "flab_a"},
+                {"from": "flab_a", "to": "flab_b"},
+                {"from": "flab_b", "to": "flab_a"},
+                {"from": "flab_b", "to": "flab_b"},
+            ]
+        }
 
         got = validate(cfg)
         self.assertEqual(

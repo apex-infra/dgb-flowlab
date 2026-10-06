@@ -67,6 +67,48 @@ def _expand_repeat(fl, names, where):
              "delay_seconds": r["delay_seconds"]} for i in range(r["count"])]
 
 
+def _validate_experimental_topology(fl, where):
+    """Validate the approved wallet transitions available to experimental jobs.
+
+    The destination wallet is intentionally excluded here; reaching it is a
+    finalization concern, not part of the experimental workload.
+    """
+    topo = fl.get("experimental_topology")
+    _need(isinstance(topo, dict), f"{where}.experimental_topology must be an object")
+    _need(set(topo) == {"transitions"},
+          f"{where}.experimental_topology must contain exactly: transitions")
+
+    transitions = topo["transitions"]
+    _need(isinstance(transitions, list) and transitions,
+          f"{where}.experimental_topology.transitions must be a non-empty list")
+
+    source = fl["source_wallet"]
+    active = [source, *fl["flow_wallets"]]
+    allowed = set(active)
+
+    seen = set()
+    source_outbound = False
+
+    for j, t in enumerate(transitions):
+        w = f"{where}.experimental_topology.transitions[{j}]"
+        _need(isinstance(t, dict) and set(t) == {"from", "to"},
+              f"{w} must have exactly: from, to")
+        _need(t["from"] in allowed and t["to"] in allowed,
+              f"{w}: wallets must be the source or one of this flow's experimental wallets")
+        _need(not (t["from"] == source and t["to"] == source),
+              f"{w}: source -> source is not an experimental transition")
+
+        edge = (t["from"], t["to"])
+        _need(edge not in seen, f"{w}: duplicate transition {t['from']} -> {t['to']}")
+        seen.add(edge)
+
+        if t["from"] == source and t["to"] != source:
+            source_outbound = True
+
+    _need(source_outbound,
+          f"{where}.experimental_topology needs at least one transition out of the source wallet")
+
+
 def _validate_transfers(fl, names, where):
     """Explicit, ordered transfers: every hop is written down by the operator."""
     ts = fl["transfers"]
@@ -118,6 +160,8 @@ def validate(cfg):
             del fl["repeat"]
         if fl.get("transfers") is not None:
             _validate_transfers(fl, names, where)
+        if fl.get("experimental_topology") is not None:
+            _validate_experimental_topology(fl, where)
 
     wl = cfg.get("workload")
     if wl is not None:
@@ -153,6 +197,9 @@ def validate(cfg):
               "randomization.seed must be a non-negative integer")
         _need(wl is not None,
               "randomization requires a workload envelope")
+        for i, fl in enumerate(flows):
+            _need(fl.get("experimental_topology") is not None,
+                  f"flows[{i}].experimental_topology required when randomization is enabled")
     else:
         cfg["randomization"] = {"enabled": False}
     return cfg
