@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import dashboard
+from .infrastructure import collect_infrastructure
 from .plays import list_plays
 from .results import analyze_experiment
 from .webctl import Controller
@@ -68,6 +69,7 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
     )
     token = secrets.token_urlsafe(24)
     cache = {"at": 0.0, "value": None}
+    infrastructure_cache = {"at": 0.0, "value": None}
 
     def current_balances():
         if not (rpc and wallets):
@@ -76,6 +78,18 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
             cache["value"] = dashboard.balances(rpc, wallets)
             cache["at"] = time.monotonic()
         return cache["value"]
+
+    def current_infrastructure():
+        if not (rpc and wallets):
+            return None
+        if time.monotonic() - infrastructure_cache["at"] > BALANCE_TTL:
+            infrastructure_cache["value"] = collect_infrastructure(
+                rpc,
+                wallets,
+                wallet_roles=wallet_roles,
+            )
+            infrastructure_cache["at"] = time.monotonic()
+        return infrastructure_cache["value"]
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "flowlab"
@@ -139,6 +153,7 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                     keep = ("id", "description", "state", "state_reason", "started_at", "completed_at")
                     snap["exp"] = {k: snap["exp"][k] for k in keep}
                 return self._json(200, {"snapshot": snap, "results": results,
+                                        "infrastructure": current_infrastructure(),
                                         "extras": extras, "balances": current_balances(),
                                         "wallets": list(wallets), "wallet_roles": wallet_roles,
                                         "plays": list_plays(), "control": control,

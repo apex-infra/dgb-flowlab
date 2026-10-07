@@ -133,7 +133,7 @@ function renderHops(flow) {
 }
 
 function showTab(name) {
-  for (const t of ["monitor", "fund", "new", "results", "log"]) $("tab-" + t).hidden = t !== name;
+  for (const t of ["monitor", "fund", "new", "results", "infrastructure", "log"]) $("tab-" + t).hidden = t !== name;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
 }
 document.querySelectorAll("#tabs button").forEach(b => { b.onclick = () => showTab(b.dataset.tab); });
@@ -1261,6 +1261,692 @@ function renderResults(data) {
   box.appendChild(walletSection);
 }
 
+let infrastructureWalletSelected = null;
+let infrastructureSubtab = "overview";
+
+function infraRank(value) {
+  return Number.isFinite(value)
+    ? Math.round(value * 100) + " / 100"
+    : "-";
+}
+
+function infraRoleLabel(role) {
+  return role || "other";
+}
+
+function infraRankPosition(rank, total) {
+  return Number.isInteger(rank)
+    ? "#" + rank + " of " + total
+    : "-";
+}
+
+function infraPanel(name) {
+  const panel = h("div", "infra-subpanel");
+  panel.dataset.infraPanel = name;
+  panel.hidden = infrastructureSubtab !== name;
+  return panel;
+}
+
+function showInfrastructureSubtab(name) {
+  infrastructureSubtab = name;
+
+  document
+    .querySelectorAll(".infra-subtabs button")
+    .forEach(button => {
+      button.classList.toggle(
+        "on",
+        button.dataset.infraSubtab === name
+      );
+    });
+
+  document
+    .querySelectorAll("[data-infra-panel]")
+    .forEach(panel => {
+      panel.hidden = panel.dataset.infraPanel !== name;
+    });
+}
+
+function renderInfrastructureWallet(data, walletName) {
+  const infra = data.infrastructure;
+  const box = $("infra-wallet-detail");
+
+  if (!box || !infra) return;
+
+  const wallet = infra.wallets && infra.wallets[walletName];
+
+  box.replaceChildren();
+
+  if (!wallet) {
+    box.appendChild(
+      h("div", "mute", "Wallet data is unavailable.")
+    );
+    return;
+  }
+
+  const research = wallet.research || {};
+  const walletCount = Object.keys(infra.wallets || {}).length;
+
+  const head = h("div", "infra-wallet-head");
+  const ident = h("div");
+
+  ident.append(
+    h("b", "mono", wallet.name),
+    h(
+      "span",
+      "wallet-role role-" + infraRoleLabel(wallet.role),
+      infraRoleLabel(wallet.role)
+    )
+  );
+
+  head.append(
+    ident,
+    h(
+      "span",
+      wallet.available ? "pill jade" : "pill coral",
+      wallet.available ? "AVAILABLE" : "UNAVAILABLE"
+    )
+  );
+
+  box.appendChild(head);
+
+  const rank = h("section", "infra-wallet-rank");
+  const rankHead = h("div", "infra-rank-head");
+
+  rankHead.append(
+    h("div", null, "Wallet Research Rank"),
+    h(
+      "b",
+      "result-score",
+      Number.isFinite(research.score)
+        ? String(research.score)
+        : "N/A"
+    ),
+    Number.isFinite(research.score)
+      ? h("span", "mute", "/ 100")
+      : h("span", "mute", ""),
+    h(
+      "span",
+      "pill dgb",
+      research.label || "-"
+    )
+  );
+
+  rank.appendChild(rankHead);
+
+  box.appendChild(rank);
+
+  box.appendChild(resultSection("Wallet Research Profile", [
+    [
+      "Balance share",
+      resultPercent(research.balance_share),
+    ],
+    [
+      "UTXO share",
+      resultPercent(research.utxo_share),
+    ],
+    [
+      "Balance rank",
+      infraRankPosition(
+        research.balance_rank,
+        walletCount
+      ),
+    ],
+    [
+      "UTXO-count rank",
+      infraRankPosition(
+        research.utxo_count_rank,
+        walletCount
+      ),
+    ],
+    [
+      "Confirmation rank",
+      infraRank(research.confirmed_ratio),
+    ],
+    [
+      "UTXO size diversity",
+      infraRank(research.utxo_size_diversity),
+    ],
+    [
+      "UTXO evenness",
+      infraRank(research.utxo_evenness),
+    ],
+    [
+      "Fragmentation index",
+      infraRank(research.fragmentation_index),
+    ],
+  ]));
+
+  if (!wallet.available) {
+    box.appendChild(
+      h(
+        "div",
+        "mute",
+        "This configured wallet is not currently available for inspection."
+      )
+    );
+    return;
+  }
+
+  box.appendChild(resultSection("Wallet Overview", [
+    ["Trusted balance", resultDGB(wallet.trusted_balance_sats)],
+    ["Pending balance", resultDGB(wallet.pending_balance_sats)],
+    ["Immature balance", resultDGB(wallet.immature_balance_sats)],
+    ["Total balance", resultDGB(wallet.total_balance_sats)],
+    ["UTXOs", wallet.utxo_count ?? 0],
+    ["Confirmed UTXOs", wallet.confirmed_utxo_count ?? 0],
+    ["Unconfirmed UTXOs", wallet.unconfirmed_utxo_count ?? 0],
+  ]));
+
+  const stats = wallet.utxo_stats || {};
+
+  box.appendChild(resultSection("UTXO Size Profile", [
+    ["Smallest", resultDGB(stats.min)],
+    ["Median", resultDGB(stats.median)],
+    ["Mean", resultDGB(stats.mean)],
+    ["Largest", resultDGB(stats.max)],
+    ["Standard deviation", resultDGB(stats.stdev)],
+  ]));
+
+  const utxos = Array.isArray(wallet.utxos)
+    ? wallet.utxos
+    : [];
+
+  const section = h("section", "result-section");
+  section.appendChild(h("h2", null, "UTXO Inventory"));
+
+  if (!utxos.length) {
+    section.appendChild(
+      h(
+        "div",
+        "mute",
+        "This wallet currently has no unspent outputs."
+      )
+    );
+  } else {
+    const table = h("div", "infra-utxo-table");
+
+    table.append(
+      h("div", "result-table-head", "Outpoint"),
+      h("div", "result-table-head", "Amount"),
+      h(
+        "div",
+        "result-table-head result-count",
+        "Confirmations"
+      )
+    );
+
+    utxos.forEach(utxo => {
+      const txid = utxo.txid || "-";
+      const outpoint = h(
+        "div",
+        "mono infra-outpoint",
+        txid.slice(0, 14)
+          + "…:"
+          + String(utxo.vout ?? "-")
+      );
+
+      outpoint.title =
+        txid + ":" + String(utxo.vout ?? "-");
+
+      table.append(
+        outpoint,
+        h("div", null, resultDGB(utxo.amount_sats)),
+        h(
+          "div",
+          "result-count "
+            + (utxo.confirmed ? "jade" : "amber"),
+          Number.isFinite(utxo.confirmations)
+            ? String(utxo.confirmations)
+            : utxo.confirmed
+              ? "confirmed"
+              : "pending"
+        )
+      );
+    });
+
+    section.appendChild(table);
+  }
+
+  box.appendChild(section);
+}
+
+function renderInfrastructure(data) {
+  const box = $("infrastructure");
+  const infra = data.infrastructure;
+
+  box.replaceChildren();
+
+  if (!infra) {
+    box.appendChild(
+      h(
+        "div",
+        "mute",
+        "Infrastructure data requires the local DigiByte node."
+      )
+    );
+    return;
+  }
+
+  const overview = infra.overview || {};
+  const research = infra.research || {};
+  const score = infra.score || {};
+  const node = infra.node || {};
+  const wallets = infra.wallets || {};
+
+  const subtabs = h("div", "infra-subtabs");
+
+  [
+    ["overview", "Overview"],
+    ["rankings", "Rankings"],
+    ["wallets", "Wallets"],
+    ["utxos", "UTXOs"],
+  ].forEach(([name, label]) => {
+    const button = h(
+      "button",
+      infrastructureSubtab === name ? "on" : "",
+      label
+    );
+
+    button.dataset.infraSubtab = name;
+    button.onclick = () => showInfrastructureSubtab(name);
+
+    subtabs.appendChild(button);
+  });
+
+  box.appendChild(subtabs);
+
+  /*
+   * Overview
+   */
+  const overviewPanel = infraPanel("overview");
+
+  const rank = h("section", "infra-rank");
+  const rankHead = h("div", "infra-rank-head");
+
+  rankHead.append(
+    h("div", null, "Overall Infra Rank"),
+    h(
+      "b",
+      "result-score",
+      Number.isFinite(score.score)
+        ? String(score.score)
+        : "-"
+    ),
+    h("span", "mute", "/ 100"),
+    h("span", "pill dgb", score.label || "-")
+  );
+
+  rank.append(
+    rankHead,
+    h("div", "mono mute infra-model", score.model || "-"),
+    h(
+      "div",
+      "mute infra-interpretation",
+      score.interpretation || ""
+    )
+  );
+
+  overviewPanel.appendChild(rank);
+
+  overviewPanel.appendChild(
+    resultSection("Infrastructure Overview", [
+      [
+        "Managed balance",
+        resultDGB(overview.managed_balance_sats),
+      ],
+      ["Configured wallets", overview.wallet_count ?? 0],
+      [
+        "Available wallets",
+        overview.available_wallet_count ?? 0,
+      ],
+      ["Total UTXOs", overview.utxo_count ?? 0],
+      [
+        "Confirmed UTXOs",
+        overview.confirmed_utxo_count ?? 0,
+      ],
+      [
+        "Unconfirmed UTXOs",
+        overview.unconfirmed_utxo_count ?? 0,
+      ],
+      [
+        "Node",
+        node.available
+          ? node.ready
+            ? "ready ✓"
+            : "not ready"
+          : "unavailable",
+        node.ready ? "jade" : "coral",
+      ],
+      ["Block height", node.blocks ?? "-"],
+    ])
+  );
+
+  overviewPanel.appendChild(
+    resultSection("Structural Measurements", [
+      [
+        "Balance concentration",
+        resultPercent(research.balance_concentration),
+      ],
+      [
+        "Balance dispersion",
+        resultPercent(research.balance_dispersion),
+      ],
+      [
+        "UTXO concentration",
+        resultPercent(research.utxo_concentration),
+      ],
+      [
+        "UTXO dispersion",
+        resultPercent(research.utxo_dispersion),
+      ],
+      [
+        "UTXO size diversity",
+        resultPercent(research.utxo_size_diversity),
+      ],
+      [
+        "Confirmed UTXO ratio",
+        resultPercent(research.confirmed_utxo_ratio),
+      ],
+    ])
+  );
+
+  const overallStats = overview.utxo_stats || {};
+
+  overviewPanel.appendChild(
+    resultSection("Overall UTXO Profile", [
+      ["Smallest", resultDGB(overallStats.min)],
+      ["Median", resultDGB(overallStats.median)],
+      ["Mean", resultDGB(overallStats.mean)],
+      ["Largest", resultDGB(overallStats.max)],
+      [
+        "Standard deviation",
+        resultDGB(overallStats.stdev),
+      ],
+    ])
+  );
+
+  box.appendChild(overviewPanel);
+
+  /*
+   * Rankings
+   */
+  const rankingsPanel = infraPanel("rankings");
+
+  rankingsPanel.appendChild(
+    resultSection("Infrastructure Rankings", [
+      [
+        "Wallet availability rank",
+        infraRank(research.wallet_availability),
+      ],
+      [
+        "Role coverage rank",
+        infraRank(research.role_coverage),
+      ],
+      [
+        "Node readiness rank",
+        infraRank(
+          score.components
+            && score.components.node_readiness
+        ),
+      ],
+      [
+        "Confirmation rank",
+        infraRank(research.confirmed_utxo_ratio),
+      ],
+      [
+        "Balance dispersion rank",
+        infraRank(research.balance_dispersion),
+      ],
+      [
+        "UTXO dispersion rank",
+        infraRank(research.utxo_dispersion),
+      ],
+      [
+        "UTXO size diversity rank",
+        infraRank(research.utxo_size_diversity),
+      ],
+    ])
+  );
+
+  const leaderboard = h("section", "result-section");
+  leaderboard.appendChild(
+    h("h2", null, "Wallet Research Ranking")
+  );
+
+  const rankedWallets = Object.values(wallets).slice().sort(
+    (a, b) => {
+      const as = a.research && a.research.score;
+      const bs = b.research && b.research.score;
+
+      if (Number.isFinite(as) && Number.isFinite(bs)) {
+        return bs - as || a.name.localeCompare(b.name);
+      }
+
+      if (Number.isFinite(as)) return -1;
+      if (Number.isFinite(bs)) return 1;
+
+      return a.name.localeCompare(b.name);
+    }
+  );
+
+  const rankTable = h("div", "infra-rank-table");
+
+  rankTable.append(
+    h("div", "result-table-head", "Wallet"),
+    h("div", "result-table-head", "Role"),
+    h("div", "result-table-head result-count", "Rank"),
+    h("div", "result-table-head result-count", "Balance"),
+    h("div", "result-table-head result-count", "UTXOs")
+  );
+
+  rankedWallets.forEach(wallet => {
+    const wr = wallet.research || {};
+
+    rankTable.append(
+      h("div", "mono", wallet.name),
+      h("div", null, infraRoleLabel(wallet.role)),
+      h(
+        "div",
+        "result-count",
+        Number.isFinite(wr.score)
+          ? wr.score + " / 100"
+          : "N/A"
+      ),
+      h(
+        "div",
+        "result-count",
+        resultDGB(wallet.total_balance_sats)
+      ),
+      h(
+        "div",
+        "result-count",
+        wallet.utxo_count ?? "-"
+      )
+    );
+  });
+
+  leaderboard.appendChild(rankTable);
+  rankingsPanel.appendChild(leaderboard);
+
+  box.appendChild(rankingsPanel);
+
+  /*
+   * Wallets
+   */
+  const walletPanel = infraPanel("wallets");
+
+  const walletSection = h("section", "result-section");
+  walletSection.appendChild(
+    h("h2", null, "Wallet Laboratory")
+  );
+
+  const names = orderedWalletNames(
+    Object.fromEntries(
+      Object.keys(wallets).map(name => [
+        name,
+        wallets[name].total_balance_sats || 0,
+      ])
+    ),
+    data.wallet_roles || {}
+  );
+
+  const tabs = h("div", "infra-wallet-tabs");
+
+  if (
+    !infrastructureWalletSelected
+    || !wallets[infrastructureWalletSelected]
+  ) {
+    infrastructureWalletSelected = names[0] || null;
+  }
+
+  names.forEach(name => {
+    const wallet = wallets[name];
+
+    const button = h(
+      "button",
+      infrastructureWalletSelected === name
+        ? "on"
+        : "",
+      name
+    );
+
+    button.title = infraRoleLabel(wallet.role);
+
+    button.onclick = () => {
+      infrastructureWalletSelected = name;
+
+      document
+        .querySelectorAll(".infra-wallet-tabs button")
+        .forEach(b => {
+          b.classList.toggle(
+            "on",
+            b.textContent === name
+          );
+        });
+
+      renderInfrastructureWallet(data, name);
+    };
+
+    tabs.appendChild(button);
+  });
+
+  walletSection.appendChild(tabs);
+
+  const detail = h("div");
+  detail.id = "infra-wallet-detail";
+
+  walletSection.appendChild(detail);
+  walletPanel.appendChild(walletSection);
+
+  box.appendChild(walletPanel);
+
+  if (infrastructureWalletSelected) {
+    renderInfrastructureWallet(
+      data,
+      infrastructureWalletSelected
+    );
+  }
+
+  /*
+   * Infrastructure-wide UTXOs
+   */
+  const utxoPanel = infraPanel("utxos");
+
+  const utxoSection = h("section", "result-section");
+  utxoSection.appendChild(
+    h("h2", null, "Infrastructure UTXO Inventory")
+  );
+
+  const allUtxos = [];
+
+  Object.values(wallets).forEach(wallet => {
+    (wallet.utxos || []).forEach(utxo => {
+      allUtxos.push({
+        wallet: wallet.name,
+        role: infraRoleLabel(wallet.role),
+        ...utxo,
+      });
+    });
+  });
+
+  allUtxos.sort((a, b) => {
+    return (
+      (b.amount_sats || 0) - (a.amount_sats || 0)
+      || a.wallet.localeCompare(b.wallet)
+    );
+  });
+
+  if (!allUtxos.length) {
+    utxoSection.appendChild(
+      h(
+        "div",
+        "mute",
+        "No unspent outputs are currently present."
+      )
+    );
+  } else {
+    const table = h("div", "infra-all-utxo-table");
+
+    table.append(
+      h("div", "result-table-head", "Wallet"),
+      h("div", "result-table-head", "Role"),
+      h("div", "result-table-head", "Outpoint"),
+      h(
+        "div",
+        "result-table-head result-count",
+        "Amount"
+      ),
+      h(
+        "div",
+        "result-table-head result-count",
+        "Confirmations"
+      )
+    );
+
+    allUtxos.forEach(utxo => {
+      const txid = utxo.txid || "-";
+      const outpoint = h(
+        "div",
+        "mono infra-outpoint",
+        txid.slice(0, 12)
+          + "…:"
+          + String(utxo.vout ?? "-")
+      );
+
+      outpoint.title =
+        txid + ":" + String(utxo.vout ?? "-");
+
+      table.append(
+        h("div", "mono", utxo.wallet),
+        h("div", null, utxo.role),
+        outpoint,
+        h(
+          "div",
+          "result-count",
+          resultDGB(utxo.amount_sats)
+        ),
+        h(
+          "div",
+          "result-count "
+            + (utxo.confirmed ? "jade" : "amber"),
+          Number.isFinite(utxo.confirmations)
+            ? String(utxo.confirmations)
+            : utxo.confirmed
+              ? "confirmed"
+              : "pending"
+        )
+      );
+    });
+
+    utxoSection.appendChild(table);
+  }
+
+  utxoPanel.appendChild(utxoSection);
+  box.appendChild(utxoPanel);
+
+  showInfrastructureSubtab(infrastructureSubtab);
+}
+
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
@@ -1270,6 +1956,7 @@ function render(data) {
   renderUnresolved(data); renderExperimental(data); renderConsole(data);
   renderFundReserve(data);
   renderResults(data);
+  renderInfrastructure(data);
   const s = data.snapshot;
   if (!s) { $("state").textContent = "none"; $("state").className = "pill mute"; $("desc").textContent = CONTROL ? "No experiment yet. Open New experiment to create one." : "No experiment yet."; return; }
   const e = s.exp, jobs = s.flows.flatMap(f => f.jobs);

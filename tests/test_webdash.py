@@ -223,6 +223,51 @@ class WebReadTests(WebBase):
             self.assertIn(want, css)
 
 
+    def test_page_contains_infrastructure_lab(self):
+        self.start()
+
+        page = self.get("/")[2].decode()
+        app = self.get("/app.js")[2].decode()
+        css = self.get("/app.css")[2].decode()
+
+        for want in (
+            'data-tab="infrastructure"',
+            "Infrastructure",
+            'id="tab-infrastructure"',
+            'id="infrastructure"',
+        ):
+            self.assertIn(want, page)
+
+        for want in (
+            "renderInfrastructure",
+            "renderInfrastructureWallet",
+            "showInfrastructureSubtab",
+            '"Overall Infra Rank"',
+            '"Infrastructure Rankings"',
+            '"Wallet Research Ranking"',
+            '"Wallet Research Rank"',
+            '"Structural Measurements"',
+            '"Wallet Laboratory"',
+            '"Infrastructure UTXO Inventory"',
+            '"Balance rank"',
+            '"UTXO-count rank"',
+            '"Fragmentation index"',
+        ):
+            self.assertIn(want, app)
+
+        for want in (
+            ".infra-rank",
+            ".infra-subtabs",
+            ".infra-subpanel",
+            ".infra-wallet-rank",
+            ".infra-wallet-tabs",
+            ".infra-utxo-table",
+            ".infra-all-utxo-table",
+            ".infra-rank-table",
+            ".infra-wallet-head",
+        ):
+            self.assertIn(want, css)
+
     def test_page_contains_results_section(self):
         self.start()
 
@@ -481,6 +526,92 @@ class WebReadTests(WebBase):
         self.assertIn("Principal after fees", app)
         self.assertIn("Destination receipts", app)
         self.assertIn("reconciled ✓", app)
+
+    def test_snapshot_exposes_live_infrastructure_data(self):
+        from tests.fake_chain import FakeChain
+
+        wallets = (
+            "flab_source",
+            "flab_stage",
+            "flab_a",
+            "flab_b",
+            "flab_dest",
+        )
+
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        chain = FakeChain(wallets)
+
+        chain.fund("flab_source", 100_000_000)
+        chain.fund("flab_source", 50_000_000)
+        chain.fund("flab_stage", 25_000_000)
+
+        self.serve(
+            rpc=chain,
+            wallets=wallets,
+            wallet_roles=roles,
+        )
+
+        infra = self.snap()["infrastructure"]
+
+        self.assertIsNotNone(infra)
+        self.assertEqual(
+            infra["model"],
+            "infrastructure_snapshot_v1",
+        )
+
+        self.assertEqual(
+            infra["overview"]["managed_balance_sats"],
+            175_000_000,
+        )
+        self.assertEqual(
+            infra["overview"]["utxo_count"],
+            3,
+        )
+        self.assertEqual(
+            infra["overview"]["confirmed_utxo_count"],
+            3,
+        )
+
+        source = infra["wallets"]["flab_source"]
+
+        self.assertEqual(
+            source["role"],
+            "reserve",
+        )
+        self.assertEqual(
+            source["trusted_balance_sats"],
+            150_000_000,
+        )
+        self.assertEqual(
+            source["utxo_count"],
+            2,
+        )
+
+        self.assertEqual(
+            infra["score"]["model"],
+            "infrastructure_model_v1",
+        )
+
+    def test_snapshot_exposes_infrastructure_field(self):
+        self.start()
+
+        data = self.snap()
+
+        self.assertIn("infrastructure", data)
+
+    def test_snapshot_without_rpc_has_no_infrastructure(self):
+        self.serve(rpc=None)
+
+        data = self.snap()
+
+        self.assertIsNone(data["infrastructure"])
 
     def test_snapshot_exposes_derived_results(self):
         self.start()
