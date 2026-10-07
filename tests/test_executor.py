@@ -15,6 +15,8 @@ from tests.fake_chain import FEE, FakeChain
 from tests.test_engine import FakeVerifier
 
 W = ["flab_source", "flab_stage", "flab_a", "flab_b", "flab_dest"]
+EXTERNAL = "dgb1qexternaldestination"
+
 CFG = {
     "flows": [{"description": "explicit", "source_wallet": "flab_source",
                "flow_wallets": ["flab_a", "flab_b"], "destination_wallet": "flab_dest",
@@ -73,6 +75,43 @@ STAGED_EXP_CFG["flows"][0]["experimental_topology"] = {
         {"from": "flab_a", "to": "flab_b"},
         {"from": "flab_b", "to": "flab_a"},
     ]
+}
+
+
+EXTERNAL_CFG = copy.deepcopy(CFG)
+EXTERNAL_CFG["flows"][0].pop("destination_wallet")
+EXTERNAL_CFG["flows"][0]["destination_address"] = EXTERNAL
+EXTERNAL_CFG["flows"][0]["transfers"][-1]["to"] = EXTERNAL
+
+
+EXTERNAL_EXP_CFG = copy.deepcopy(EXP_CFG)
+EXTERNAL_EXP_CFG["flows"][0].pop("destination_wallet")
+EXTERNAL_EXP_CFG["flows"][0]["destination_address"] = EXTERNAL
+
+
+MULTI_EXP_CFG = copy.deepcopy(STAGED_EXP_CFG)
+MULTI_EXP_FLOW = MULTI_EXP_CFG["flows"][0]
+
+MULTI_EXP_FLOW.pop("destination_wallet")
+MULTI_EXP_FLOW["finalization_wallet"] = "flab_stage"
+MULTI_EXP_FLOW["destinations"] = {
+    "mode": "percentage",
+    "items": [
+        {
+            "type": "wallet",
+            "wallet": "flab_dest",
+            "percent_bps": 5000,
+        },
+        {
+            "type": "address",
+            "address": EXTERNAL,
+            "percent_bps": 5000,
+        },
+    ],
+}
+
+MULTI_EXP_CFG["finalization"] = {
+    "mode": "consolidate_then_distribute",
 }
 
 
@@ -341,6 +380,510 @@ class RunTests(ExecBase):
         self.assertEqual(self.e.get_experiment(self.exp)["state"], "ERROR")
 
 
+class ExternalDestinationRunTests(ExecBase):
+    config = EXTERNAL_CFG
+
+    def test_deterministic_run_completes_to_external_address(self):
+        r = self.run_all()
+
+        self.assertTrue(r["done"], r)
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "COMPLETE",
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+        self.assertEqual(flow["destination_wallet"], EXTERNAL)
+
+        jobs = self.e.list_jobs(flow["id"])
+        final = jobs[-1]
+        plan = json.loads(final["planned_json"])
+        recorded = json.loads(final["result_json"])
+
+        self.assertEqual(plan["to"], EXTERNAL)
+        self.assertEqual(recorded["address"], EXTERNAL)
+
+        tx = self.chain.txs[final["txid"]]
+        external_outputs = [
+            sats
+            for address, sats in tx["outputs"]
+            if address == EXTERNAL
+        ]
+
+        self.assertEqual(external_outputs, [100_000_000])
+
+        final_state = json.loads(
+            self.e.get_experiment(self.exp)["final_state_json"]
+        )["balances_sats"]
+
+        self.assertNotIn(EXTERNAL, final_state)
+        self.assertIn("flab_source", final_state)
+        self.assertIn("flab_a", final_state)
+        self.assertIn("flab_b", final_state)
+
+    def test_external_reconciliation_catches_wrong_output_amount(self):
+        # First prove the transaction can be built, broadcast, confirmed, and
+        # reconciled normally. Then corrupt only the reconciliation view.
+        r = self.run_all()
+
+        self.assertTrue(r["done"], r)
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "COMPLETE",
+        )
+
+        real = self.chain.decode_raw_transaction
+
+        def liar(txhex):
+            result = copy.deepcopy(real(txhex))
+            for output in result["vout"]:
+                if output["scriptPubKey"].get("address") == EXTERNAL:
+                    output["value"] -= Decimal("0.00000001")
+                    break
+            return result
+
+        self.chain.decode_raw_transaction = liar
+
+        ok, _, stats = self.x.reconcile(self.exp)
+
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(
+                "external output was" in issue
+                for issue in stats["issues"]
+            ),
+            stats,
+        )
+
+
+class ExternalExperimentalRunTests(ExecBase):
+    config = EXTERNAL_EXP_CFG
+
+    def test_experimental_finalization_sweeps_to_external_address(self):
+        r = self.run_all()
+
+        self.assertTrue(r["done"], r)
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "COMPLETE",
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+        jobs = self.e.list_jobs(flow["id"])
+
+        workload = []
+        finalizations = []
+
+        for job in jobs:
+            meta = json.loads(job["generated_from_json"] or "{}")
+            if meta.get("source") == "seeded experimental generator":
+                workload.append(job)
+            if meta.get("source") == "experimental finalization":
+                finalizations.append(job)
+
+        self.assertEqual(len(workload), EXTERNAL_EXP_CFG["workload"]["jobs"])
+        self.assertGreaterEqual(len(finalizations), 1)
+
+        for job in workload:
+            plan = json.loads(job["planned_json"])
+            self.assertNotEqual(plan["from"], EXTERNAL)
+            self.assertNotEqual(plan["to"], EXTERNAL)
+
+        for job in finalizations:
+            plan = json.loads(job["planned_json"])
+            recorded = json.loads(job["result_json"])
+
+            self.assertEqual(plan["to"], EXTERNAL)
+            self.assertEqual(plan["amount_sats"], "all")
+            self.assertEqual(recorded["address"], EXTERNAL)
+
+            tx = self.chain.txs[job["txid"]]
+            self.assertTrue(
+                any(address == EXTERNAL for address, _ in tx["outputs"])
+            )
+
+        final_state = json.loads(
+            self.e.get_experiment(self.exp)["final_state_json"]
+        )["balances_sats"]
+
+        self.assertNotIn(EXTERNAL, final_state)
+
+        for worker in json.loads(flow["flow_wallets_json"]):
+            self.assertEqual(
+                self.chain.get_balances(worker)["mine"]["trusted"],
+                0,
+            )
+
+
+class MultiDestinationExecutionTests(ExecBase):
+    config = MULTI_EXP_CFG
+
+    def test_terminal_distribution_builds_journals_broadcasts_and_confirms(self):
+        terminal = None
+
+        for _ in range(300):
+            r = self.x.tick(self.exp)
+
+            self.assertIsNone(
+                r["blocked"],
+                r,
+            )
+
+            flow = self.e.list_flows(self.exp)[0]
+            jobs = self.e.list_jobs(flow["id"])
+
+            terminal_jobs = [
+                job for job in jobs
+                if json.loads(
+                    job["generated_from_json"] or "{}"
+                ).get("source")
+                == "experimental terminal distribution"
+            ]
+
+            if terminal_jobs:
+                terminal = terminal_jobs[0]
+
+                if terminal["state"] == "CONFIRMED":
+                    break
+
+            self.t += timedelta(
+                seconds=r["wait_s"] or 1
+            )
+            self.chain.mine(2)
+
+        else:
+            self.fail(
+                "terminal distribution did not reach CONFIRMED"
+            )
+
+        terminal = self.e.get_job(terminal["id"])
+        plan = json.loads(terminal["planned_json"])
+        result = json.loads(terminal["result_json"])
+
+        self.assertEqual(
+            terminal["state"],
+            "CONFIRMED",
+        )
+        self.assertEqual(
+            plan["from"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            plan["amount_sats"],
+            "all",
+        )
+        self.assertNotIn(
+            "to",
+            plan,
+        )
+        self.assertEqual(
+            plan["distribution"],
+            MULTI_EXP_FLOW["destinations"],
+        )
+
+        self.assertEqual(
+            result["distributed_sats"],
+            result["budget_sats"] - result["fee_sats"],
+        )
+        self.assertEqual(
+            len(result["destinations"]),
+            2,
+        )
+
+        internal = next(
+            item
+            for item in result["destinations"]
+            if item["type"] == "wallet"
+        )
+        external = next(
+            item
+            for item in result["destinations"]
+            if item["type"] == "address"
+        )
+
+        self.assertEqual(
+            internal["wallet"],
+            "flab_dest",
+        )
+        self.assertTrue(
+            internal["resolved_address"],
+        )
+
+        self.assertTrue(
+            self.chain.get_address_info(
+                "flab_dest",
+                internal["resolved_address"],
+            ).get("ismine")
+        )
+
+        self.assertEqual(
+            external["address"],
+            EXTERNAL,
+        )
+        self.assertEqual(
+            external["resolved_address"],
+            EXTERNAL,
+        )
+
+        tx = self.chain.txs[terminal["txid"]]
+        tx_outputs = dict(tx["outputs"])
+
+        self.assertEqual(
+            tx_outputs[internal["resolved_address"]],
+            internal["amount_sats"],
+        )
+        self.assertEqual(
+            tx_outputs[EXTERNAL],
+            external["amount_sats"],
+        )
+
+        # Percentage rounding may differ by one satoshi, but the
+        # complete net amount must be distributed exactly.
+        self.assertEqual(
+            internal["amount_sats"]
+            + external["amount_sats"],
+            result["distributed_sats"],
+        )
+        self.assertLessEqual(
+            abs(
+                internal["amount_sats"]
+                - external["amount_sats"]
+            ),
+            1,
+        )
+
+        journal = self.e.conn.execute(
+            """
+            SELECT payload_json, status, result_json
+            FROM action_journal
+            WHERE job_id=? AND kind='broadcast'
+            """,
+            (terminal["id"],),
+        ).fetchone()
+
+        self.assertIsNotNone(journal)
+        self.assertEqual(
+            journal["status"],
+            "done",
+        )
+
+        payload = json.loads(journal["payload_json"])
+        journal_result = json.loads(journal["result_json"])
+
+        self.assertEqual(
+            payload["expected_txid"],
+            terminal["txid"],
+        )
+        self.assertEqual(
+            payload["destinations"],
+            result["destinations"],
+        )
+        self.assertEqual(
+            journal_result["destinations"],
+            result["destinations"],
+        )
+
+        # Stop deliberately in NEXT_STATE. Reconciliation support for
+        # terminal multi-output jobs is the next layer.
+        self.assertEqual(
+            self.e.get_flow(flow["id"])["state"],
+            "NEXT_STATE",
+        )
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "RUNNING",
+        )
+
+
+class MultiDestinationReconciliationTests(ExecBase):
+    config = MULTI_EXP_CFG
+
+    def test_full_multi_destination_run_reconciles_and_completes(self):
+        r = self.run_all(limit=400)
+
+        self.assertTrue(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+
+        exp = self.e.get_experiment(self.exp)
+
+        self.assertEqual(
+            exp["state"],
+            "COMPLETE",
+        )
+
+        stats = json.loads(exp["stats_json"])
+
+        self.assertEqual(
+            stats["issues"],
+            [],
+        )
+
+        final = json.loads(
+            exp["final_state_json"]
+        )["balances_sats"]
+
+        self.assertEqual(
+            final["flab_stage"],
+            0,
+        )
+        self.assertEqual(
+            final["flab_a"],
+            0,
+        )
+        self.assertEqual(
+            final["flab_b"],
+            0,
+        )
+
+        self.assertIn(
+            "flab_dest",
+            final,
+        )
+        self.assertGreater(
+            final["flab_dest"],
+            0,
+        )
+
+        self.assertNotIn(
+            EXTERNAL,
+            final,
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        self.assertNotIn(
+            flow["destination_wallet"],
+            final,
+        )
+
+        terminal = [
+            job
+            for job in self.e.list_jobs(flow["id"])
+            if json.loads(
+                job["generated_from_json"] or "{}"
+            ).get("source")
+            == "experimental terminal distribution"
+        ]
+
+        self.assertEqual(
+            len(terminal),
+            1,
+        )
+
+        result = json.loads(
+            terminal[0]["result_json"]
+        )
+
+        self.assertEqual(
+            sum(
+                item["amount_sats"]
+                for item in result["destinations"]
+            ),
+            result["distributed_sats"],
+        )
+
+    def test_terminal_reconciliation_catches_wrong_output(self):
+        # Drive through terminal confirmation but stop before the
+        # following NEXT_STATE tick triggers experiment reconciliation.
+        terminal = None
+
+        for _ in range(300):
+            r = self.x.tick(self.exp)
+
+            self.assertIsNone(
+                r["blocked"],
+                r,
+            )
+
+            flow = self.e.list_flows(self.exp)[0]
+
+            matches = [
+                job
+                for job in self.e.list_jobs(flow["id"])
+                if json.loads(
+                    job["generated_from_json"] or "{}"
+                ).get("source")
+                == "experimental terminal distribution"
+            ]
+
+            if matches:
+                terminal = matches[0]
+
+                if terminal["state"] == "CONFIRMED":
+                    break
+
+            self.t += timedelta(
+                seconds=r["wait_s"] or 1
+            )
+            self.chain.mine(2)
+
+        else:
+            self.fail(
+                "terminal distribution did not confirm"
+            )
+
+        real = self.chain.decode_raw_transaction
+
+        result = json.loads(
+            self.e.get_job(
+                terminal["id"]
+            )["result_json"]
+        )
+
+        target = result["destinations"][0][
+            "resolved_address"
+        ]
+
+        def liar(txhex):
+            decoded = copy.deepcopy(real(txhex))
+
+            for output in decoded["vout"]:
+                if (
+                    output["scriptPubKey"].get(
+                        "address"
+                    )
+                    == target
+                ):
+                    output["value"] -= Decimal(
+                        "0.00000001"
+                    )
+                    break
+
+            return decoded
+
+        self.chain.decode_raw_transaction = liar
+
+        # The completion tick also runs reconciliation and must
+        # fail closed immediately.
+        r = self.x.tick(self.exp)
+
+        self.assertTrue(r["done"], r)
+        self.assertTrue(
+            any(
+                "RECONCILIATION FAILED"
+                in action
+                for action in r["actions"]
+            ),
+            r,
+        )
+
+        self.assertEqual(
+            self.e.get_experiment(
+                self.exp
+            )["state"],
+            "ERROR",
+        )
+
+        self.assertTrue(
+            any(
+                "terminal transaction outputs differ"
+                in action
+                for action in r["actions"]
+            ),
+            r,
+        )
+
+
 class ExperimentalRunTests(ExecBase):
     config = EXP_CFG
 
@@ -590,6 +1133,21 @@ class StagedAllocationRunTests(ExecBase):
         self.assertEqual(
             final["flab_dest"],
             allocation - experiment_fees,
+        )
+
+
+class MultiDestinationNodeVerifierIntegration(ExecBase):
+    config = MULTI_EXP_CFG
+    use_node_verifier = True
+
+    def test_full_multi_destination_run_with_real_verifier(self):
+        r = self.run_all(limit=400)
+
+        self.assertTrue(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "COMPLETE",
         )
 
 

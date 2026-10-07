@@ -12,6 +12,11 @@ import json
 import random
 from datetime import datetime, timedelta
 
+from .config_schema import (
+    destination_identity,
+    has_multi_destinations,
+)
+
 
 GENERATOR_VERSION = 1
 
@@ -24,7 +29,7 @@ def transfers_for(engine, flow_id):
     flow = engine.get_flow(flow_id)
     cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
     match = [f for f in cfg["flows"] if f["source_wallet"] == flow["source_wallet"]
-             and f["destination_wallet"] == flow["destination_wallet"]]
+             and destination_identity(f) == flow["destination_wallet"]]
     if len(match) != 1:
         raise PlanError("cannot match this flow to exactly one flow in the approved config")
     transfers = match[0].get("transfers")
@@ -66,7 +71,7 @@ def experimental_decision(
     matches = [
         (i, f) for i, f in enumerate(cfg["flows"])
         if f["source_wallet"] == flow["source_wallet"]
-        and f["destination_wallet"] == flow["destination_wallet"]
+        and destination_identity(f) == flow["destination_wallet"]
     ]
     if len(matches) != 1:
         raise PlanError("cannot match this flow to exactly one flow in the approved config")
@@ -172,6 +177,12 @@ def experimental_decision(
 EXPERIMENTAL_JOB_SOURCE = "seeded experimental generator"
 ALLOCATION_COMMIT_JOB_SOURCE = "experimental allocation commit"
 FINALIZATION_JOB_SOURCE = "experimental finalization"
+FINALIZATION_CONSOLIDATION_JOB_SOURCE = (
+    "experimental finalization consolidation"
+)
+TERMINAL_DISTRIBUTION_JOB_SOURCE = (
+    "experimental terminal distribution"
+)
 
 
 def _generated_source(job):
@@ -195,9 +206,28 @@ def experimental_allocation_jobs(engine, flow_id):
 
 
 def experimental_finalization_jobs(engine, flow_id):
+    """Legacy worker -> destination finalization jobs."""
     return [
         job for job in engine.list_jobs(flow_id)
         if _generated_source(job) == FINALIZATION_JOB_SOURCE
+    ]
+
+
+def experimental_consolidation_jobs(engine, flow_id):
+    """Multi-destination worker/hub -> finalization-wallet sweeps."""
+    return [
+        job for job in engine.list_jobs(flow_id)
+        if _generated_source(job)
+        == FINALIZATION_CONSOLIDATION_JOB_SOURCE
+    ]
+
+
+def experimental_terminal_distribution_jobs(engine, flow_id):
+    """Multi-destination terminal distribution transaction jobs."""
+    return [
+        job for job in engine.list_jobs(flow_id)
+        if _generated_source(job)
+        == TERMINAL_DISTRIBUTION_JOB_SOURCE
     ]
 
 
@@ -213,7 +243,7 @@ def generate_experimental_allocation_job(engine, flow_id):
     matches = [
         f for f in cfg["flows"]
         if f["source_wallet"] == flow["source_wallet"]
-        and f["destination_wallet"] == flow["destination_wallet"]
+        and destination_identity(f) == flow["destination_wallet"]
     ]
     if len(matches) != 1:
         raise PlanError("cannot match this flow to exactly one flow in the approved config")
@@ -259,40 +289,224 @@ def generate_experimental_allocation_job(engine, flow_id):
 
 def generate_experimental_finalization_job(
         engine, flow_id, balances_sats, fee_reserve_sats=0):
-    """Persist the next approved worker -> destination sweep, if one is needed."""
-    if (not isinstance(fee_reserve_sats, int) or isinstance(fee_reserve_sats, bool)
-            or fee_reserve_sats < 0):
-        raise PlanError("fee_reserve_sats must be a non-negative integer")
+    """Persist the next approved experimental finalization job.
+
+    Legacy configs retain worker -> destination sweeps.
+
+    Multi-destination configs first consolidate every non-finalizer
+    workload wallet into finalization_wallet. Once those wallets are empty,
+    one terminal distribution job is created from finalization_wallet.
+    """
+    if (
+        not isinstance(fee_reserve_sats, int)
+        or isinstance(fee_reserve_sats, bool)
+        or fee_reserve_sats < 0
+    ):
+        raise PlanError(
+            "fee_reserve_sats must be a non-negative integer"
+        )
 
     flow = engine.get_flow(flow_id)
-    cfg = json.loads(engine.get_experiment(flow["experiment_id"])["config_json"])
+    cfg = json.loads(
+        engine.get_experiment(flow["experiment_id"])["config_json"]
+    )
 
+    matches = [
+        f for f in cfg["flows"]
+        if f["source_wallet"] == flow["source_wallet"]
+        and destination_identity(f) == flow["destination_wallet"]
+    ]
+
+    if len(matches) != 1:
+        raise PlanError(
+            "cannot match this flow to exactly one flow "
+            "in the approved config"
+        )
+
+    approved_flow = matches[0]
     finalization = cfg.get("finalization") or {}
-    if finalization.get("mode") != "sweep_workers_to_destination":
-        raise PlanError("approved experimental finalization mode is not supported")
 
     jobs = engine.list_jobs(flow_id)
+
     if any(j["state"] != "CONFIRMED" for j in jobs):
-        raise PlanError("previous job must be confirmed before finalization")
+        raise PlanError(
+            "previous job must be confirmed before finalization"
+        )
 
     workload = cfg.get("workload") or {}
     workload_jobs = experimental_workload_jobs(engine, flow_id)
-    if workload.get("mode") != "count" or len(workload_jobs) < workload.get("jobs", 0):
-        raise PlanError("experimental workload must complete before finalization")
+
+    if (
+        workload.get("mode") != "count"
+        or len(workload_jobs) < workload.get("jobs", 0)
+    ):
+        raise PlanError(
+            "experimental workload must complete before finalization"
+        )
+
+    workers = json.loads(flow["flow_wallets_json"])
+
+    for wallet in workers:
+        balance = balances_sats.get(wallet, 0)
+
+        if (
+            not isinstance(balance, int)
+            or isinstance(balance, bool)
+            or balance < 0
+        ):
+            raise PlanError(
+                "finalization balances must be non-negative "
+                "integer satoshis"
+            )
+
+    # ------------------------------------------------------
+    # New multi-destination finalization.
+
+    if has_multi_destinations(approved_flow):
+        if (
+            finalization.get("mode")
+            != "consolidate_then_distribute"
+        ):
+            raise PlanError(
+                "approved multi-destination finalization mode "
+                "is not supported"
+            )
+
+        finalizer = approved_flow["finalization_wallet"]
+
+        if finalizer not in workers:
+            raise PlanError(
+                "finalization wallet is not a managed flow wallet"
+            )
+
+        terminal_jobs = experimental_terminal_distribution_jobs(
+            engine,
+            flow_id,
+        )
+
+        if len(terminal_jobs) > 1:
+            raise PlanError(
+                "experimental flow has more than one terminal "
+                "distribution job"
+            )
+
+        # Once the terminal distribution exists, there must never be
+        # another consolidation or distribution plan.
+        if terminal_jobs:
+            return None
+
+        consolidated_workers = {
+            json.loads(job["planned_json"])["from"]
+            for job in experimental_consolidation_jobs(
+                engine,
+                flow_id,
+            )
+        }
+
+        # Sweep every non-finalizer workload wallet into the finalizer.
+        # The finalizer itself is intentionally never swept to itself.
+        for worker in workers:
+            if worker == finalizer:
+                continue
+
+            if worker in consolidated_workers:
+                continue
+
+            balance = balances_sats.get(worker, 0)
+
+            if balance == 0:
+                continue
+
+            if balance <= fee_reserve_sats:
+                raise PlanError(
+                    f"worker {worker} balance {balance} sats does not "
+                    f"cover finalization fee reserve "
+                    f"{fee_reserve_sats}"
+                )
+
+            return engine.add_job(
+                flow_id,
+                {
+                    "from": worker,
+                    "to": finalizer,
+                    "amount_sats": "all",
+                    "step": len(jobs),
+                },
+                planned_delay_s=0,
+                generated_from={
+                    "source":
+                        FINALIZATION_CONSOLIDATION_JOB_SOURCE,
+                    "phase": "consolidation",
+                    "worker": worker,
+                    "finalization_wallet": finalizer,
+                    "balance_snapshot_sats":
+                        dict(balances_sats),
+                    "fee_reserve_sats": fee_reserve_sats,
+                },
+                depends_on=[jobs[-1]["id"]] if jobs else (),
+            )
+
+        # No non-finalizer wallet has a positive balance. The full
+        # remaining experiment principal is now at finalization_wallet.
+        balance = balances_sats.get(finalizer, 0)
+
+        if balance <= 0:
+            raise PlanError(
+                f"finalization wallet {finalizer} has no balance "
+                "to distribute"
+            )
+
+        if balance <= fee_reserve_sats:
+            raise PlanError(
+                f"finalization wallet {finalizer} balance "
+                f"{balance} sats does not cover terminal distribution "
+                f"fee reserve {fee_reserve_sats}"
+            )
+
+        return engine.add_job(
+            flow_id,
+            {
+                "from": finalizer,
+                "amount_sats": "all",
+                "distribution": approved_flow["destinations"],
+                "step": len(jobs),
+            },
+            planned_delay_s=0,
+            generated_from={
+                "source": TERMINAL_DISTRIBUTION_JOB_SOURCE,
+                "phase": "terminal_distribution",
+                "finalization_wallet": finalizer,
+                "balance_snapshot_sats": dict(balances_sats),
+                "fee_reserve_sats": fee_reserve_sats,
+            },
+            depends_on=[jobs[-1]["id"]] if jobs else (),
+        )
+
+    # ------------------------------------------------------
+    # Legacy single-destination behavior.
+
+    if (
+        finalization.get("mode")
+        != "sweep_workers_to_destination"
+    ):
+        raise PlanError(
+            "approved experimental finalization mode "
+            "is not supported"
+        )
 
     finalized_workers = {
         json.loads(job["planned_json"])["from"]
-        for job in experimental_finalization_jobs(engine, flow_id)
+        for job in experimental_finalization_jobs(
+            engine,
+            flow_id,
+        )
     }
 
-    workers = json.loads(flow["flow_wallets_json"])
     for worker in workers:
         if worker in finalized_workers:
             continue
 
         balance = balances_sats.get(worker, 0)
-        if not isinstance(balance, int) or isinstance(balance, bool) or balance < 0:
-            raise PlanError("finalization balances must be non-negative integer satoshis")
 
         if balance == 0:
             continue

@@ -51,7 +51,6 @@ _REQUIRED_PARAMS = {
     "source_wallet",
     "allocation_wallet",
     "workers",
-    "destination_wallet",
     "allocation_sats",
     "decisions",
     "amount_sats_min",
@@ -88,6 +87,50 @@ def get_play_spec(name):
         raise PlayError(f"unknown play: {name}") from exc
 
 
+def _destination_spec(params):
+    has_set = isinstance(params.get("destinations"), dict)
+    has_wallet = (
+        isinstance(params.get("destination_wallet"), str)
+        and bool(params["destination_wallet"])
+    )
+    has_address = (
+        isinstance(params.get("destination_address"), str)
+        and bool(params["destination_address"])
+    )
+
+    _need(
+        sum((
+            bool(has_set),
+            bool(has_wallet),
+            bool(has_address),
+        )) == 1,
+        "play requires exactly one destination definition: "
+        "destination_wallet, destination_address, or destinations",
+    )
+
+    if has_set:
+        return deepcopy(params["destinations"])
+
+    if has_wallet:
+        return {
+            "mode": "percentage",
+            "items": [{
+                "type": "wallet",
+                "wallet": params["destination_wallet"],
+                "percent_bps": 10_000,
+            }],
+        }
+
+    return {
+        "mode": "percentage",
+        "items": [{
+            "type": "address",
+            "address": params["destination_address"],
+            "percent_bps": 10_000,
+        }],
+    }
+
+
 def _validate_params(name, params):
     _need(name in PLAY_SPECS, f"unknown play: {name}")
     _need(isinstance(params, dict), "play parameters must be an object")
@@ -97,12 +140,12 @@ def _validate_params(name, params):
 
     src = params["source_wallet"]
     stage = params["allocation_wallet"]
-    dst = params["destination_wallet"]
     workers = params["workers"]
+
+    destination_spec = _destination_spec(params)
 
     _need(isinstance(src, str) and src, "source_wallet is required")
     _need(isinstance(stage, str) and stage, "allocation_wallet is required")
-    _need(isinstance(dst, str) and dst, "destination_wallet is required")
     _need(
         isinstance(workers, list)
         and all(isinstance(w, str) and w for w in workers),
@@ -126,11 +169,31 @@ def _validate_params(name, params):
         )
         extra_wallets.append(hub)
 
-    names = [src, stage, *extra_wallets, *workers, dst]
+    internal_destinations = []
+
+    items = destination_spec.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "wallet"
+                and isinstance(item.get("wallet"), str)
+                and item["wallet"]
+            ):
+                internal_destinations.append(item["wallet"])
+
+    names = [
+        src,
+        stage,
+        *extra_wallets,
+        *workers,
+        *internal_destinations,
+    ]
+
     _need(
         len(set(names)) == len(names),
-        "source, allocation wallet, play wallets, and destination "
-        "must all be distinct",
+        "source, allocation wallet, play wallets, and internal "
+        "destinations must all be distinct",
     )
 
     allocation = params["allocation_sats"]
@@ -200,7 +263,7 @@ def compile_play(name, params):
     src = params["source_wallet"]
     stage = params["allocation_wallet"]
     workers = list(params["workers"])
-    dst = params["destination_wallet"]
+    destinations = _destination_spec(params)
     hub = None
 
     if name == "random_walk":
@@ -223,8 +286,9 @@ def compile_play(name, params):
             "description": PLAY_SPECS[name]["title"],
             "source_wallet": src,
             "allocation_wallet": stage,
+            "finalization_wallet": stage,
             "flow_wallets": workload_wallets,
-            "destination_wallet": dst,
+            "destinations": destinations,
             "allocation_sats": params["allocation_sats"],
             "experimental_topology": {
                 "transitions": transitions,
@@ -249,7 +313,7 @@ def compile_play(name, params):
             "seed": params["seed"],
         },
         "finalization": {
-            "mode": "sweep_workers_to_destination",
+            "mode": "consolidate_then_distribute",
         },
     }
 

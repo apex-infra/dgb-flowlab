@@ -213,3 +213,50 @@ a.btn:hover{color:var(--paper)}
 .seed-row button {
   white-space: nowrap;
 }
+
+/* Terminal destination-set editor */
+.destination-editor{
+  width:100%;
+  max-width:820px;
+}
+.destination-toolbar{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  flex-wrap:wrap;
+  margin-bottom:8px;
+}
+.destination-toolbar>span{
+  margin-right:4px;
+}
+.destination-row{
+  display:flex;
+  gap:8px;
+  align-items:center;
+  flex-wrap:wrap;
+  margin:6px 0;
+  max-width:100%;
+}
+.destination-row>select{
+  flex:0 1 150px;
+  min-width:125px;
+}
+.destination-row>input{
+  flex:1 1 170px;
+  min-width:120px;
+}
+.destination-row>input[inputmode="decimal"]{
+  flex:0 1 110px;
+}
+.destination-remainder{
+  margin:0;
+  white-space:nowrap;
+}
+.destination-remainder input{
+  width:auto;
+}
+@media(max-width:900px){
+  .destination-row>*{
+    max-width:100%;
+  }
+}

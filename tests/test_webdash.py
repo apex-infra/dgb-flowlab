@@ -219,6 +219,21 @@ class WebReadTests(WebBase):
             'roleWallets("reserve")',
             'roleWallets("destinations")',
             "workloadWallets()",
+            "destinationEndpoint()",
+            "destinationConfig()",
+            "destinationControls(",
+            '"destination_address"',
+            '"Custom DigiByte address"',
+            '"Destination type"',
+            "destinationSetControls(",
+            "destinationSetConfig()",
+            '"f-dst-mode"',
+            '"+ Add destination"',
+            '"Percentage split"',
+            '"Fixed DGB + remainder"',
+            '"Remainder"',
+            "percent_bps",
+            "remainder",
             "Reserve / funding wallet",
             "Passes through workers / hubs",
             "Stage wallets are reserved for Experimental and Play allocation",
@@ -233,7 +248,8 @@ class WebReadTests(WebBase):
 
         text = body.decode()
         self.assertIn("finalization:", text)
-        self.assertIn('mode: "sweep_workers_to_destination"', text)
+        self.assertIn('mode: "consolidate_then_distribute"', text)
+        self.assertIn("finalization_wallet: stage", text)
 
     def test_experimental_form_generates_fresh_seed(self):
         self.start()
@@ -340,6 +356,19 @@ class WebReadTests(WebBase):
         self.assertIn('roleWallets("reserve")', form)
         self.assertIn('roleWallets("stage")', form)
         self.assertIn('roleWallets("destinations")', form)
+        self.assertIn("destinationEndpoint()", form)
+        self.assertIn("destinationConfig()", form)
+        self.assertIn("destinationControls(", form)
+        self.assertIn('"destination_address"', form)
+        self.assertIn('"Custom DigiByte address"', form)
+        self.assertIn("destinationSetControls(", form)
+        self.assertIn("destinationSetConfig()", form)
+        self.assertIn('"f-dst-mode"', form)
+        self.assertIn('"+ Add destination"', form)
+        self.assertIn('"Percentage split"', form)
+        self.assertIn('"Fixed DGB + remainder"', form)
+        self.assertIn("finalization_wallet: stage", form)
+        self.assertIn('mode: "consolidate_then_distribute"', form)
         self.assertIn(
             "on: keep.has(w) ? keep.get(w) : false",
             form,
@@ -611,6 +640,256 @@ class WebControlTests(WebBase):
 
         after = len(self.snap()["extras"]["experiments"])
         self.assertEqual(after, before)
+
+    def test_compile_play_accepts_valid_external_destination(self):
+        self.up()
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "destination_address": "dgb1qexternaldestination",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 200, out)
+        flow = out["config"]["flows"][0]
+        self.assertEqual(
+            flow["destinations"],
+            {
+                "mode": "percentage",
+                "items": [{
+                    "type": "address",
+                    "address": "dgb1qexternaldestination",
+                    "percent_bps": 10_000,
+                }],
+            },
+        )
+        self.assertEqual(
+            flow["finalization_wallet"],
+            "flab_stage",
+        )
+        self.assertNotIn("destination_wallet", flow)
+        self.assertNotIn("destination_address", flow)
+
+    def test_compile_play_accepts_mixed_multi_destinations(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(wallet_roles=roles)
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "destinations": {
+                    "mode": "percentage",
+                    "items": [
+                        {
+                            "type": "wallet",
+                            "wallet": "flab_dest",
+                            "percent_bps": 5000,
+                        },
+                        {
+                            "type": "address",
+                            "address": "dgb1qexternaldestination",
+                            "percent_bps": 5000,
+                        },
+                    ],
+                },
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 200, out)
+
+        flow = out["config"]["flows"][0]
+
+        self.assertEqual(
+            flow["finalization_wallet"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            flow["destinations"]["mode"],
+            "percentage",
+        )
+        self.assertEqual(
+            len(flow["destinations"]["items"]),
+            2,
+        )
+        self.assertEqual(
+            out["config"]["finalization"]["mode"],
+            "consolidate_then_distribute",
+        )
+
+    def test_compile_play_multi_destination_enforces_destination_role(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": [],
+        }
+
+        self.up(wallet_roles=roles)
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "destinations": {
+                    "mode": "percentage",
+                    "items": [
+                        {
+                            "type": "wallet",
+                            "wallet": "flab_dest",
+                            "percent_bps": 5000,
+                        },
+                        {
+                            "type": "address",
+                            "address": "dgb1qexternaldestination",
+                            "percent_bps": 5000,
+                        },
+                    ],
+                },
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn(
+            "destination role",
+            out["error"],
+        )
+
+    def test_compile_play_multi_destination_validates_every_external_address(self):
+        self.up()
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "destinations": {
+                    "mode": "percentage",
+                    "items": [
+                        {
+                            "type": "wallet",
+                            "wallet": "flab_dest",
+                            "percent_bps": 5000,
+                        },
+                        {
+                            "type": "address",
+                            "address": "not-valid",
+                            "percent_bps": 5000,
+                        },
+                    ],
+                },
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn(
+            "valid DigiByte address",
+            out["error"],
+        )
+
+    def test_compile_play_refuses_invalid_external_destination(self):
+        self.up()
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "destination_address": "not-valid",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn("valid DigiByte address", out["error"])
+
+    def test_new_accepts_valid_external_deterministic_destination(self):
+        self.up()
+
+        cfg = cfg_sweep()
+        flow = cfg["flows"][0]
+        flow.pop("destination_wallet")
+        flow["destination_address"] = "dgb1qexternaldestination"
+        flow["transfers"][-1]["to"] = "dgb1qexternaldestination"
+
+        s, out = self.do("new", {"config": cfg})
+
+        self.assertEqual(s, 200, out)
+        self.assertIn(
+            "dgb1qexternaldestination",
+            out["text"],
+        )
+
+    def test_new_refuses_invalid_external_destination(self):
+        self.up()
+
+        cfg = cfg_sweep()
+        flow = cfg["flows"][0]
+        flow.pop("destination_wallet")
+        flow["destination_address"] = "not-valid"
+        flow["transfers"][-1]["to"] = "not-valid"
+
+        s, out = self.do("new", {"config": cfg})
+
+        self.assertEqual(s, 400)
+        self.assertIn("valid DigiByte address", out["error"])
 
     def test_compile_play_refuses_wallet_outside_dashboard_allowlist(self):
         self.up()

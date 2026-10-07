@@ -12,7 +12,14 @@ import time
 from collections import deque
 
 from .cli import _open, _run
-from .config_schema import validate
+from .config_schema import (
+    destination_addresses,
+    destination_endpoint,
+    destination_is_external,
+    destination_wallets,
+    has_multi_destinations,
+    validate,
+)
 from .plays import compile_play, get_play_spec
 
 FINISHED = ("COMPLETE", "IDLE", "ABORTED")
@@ -31,7 +38,10 @@ FLOW_KEYS = {
     "source_wallet",
     "flow_wallets",
     "destination_wallet",
+    "destination_address",
+    "destinations",
     "allocation_wallet",
+    "finalization_wallet",
     "allocation_sats",
     "repeat",
     "transfers",
@@ -109,6 +119,35 @@ class Controller:
         if self.active():
             raise ControlError("a run is active; stop it first")
 
+    def _validate_external_destinations(self, cfg):
+        external = []
+
+        for fl in cfg.get("flows", []):
+            external.extend(destination_addresses(fl))
+
+        if not external:
+            return
+
+        if not self.rpc:
+            raise ControlError(
+                "the node is not connected; external destinations "
+                "cannot be validated"
+            )
+
+        for address in external:
+            try:
+                result = self.rpc.validate_address(address)
+            except Exception as exc:
+                raise ControlError(
+                    f"could not validate external destination {address}: {exc}"
+                ) from exc
+
+            if not isinstance(result, dict) or result.get("isvalid") is not True:
+                raise ControlError(
+                    f"external destination is not a valid DigiByte address: "
+                    f"{address}"
+                )
+
     # ------------------------------------------------------------------ actions
     def review(self, body):
         exp = _text(body, "exp")
@@ -122,6 +161,7 @@ class Controller:
             raise ControlError("'params' must be an object")
 
         cfg = compile_play(name, params)
+        self._validate_external_destinations(cfg)
 
         # A dashboard play may only reference wallets configured for this
         # FlowLab instance. The play compiler itself stays environment-agnostic.
@@ -129,7 +169,7 @@ class Controller:
         for fl in cfg["flows"]:
             used.add(fl["source_wallet"])
             used.update(fl["flow_wallets"])
-            used.add(fl["destination_wallet"])
+            used.update(destination_wallets(fl))
 
         outside = sorted(used - set(self.wallets))
         if outside:
@@ -168,7 +208,6 @@ class Controller:
             for fl in cfg["flows"]:
                 source = fl["source_wallet"]
                 stage = fl.get("allocation_wallet")
-                destination = fl["destination_wallet"]
 
                 if source not in reserve:
                     raise ControlError(
@@ -180,11 +219,12 @@ class Controller:
                         f"play allocation wallet {stage} must have stage role"
                     )
 
-                if destination not in destinations:
-                    raise ControlError(
-                        f"play destination wallet {destination} "
-                        "must have destination role"
-                    )
+                for destination in destination_wallets(fl):
+                    if destination not in destinations:
+                        raise ControlError(
+                            f"play destination wallet {destination} "
+                            "must have destination role"
+                        )
 
                 workers = set(fl["flow_wallets"])
                 if stage is not None:
@@ -213,9 +253,16 @@ class Controller:
         if extra:
             raise ControlError("not supported here: " + ", ".join(sorted(extra)))
         cfg = validate(cfg)
+        self._validate_external_destinations(cfg)
 
         experimental = bool(cfg.get("randomization", {}).get("enabled"))
         if not experimental:
+            if any(has_multi_destinations(fl) for fl in cfg["flows"]):
+                raise ControlError(
+                    "multi-destination deterministic execution is not "
+                    "supported yet"
+                )
+
             reserve = set(self.wallet_roles.get("reserve", []))
             workload = (
                 set(self.wallet_roles.get("workers", []))
@@ -225,12 +272,15 @@ class Controller:
 
             for fl in cfg["flows"]:
                 ts = fl.get("transfers") or []
-                if not ts or ts[-1]["to"] != fl["destination_wallet"]:
-                    raise ControlError("the last hop must end in the destination wallet")
+                endpoint = destination_endpoint(fl)
+
+                if not ts or ts[-1]["to"] != endpoint:
+                    raise ControlError(
+                        "the last hop must end in the configured destination"
+                    )
 
                 if self.wallet_roles:
                     source = fl["source_wallet"]
-                    destination = fl["destination_wallet"]
 
                     if source not in reserve:
                         raise ControlError(
@@ -238,11 +288,13 @@ class Controller:
                             "must have reserve role"
                         )
 
-                    if destination not in destinations:
-                        raise ControlError(
-                            f"deterministic destination wallet {destination} "
-                            "must have destination role"
-                        )
+                    if not destination_is_external(fl):
+                        destination = fl["destination_wallet"]
+                        if destination not in destinations:
+                            raise ControlError(
+                                f"deterministic destination wallet {destination} "
+                                "must have destination role"
+                            )
 
                     wrong_workers = sorted(
                         set(fl["flow_wallets"]) - workload

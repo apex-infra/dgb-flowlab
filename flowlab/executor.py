@@ -9,6 +9,13 @@ is retried automatically.
 
 import json
 
+from .config_schema import (
+    destination_endpoint,
+    destination_identity,
+    destination_is_external,
+    destination_wallets,
+    has_multi_destinations,
+)
 from .engine import EngineError, GuardFailed
 from .planner import (
     PlanError,
@@ -21,7 +28,11 @@ from .planner import (
     next_due,
 )
 from .rpc import RpcError, to_sats
-from .tx_builder import BuildError, broadcast
+from .tx_builder import (
+    BuildError,
+    broadcast,
+    broadcast_distribution,
+)
 
 POLL_SECONDS = 15
 
@@ -75,18 +86,26 @@ class Executor:
         cfg = self._config_for_flow(flow)
         return bool(cfg.get("randomization", {}).get("enabled"))
 
-    def _experimental_allocation_complete(self, flow):
+    def _approved_flow_config(self, flow):
         cfg = self._config_for_flow(flow)
 
         matches = [
-            f for f in cfg["flows"]
-            if f["source_wallet"] == flow["source_wallet"]
-            and f["destination_wallet"] == flow["destination_wallet"]
+            fl for fl in cfg["flows"]
+            if fl["source_wallet"] == flow["source_wallet"]
+            and destination_identity(fl) == flow["destination_wallet"]
         ]
-        if len(matches) != 1:
-            raise PlanError("cannot match this flow to exactly one flow in the approved config")
 
-        if matches[0].get("allocation_wallet") is None:
+        if len(matches) != 1:
+            raise PlanError(
+                "cannot match this flow to exactly one flow in the approved config"
+            )
+
+        return matches[0]
+
+    def _experimental_allocation_complete(self, flow):
+        approved_flow = self._approved_flow_config(flow)
+
+        if approved_flow.get("allocation_wallet") is None:
             return True
 
         jobs = experimental_allocation_jobs(self.engine, flow["id"])
@@ -125,16 +144,9 @@ class Executor:
         }
 
     def _generate_allocation_job(self, flow):
-        cfg = self._config_for_flow(flow)
-        matches = [
-            f for f in cfg["flows"]
-            if f["source_wallet"] == flow["source_wallet"]
-            and f["destination_wallet"] == flow["destination_wallet"]
-        ]
-        if len(matches) != 1:
-            raise PlanError("cannot match this flow to exactly one flow in the approved config")
+        approved_flow = self._approved_flow_config(flow)
 
-        allocation_wallet = matches[0].get("allocation_wallet")
+        allocation_wallet = approved_flow.get("allocation_wallet")
 
         if allocation_wallet is not None:
             mine = self.rpc.get_balances(allocation_wallet).get("mine", {})
@@ -260,22 +272,196 @@ class Executor:
 
     def _execute(self, flow_id, actions):
         e = self.engine
-        jobs = [j for j in e.list_jobs(flow_id) if j["state"] == "PLANNED"]
+        jobs = [
+            j for j in e.list_jobs(flow_id)
+            if j["state"] == "PLANNED"
+        ]
+
         if not jobs:
-            raise EngineError("EXECUTE with no planned job")
+            raise EngineError(
+                "EXECUTE with no planned job"
+            )
+
         job = jobs[0]
+
         live = e.conn.execute(
-            "SELECT 1 FROM action_journal WHERE job_id=? AND status IN ('intent','unknown')",
-            (job["id"],)).fetchone()
+            "SELECT 1 FROM action_journal "
+            "WHERE job_id=? "
+            "AND status IN ('intent','unknown')",
+            (job["id"],),
+        ).fetchone()
+
         if live:
-            raise EngineError("an earlier broadcast for this job is unresolved; resolve it first")
+            raise EngineError(
+                "an earlier broadcast for this job is unresolved; "
+                "resolve it first"
+            )
+
         plan = json.loads(job["planned_json"])
-        addr = self.rpc.get_new_address(plan["to"], "flowlab-recv")
-        prepared = self.builder.build(plan["from"], addr, plan["amount_sats"])
-        self.log("PREVIEW\n" + prepared.summary())
-        txid = broadcast(e, self.rpc, job["id"], prepared)
-        e.advance_flow(flow_id, "CONFIRMATION")
-        actions.append(f"step {self._step(job)} broadcast {txid}")
+        flow = e.get_flow(flow_id)
+        approved_flow = self._approved_flow_config(flow)
+
+        # --------------------------------------------------
+        # Multi-destination terminal transaction.
+
+        if "distribution" in plan:
+            if not has_multi_destinations(approved_flow):
+                raise PlanError(
+                    "distribution job is not authorized by the "
+                    "approved flow config"
+                )
+
+            if plan.get("distribution") != approved_flow["destinations"]:
+                raise PlanError(
+                    "planned terminal distribution differs from "
+                    "the approved immutable config"
+                )
+
+            if (
+                plan.get("from")
+                != approved_flow["finalization_wallet"]
+            ):
+                raise PlanError(
+                    "terminal distribution must spend from the "
+                    "approved finalization wallet"
+                )
+
+            if plan.get("amount_sats") != "all":
+                raise PlanError(
+                    "terminal distribution must consume the full "
+                    "finalization-wallet balance"
+                )
+
+            spec = approved_flow["destinations"]
+            builder_items = []
+            resolved = []
+            external_addresses = set()
+
+            for item in spec["items"]:
+                kind = item["type"]
+
+                if kind == "wallet":
+                    wallet = item["wallet"]
+                    address = self.rpc.get_new_address(
+                        wallet,
+                        "flowlab-final",
+                    )
+
+                    resolved_item = {
+                        "type": "wallet",
+                        "wallet": wallet,
+                        "resolved_address": address,
+                    }
+
+                elif kind == "address":
+                    address = item["address"]
+                    external_addresses.add(address)
+
+                    resolved_item = {
+                        "type": "address",
+                        "address": address,
+                        "resolved_address": address,
+                    }
+
+                else:
+                    raise PlanError(
+                        "approved terminal destination has an "
+                        "unsupported type"
+                    )
+
+                builder_item = {
+                    "address": address,
+                }
+
+                if spec["mode"] == "percentage":
+                    builder_item["percent_bps"] = (
+                        item["percent_bps"]
+                    )
+
+                elif item.get("remainder"):
+                    builder_item["remainder"] = True
+
+                else:
+                    builder_item["amount_sats"] = (
+                        item["amount_sats"]
+                    )
+
+                builder_items.append(builder_item)
+                resolved.append(resolved_item)
+
+            prepared = self.builder.build_distribution(
+                plan["from"],
+                "all",
+                spec["mode"],
+                builder_items,
+                allowed_external_addresses=external_addresses,
+            )
+
+            self.log(
+                "PREVIEW\n" + prepared.summary()
+            )
+
+            txid = broadcast_distribution(
+                e,
+                self.rpc,
+                job["id"],
+                prepared,
+                resolved,
+            )
+
+            e.advance_flow(
+                flow_id,
+                "CONFIRMATION",
+            )
+
+            actions.append(
+                f"step {self._step(job)} "
+                f"terminal distribution broadcast {txid}"
+            )
+            return
+
+        # --------------------------------------------------
+        # Existing single-output path.
+
+        external = (
+            destination_is_external(approved_flow)
+            and plan["to"] == destination_endpoint(approved_flow)
+        )
+
+        if external:
+            addr = destination_endpoint(approved_flow)
+        else:
+            addr = self.rpc.get_new_address(
+                plan["to"],
+                "flowlab-recv",
+            )
+
+        prepared = self.builder.build(
+            plan["from"],
+            addr,
+            plan["amount_sats"],
+            allow_external=external,
+        )
+
+        self.log(
+            "PREVIEW\n" + prepared.summary()
+        )
+
+        txid = broadcast(
+            e,
+            self.rpc,
+            job["id"],
+            prepared,
+        )
+
+        e.advance_flow(
+            flow_id,
+            "CONFIRMATION",
+        )
+
+        actions.append(
+            f"step {self._step(job)} broadcast {txid}"
+        )
 
     def _confirm(self, flow, actions, waits):
         e = self.engine
@@ -297,58 +483,591 @@ class Executor:
 
     # -------------------------------------------------------- reconciliation
     def reconcile(self, exp_id):
-        """Check every transfer against what the node's wallets actually recorded."""
+        """Check every transfer against sender records and approved endpoints."""
         e = self.engine
         issues, fees, moved, balances, njobs = [], 0, 0, {}, 0
+
         for flow in e.list_flows(exp_id):
+            approved_flow = self._approved_flow_config(flow)
+
+            multi_destination = has_multi_destinations(
+                approved_flow
+            )
+
+            external_destination = (
+                None
+                if multi_destination
+                else (
+                    destination_endpoint(approved_flow)
+                    if destination_is_external(approved_flow)
+                    else None
+                )
+            )
+
             for job in e.list_jobs(flow["id"]):
                 njobs += 1
                 plan = json.loads(job["planned_json"])
-                recorded = json.loads(job["result_json"] or "{}")
+                recorded = json.loads(
+                    job["result_json"] or "{}"
+                )
                 tag = f"step {plan['step'] + 1}"
-                try:
-                    sent = self.rpc.get_transaction(plan["from"], job["txid"])
-                    got = self.rpc.get_transaction(plan["to"], job["txid"])
-                except RpcError as err:
-                    issues.append(f"{tag}: cannot read transaction ({err})")
-                    continue
-                fee = -to_sats(sent.get("fee", 0))
-                want = recorded.get("amount_sats") if plan["amount_sats"] == "all" else plan["amount_sats"]
 
-                if plan["from"] == plan["to"]:
-                    address = recorded.get("address")
+                try:
+                    sent = self.rpc.get_transaction(
+                        plan["from"],
+                        job["txid"],
+                    )
+                except RpcError as err:
+                    issues.append(
+                        f"{tag}: cannot read sender transaction "
+                        f"({err})"
+                    )
+                    continue
+
+                fee = -to_sats(sent.get("fee", 0))
+
+                # ------------------------------------------
+                # Multi-output terminal distribution.
+
+                if "distribution" in plan:
+                    if not multi_destination:
+                        issues.append(
+                            f"{tag}: distribution job is not "
+                            "authorized by approved config"
+                        )
+                        continue
+
+                    approved_spec = approved_flow["destinations"]
+
+                    if plan["distribution"] != approved_spec:
+                        issues.append(
+                            f"{tag}: planned terminal distribution "
+                            "differs from approved config"
+                        )
+
+                    if (
+                        plan.get("from")
+                        != approved_flow["finalization_wallet"]
+                    ):
+                        issues.append(
+                            f"{tag}: terminal distribution sender "
+                            "differs from approved finalization wallet"
+                        )
+
+                    if plan.get("amount_sats") != "all":
+                        issues.append(
+                            f"{tag}: terminal distribution is not "
+                            "a full-balance send"
+                        )
+
+                    recorded_items = recorded.get(
+                        "destinations"
+                    )
+
+                    if not isinstance(recorded_items, list):
+                        issues.append(
+                            f"{tag}: terminal distribution has no "
+                            "recorded destination list"
+                        )
+                        recorded_items = []
+
+                    approved_items = approved_spec["items"]
+
+                    if len(recorded_items) != len(approved_items):
+                        issues.append(
+                            f"{tag}: recorded terminal destination "
+                            "count differs from approved config"
+                        )
+
+                    builder_items = []
+                    resolved_addresses = []
+                    logical_ok = (
+                        len(recorded_items)
+                        == len(approved_items)
+                    )
+
+                    if logical_ok:
+                        for index, (
+                            approved_item,
+                            recorded_item,
+                        ) in enumerate(
+                            zip(
+                                approved_items,
+                                recorded_items,
+                            ),
+                            1,
+                        ):
+                            if not isinstance(recorded_item, dict):
+                                issues.append(
+                                    f"{tag}: destination {index} "
+                                    "record is not an object"
+                                )
+                                logical_ok = False
+                                continue
+
+                            kind = approved_item["type"]
+
+                            if recorded_item.get("type") != kind:
+                                issues.append(
+                                    f"{tag}: destination {index} "
+                                    "type differs from approved config"
+                                )
+                                logical_ok = False
+                                continue
+
+                            resolved_address = (
+                                recorded_item.get(
+                                    "resolved_address"
+                                )
+                            )
+
+                            if (
+                                not isinstance(
+                                    resolved_address,
+                                    str,
+                                )
+                                or not resolved_address
+                            ):
+                                issues.append(
+                                    f"{tag}: destination {index} "
+                                    "has no resolved address"
+                                )
+                                logical_ok = False
+                                continue
+
+                            if kind == "wallet":
+                                wallet = approved_item["wallet"]
+
+                                if (
+                                    recorded_item.get("wallet")
+                                    != wallet
+                                ):
+                                    issues.append(
+                                        f"{tag}: destination "
+                                        f"{index} wallet differs "
+                                        "from approved config"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                                try:
+                                    owned = (
+                                        self.rpc.get_address_info(
+                                            wallet,
+                                            resolved_address,
+                                        ).get("ismine")
+                                        is True
+                                    )
+                                except RpcError as err:
+                                    issues.append(
+                                        f"{tag}: cannot verify "
+                                        f"destination {index} "
+                                        f"wallet address ({err})"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                                if not owned:
+                                    issues.append(
+                                        f"{tag}: destination "
+                                        f"{index} resolved address "
+                                        f"is not owned by {wallet}"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                            elif kind == "address":
+                                address = approved_item["address"]
+
+                                if (
+                                    recorded_item.get("address")
+                                    != address
+                                    or resolved_address != address
+                                ):
+                                    issues.append(
+                                        f"{tag}: destination "
+                                        f"{index} external address "
+                                        "differs from approved config"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                            else:
+                                issues.append(
+                                    f"{tag}: destination {index} "
+                                    "has unsupported type"
+                                )
+                                logical_ok = False
+                                continue
+
+                            item = {
+                                "address": resolved_address,
+                            }
+
+                            if (
+                                approved_spec["mode"]
+                                == "percentage"
+                            ):
+                                item["percent_bps"] = (
+                                    approved_item[
+                                        "percent_bps"
+                                    ]
+                                )
+                            elif approved_item.get(
+                                "remainder"
+                            ):
+                                item["remainder"] = True
+                            else:
+                                item["amount_sats"] = (
+                                    approved_item[
+                                        "amount_sats"
+                                    ]
+                                )
+
+                            builder_items.append(item)
+                            resolved_addresses.append(
+                                resolved_address
+                            )
+
+                    budget = recorded.get("budget_sats")
+                    distributed = recorded.get(
+                        "distributed_sats"
+                    )
+
+                    if (
+                        not isinstance(budget, int)
+                        or isinstance(budget, bool)
+                        or budget <= 0
+                    ):
+                        issues.append(
+                            f"{tag}: terminal distribution has "
+                            "invalid recorded budget"
+                        )
+                        budget = None
+
+                    if (
+                        not isinstance(distributed, int)
+                        or isinstance(distributed, bool)
+                        or distributed <= 0
+                    ):
+                        issues.append(
+                            f"{tag}: terminal distribution has "
+                            "invalid recorded distributed amount"
+                        )
+                        distributed = None
+
+                    if (
+                        budget is not None
+                        and distributed is not None
+                        and distributed != budget - fee
+                    ):
+                        issues.append(
+                            f"{tag}: distributed amount "
+                            f"{distributed} sats does not equal "
+                            f"budget {budget} minus fee {fee}"
+                        )
+
+                    expected_pairs = None
+
+                    if (
+                        logical_ok
+                        and distributed is not None
+                    ):
+                        try:
+                            expected_pairs = (
+                                self.builder
+                                ._distribution_amounts(
+                                    approved_spec["mode"],
+                                    builder_items,
+                                    distributed,
+                                )
+                            )
+                        except BuildError as err:
+                            issues.append(
+                                f"{tag}: cannot recompute "
+                                f"approved terminal distribution "
+                                f"({err})"
+                            )
+
+                    if expected_pairs is not None:
+                        recorded_pairs = [
+                            (
+                                item.get(
+                                    "resolved_address"
+                                ),
+                                item.get("amount_sats"),
+                            )
+                            for item in recorded_items
+                        ]
+
+                        if recorded_pairs != expected_pairs:
+                            issues.append(
+                                f"{tag}: recorded destination "
+                                "amounts differ from the approved "
+                                "distribution"
+                            )
+
+                    try:
+                        txhex = sent.get("hex")
+
+                        if not txhex:
+                            raise RpcError(
+                                "wallet transaction has no raw hex"
+                            )
+
+                        raw = self.rpc.decode_raw_transaction(
+                            txhex
+                        )
+
+                        actual_outputs = [
+                            (
+                                output.get(
+                                    "scriptPubKey",
+                                    {},
+                                ).get("address"),
+                                to_sats(output["value"]),
+                            )
+                            for output in raw.get("vout", [])
+                        ]
+
+                    except RpcError as err:
+                        issues.append(
+                            f"{tag}: cannot decode terminal "
+                            f"distribution outputs ({err})"
+                        )
+                        actual_outputs = None
+
+                    if (
+                        actual_outputs is not None
+                        and expected_pairs is not None
+                    ):
+                        if (
+                            len(actual_outputs)
+                            != len(expected_pairs)
+                        ):
+                            issues.append(
+                                f"{tag}: terminal transaction "
+                                "has an unexpected number of "
+                                "outputs"
+                            )
+                        else:
+                            actual_map = {}
+                            duplicate = False
+
+                            for address, sats in actual_outputs:
+                                if address in actual_map:
+                                    duplicate = True
+                                actual_map[address] = sats
+
+                            if duplicate:
+                                issues.append(
+                                    f"{tag}: terminal transaction "
+                                    "contains duplicate output "
+                                    "addresses"
+                                )
+
+                            if actual_map != dict(
+                                expected_pairs
+                            ):
+                                issues.append(
+                                    f"{tag}: terminal transaction "
+                                    "outputs differ from approved "
+                                    "distribution"
+                                )
+
+                    confirmations = sent.get(
+                        "confirmations",
+                        0,
+                    )
+
+                    if fee != recorded.get("fee_sats"):
+                        issues.append(
+                            f"{tag}: fee {fee} sats differs "
+                            "from the recorded "
+                            f"{recorded.get('fee_sats')}"
+                        )
+
+                    if (
+                        confirmations
+                        < flow["confirmations_required"]
+                    ):
+                        issues.append(
+                            f"{tag}: below the required "
+                            "confirmations"
+                        )
+
+                    fees += fee
+                    moved += distributed or 0
+                    continue
+
+                # ------------------------------------------
+                # Existing single-output reconciliation.
+
+                want = (
+                    recorded.get("amount_sats")
+                    if plan["amount_sats"] == "all"
+                    else plan["amount_sats"]
+                )
+
+                external = (
+                    external_destination is not None
+                    and plan["to"] == external_destination
+                )
+
+                if external or plan["from"] == plan["to"]:
+                    address = (
+                        external_destination
+                        if external
+                        else recorded.get("address")
+                    )
+
                     if not address:
-                        issues.append(f"{tag}: self-transfer has no recorded destination address")
+                        issues.append(
+                            f"{tag}: transaction has no "
+                            "recorded destination address"
+                        )
                     else:
                         try:
                             txhex = sent.get("hex")
+
                             if not txhex:
-                                raise RpcError("wallet transaction has no raw hex")
-                            raw = self.rpc.decode_raw_transaction(txhex)
+                                raise RpcError(
+                                    "wallet transaction has no "
+                                    "raw hex"
+                                )
+
+                            raw = (
+                                self.rpc
+                                .decode_raw_transaction(txhex)
+                            )
+
                             actual = sum(
                                 to_sats(o["value"])
                                 for o in raw.get("vout", [])
-                                if o.get("scriptPubKey", {}).get("address") == address
+                                if o.get(
+                                    "scriptPubKey",
+                                    {},
+                                ).get("address")
+                                == address
                             )
+
                         except RpcError as err:
-                            issues.append(f"{tag}: cannot decode self-transfer output ({err})")
+                            kind = (
+                                "external"
+                                if external
+                                else "self-transfer"
+                            )
+
+                            issues.append(
+                                f"{tag}: cannot decode "
+                                f"{kind} output ({err})"
+                            )
                             actual = None
 
-                        if actual is not None and (want is None or actual != want):
-                            issues.append(
-                                f"{tag}: self-transfer output was {actual} sats, expected {want}"
+                        if (
+                            actual is not None
+                            and (
+                                want is None
+                                or actual != want
                             )
-                elif want is None or to_sats(got["amount"]) != want:
-                    issues.append(f"{tag}: receiver saw {to_sats(got['amount'])} sats, expected {want}")
+                        ):
+                            kind = (
+                                "external"
+                                if external
+                                else "self-transfer"
+                            )
+
+                            issues.append(
+                                f"{tag}: {kind} output was "
+                                f"{actual} sats, expected {want}"
+                            )
+
+                    confirmations = sent.get(
+                        "confirmations",
+                        0,
+                    )
+
+                else:
+                    try:
+                        got = self.rpc.get_transaction(
+                            plan["to"],
+                            job["txid"],
+                        )
+                    except RpcError as err:
+                        issues.append(
+                            f"{tag}: cannot read receiver "
+                            f"transaction ({err})"
+                        )
+                        continue
+
+                    if (
+                        want is None
+                        or to_sats(got["amount"]) != want
+                    ):
+                        issues.append(
+                            f"{tag}: receiver saw "
+                            f"{to_sats(got['amount'])} sats, "
+                            f"expected {want}"
+                        )
+
+                    confirmations = got.get(
+                        "confirmations",
+                        0,
+                    )
 
                 if fee != recorded.get("fee_sats"):
-                    issues.append(f"{tag}: fee {fee} sats differs from the recorded {recorded.get('fee_sats')}")
-                if got.get("confirmations", 0) < flow["confirmations_required"]:
-                    issues.append(f"{tag}: below the required confirmations")
+                    issues.append(
+                        f"{tag}: fee {fee} sats differs "
+                        "from the recorded "
+                        f"{recorded.get('fee_sats')}"
+                    )
+
+                if (
+                    confirmations
+                    < flow["confirmations_required"]
+                ):
+                    issues.append(
+                        f"{tag}: below the required "
+                        "confirmations"
+                    )
+
                 fees += fee
                 moved += want or 0
-            for w in [flow["source_wallet"], *json.loads(flow["flow_wallets_json"]),
-                      flow["destination_wallet"]]:
-                balances[w] = to_sats(self.rpc.get_balances(w)["mine"]["trusted"])
-        stats = {"jobs": njobs, "total_fees_sats": fees, "total_moved_sats": moved, "issues": issues}
-        return (not issues), {"balances_sats": balances}, stats
+
+            managed_wallets = [
+                flow["source_wallet"],
+                *json.loads(flow["flow_wallets_json"]),
+            ]
+
+            if multi_destination:
+                managed_wallets.extend(
+                    destination_wallets(approved_flow)
+                )
+            elif not destination_is_external(
+                approved_flow
+            ):
+                managed_wallets.append(
+                    flow["destination_wallet"]
+                )
+
+            for wallet in dict.fromkeys(
+                managed_wallets
+            ):
+                balances[wallet] = to_sats(
+                    self.rpc.get_balances(
+                        wallet
+                    )["mine"]["trusted"]
+                )
+
+        stats = {
+            "jobs": njobs,
+            "total_fees_sats": fees,
+            "total_moved_sats": moved,
+            "issues": issues,
+        }
+
+        return (
+            not issues
+        ), {
+            "balances_sats": balances
+        }, stats

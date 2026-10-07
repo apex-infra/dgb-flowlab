@@ -8,6 +8,12 @@ recorded for the flow, so they can be checked against the node.
 
 import json
 
+from .config_schema import (
+    destination_identity,
+    destination_is_external,
+    destination_wallets,
+    has_multi_destinations,
+)
 from .rpc import RpcError, to_sats
 from .states import FlowState
 from .verify import Verifier
@@ -34,12 +40,47 @@ class NodeVerifier(Verifier):
         return checks
 
     @staticmethod
-    def _wallets(flow):
+    def _config_flow(experiment, flow):
+        if not experiment or not flow:
+            return None
+
+        raw = experiment.get("config_json")
+        if not raw:
+            return None
+
+        cfg = json.loads(raw)
+
+        matches = [
+            fl for fl in cfg.get("flows", [])
+            if fl.get("source_wallet") == flow["source_wallet"]
+            and destination_identity(fl) == flow["destination_wallet"]
+        ]
+
+        return matches[0] if len(matches) == 1 else None
+
+    def _wallets(self, experiment, flow):
         if not flow:
             return []
-        w = [flow["source_wallet"], *json.loads(flow["flow_wallets_json"]),
-             flow["destination_wallet"]]
-        return list(dict.fromkeys(w))
+
+        wallets = [
+            flow["source_wallet"],
+            *json.loads(flow["flow_wallets_json"]),
+        ]
+
+        cfg_flow = self._config_flow(experiment, flow)
+
+        # Fail closed if the DB flow cannot be matched to its immutable
+        # approved config. For a matched multi-destination flow, require
+        # every internal terminal wallet but never treat the DB's
+        # destinations:<hash> identity marker as a wallet.
+        if cfg_flow is None:
+            wallets.append(flow["destination_wallet"])
+        elif has_multi_destinations(cfg_flow):
+            wallets.extend(destination_wallets(cfg_flow))
+        elif not destination_is_external(cfg_flow):
+            wallets.append(flow["destination_wallet"])
+
+        return list(dict.fromkeys(wallets))
 
     def _height(self, exp, flow):
         info = self.rpc.get_blockchain_info()
@@ -51,7 +92,7 @@ class NodeVerifier(Verifier):
 
     def _wallet(self, exp, flow):
         loaded = set(self.rpc.list_wallets())
-        want = self._wallets(flow)
+        want = self._wallets(exp, flow)
         if not want:
             return (True, "no flow")
         # Required flow wallets must be loaded. Additional loaded wallets are
@@ -77,16 +118,16 @@ class NodeVerifier(Verifier):
 
     def _utxo(self, exp, flow):
         total = 0
-        for w in self._wallets(flow):
+        for w in self._wallets(exp, flow):
             for u in self.rpc.list_unspent(w, 0):
                 if to_sats(u["amount"]) <= 0:
                     return (False, f"bad utxo in {w}")
                 total += 1
         return (True, f"{total} utxos readable")
 
-    def _lookup(self, flow, txid):
+    def _lookup(self, exp, flow, txid):
         """Wallet-side lookup, so it works without -txindex."""
-        for w in self._wallets(flow):
+        for w in self._wallets(exp, flow):
             try:
                 return self.rpc.get_transaction(w, txid)
             except RpcError:
@@ -95,13 +136,13 @@ class NodeVerifier(Verifier):
 
     def _transaction(self, exp, flow):
         for txid in self.known_txids(flow):
-            if self._lookup(flow, txid) is None:
+            if self._lookup(exp, flow, txid) is None:
                 return (False, f"{txid[:12]} is not known to any flow wallet")
         return (True, "recorded txids known to node")
 
     def _confirmation(self, exp, flow):
         for txid in self.known_txids(flow):
-            t = self._lookup(flow, txid)
+            t = self._lookup(exp, flow, txid)
             if t is not None and t.get("confirmations", 0) < 0:
                 return (False, f"{txid[:12]} conflicted")
         return (True, "confirmation state consistent")

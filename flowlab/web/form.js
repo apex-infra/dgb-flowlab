@@ -36,7 +36,8 @@ const whole = (text, what, min) => {
     workers: [],
     edges: new Set(),
     playConfig: null,
-    previewSeq: 0
+    previewSeq: 0,
+    destinationRows: null
   };
 
   const sel = (id, options, value) => {
@@ -96,6 +97,464 @@ const whole = (text, what, min) => {
     return values.length ? [...new Set(values)] : wallets();
   }
 
+  function destinationEndpoint() {
+    const kind = $("f-dst-kind");
+
+    if (kind && kind.value === "external") {
+      const input = $("f-dst-address");
+      const address = input ? input.value.trim() : "";
+
+      if (!address)
+        throw new Error("Enter a custom DigiByte destination address");
+
+      return {
+        kind: "external",
+        key: "destination_address",
+        value: address
+      };
+    }
+
+    const wallet = $("f-dst");
+
+    if (!wallet || !wallet.value)
+      throw new Error("Choose a FlowLab destination wallet");
+
+    return {
+      kind: "internal",
+      key: "destination_wallet",
+      value: wallet.value
+    };
+  }
+
+  function destinationConfig() {
+    const endpoint = destinationEndpoint();
+    return {[endpoint.key]: endpoint.value};
+  }
+
+  function destinationControls(destinations, changed) {
+    const kind = h("select");
+    kind.id = "f-dst-kind";
+    kind.append(
+      new Option("FlowLab wallet", "internal"),
+      new Option("Custom DigiByte address", "external")
+    );
+
+    const wallet = sel("f-dst", destinations, destinations[0]);
+
+    const address = h("input");
+    address.id = "f-dst-address";
+    address.placeholder = "DigiByte address";
+    address.autocomplete = "off";
+    address.spellcheck = false;
+
+    const kindField = field("Destination type", kind);
+    const walletField = field("Final destination wallet", wallet);
+    const addressField = field("Custom DigiByte address", address);
+
+    function sync(notify = true) {
+      const external = kind.value === "external";
+      walletField.hidden = external;
+      addressField.hidden = !external;
+
+      if (notify && changed)
+        changed();
+    }
+
+    kind.onchange = () => sync(true);
+    wallet.onchange = () => changed && changed();
+    address.oninput = () => changed && changed();
+
+    sync(false);
+
+    return {
+      fields: [kindField, walletField, addressField],
+      sync
+    };
+  }
+
+  function percentToBps(text, what) {
+    const t = String(text).trim();
+
+    if (!/^\d+(\.\d{1,2})?$/.test(t))
+      throw new Error(
+        what + ": enter a percentage with at most 2 decimals"
+      );
+
+    const [wholePart, fraction = ""] = t.split(".");
+    const bps =
+      Number(wholePart) * 100
+      + Number((fraction + "00").slice(0, 2));
+
+    if (!Number.isSafeInteger(bps) || bps < 1 || bps > 10000)
+      throw new Error(
+        what + ": percentage must be greater than 0 and at most 100"
+      );
+
+    return bps;
+  }
+
+  function formatBps(bps) {
+    const wholePart = Math.floor(bps / 100);
+    const fraction = String(bps % 100).padStart(2, "0");
+    return wholePart + "." + fraction;
+  }
+
+  function destinationSetRows() {
+    const box = $("f-dst-rows") || state.destinationRows;
+    return box ? [...box.children] : [];
+  }
+
+  function destinationSetInternalWallets() {
+    return destinationSetRows()
+      .filter(row => row._kind && row._kind.value === "internal")
+      .map(row => row._wallet ? row._wallet.value : "")
+      .filter(Boolean);
+  }
+
+  function destinationSetConfig() {
+    const modeControl = $("f-dst-mode");
+
+    if (!modeControl)
+      throw new Error("Destination editor is not available");
+
+    const mode = modeControl.value;
+    const rows = destinationSetRows();
+
+    if (!rows.length || rows.length > 10)
+      throw new Error("Choose between 1 and 10 terminal destinations");
+
+    const items = [];
+    const targets = new Set();
+    let percentTotal = 0;
+    let remainderCount = 0;
+
+    rows.forEach((row, index) => {
+      const n = index + 1;
+      const kind = row._kind.value;
+      let targetKey;
+      let item;
+
+      if (kind === "internal") {
+        const wallet = row._wallet.value;
+
+        if (!wallet)
+          throw new Error(
+            "Destination " + n + ": choose a FlowLab destination wallet"
+          );
+
+        targetKey = "wallet:" + wallet;
+        item = {
+          type: "wallet",
+          wallet
+        };
+      } else {
+        const address = row._address.value.trim();
+
+        if (!address)
+          throw new Error(
+            "Destination " + n + ": enter a DigiByte address"
+          );
+
+        targetKey = "address:" + address;
+        item = {
+          type: "address",
+          address
+        };
+      }
+
+      if (targets.has(targetKey))
+        throw new Error(
+          "Destination " + n + ": duplicate terminal target"
+        );
+
+      targets.add(targetKey);
+
+      if (mode === "percentage") {
+        const bps = percentToBps(
+          row._percent.value,
+          "Destination " + n
+        );
+
+        item.percent_bps = bps;
+        percentTotal += bps;
+      } else if (row._remainder.checked) {
+        item.remainder = true;
+        remainderCount += 1;
+      } else {
+        item.amount_sats = toSats(
+          row._fixed.value,
+          "Destination " + n + " fixed amount"
+        );
+      }
+
+      items.push(item);
+    });
+
+    if (mode === "percentage" && percentTotal !== 10000)
+      throw new Error(
+        "Destination percentages must total exactly 100.00%"
+      );
+
+    if (mode === "fixed" && remainderCount !== 1)
+      throw new Error(
+        "Fixed distribution requires exactly one remainder destination"
+      );
+
+    return {
+      mode,
+      items
+    };
+  }
+
+  function destinationSetControls(destinations, changed) {
+    const editor = h("div", "destination-editor");
+
+    const toolbar = h("div", "destination-toolbar");
+
+    const mode = h("select");
+    mode.id = "f-dst-mode";
+    mode.append(
+      new Option("Percentage split", "percentage"),
+      new Option("Fixed DGB + remainder", "fixed")
+    );
+
+    const add = h("button", null, "+ Add destination");
+    add.type = "button";
+    add.id = "f-dst-add";
+
+    toolbar.append(
+      h("span", "mute", "Distribution"),
+      mode,
+      add
+    );
+
+    const rows = h("div", "destination-rows");
+    rows.id = "f-dst-rows";
+    state.destinationRows = rows;
+
+    const help = note(
+      "Choose 1–10 terminal destinations. Each row may be a FlowLab "
+      + "destination wallet or a custom DigiByte address. Percentage "
+      + "splits must total exactly 100.00%. Fixed mode requires exactly "
+      + "one remainder row, which receives everything left after fixed "
+      + "amounts and the final transaction fee."
+    );
+
+    editor.append(toolbar, rows, help);
+
+    function notify(structural = false) {
+      if (changed)
+        changed(structural);
+    }
+
+    function rebalancePercentRows() {
+      const current = destinationSetRows();
+
+      if (!current.length)
+        return;
+
+      const base = Math.floor(10000 / current.length);
+      let extra = 10000 - base * current.length;
+
+      current.forEach(row => {
+        const bps = base + (extra > 0 ? 1 : 0);
+
+        if (extra > 0)
+          extra -= 1;
+
+        row._percent.value = formatBps(bps);
+      });
+    }
+
+    function ensureRemainder() {
+      const current = destinationSetRows();
+
+      if (
+        current.length
+        && !current.some(row => row._remainder.checked)
+      )
+        current[0]._remainder.checked = true;
+    }
+
+    function updateButtons() {
+      const current = destinationSetRows();
+
+      add.disabled = current.length >= 10;
+
+      current.forEach(row => {
+        row._remove.disabled = current.length <= 1;
+      });
+    }
+
+    function syncRow(row) {
+      const external = row._kind.value === "external";
+      const percentage = mode.value === "percentage";
+
+      row._wallet.hidden = external;
+      row._address.hidden = !external;
+
+      row._percent.hidden = !percentage;
+      row._fixed.hidden = percentage || row._remainder.checked;
+      row._remainderLabel.hidden = percentage;
+
+      if (!percentage && row._remainder.checked)
+        row._fixed.hidden = true;
+    }
+
+    function syncAll() {
+      destinationSetRows().forEach(syncRow);
+      updateButtons();
+    }
+
+    function addRow(initial = {}) {
+      if (destinationSetRows().length >= 10)
+        return;
+
+      const row = h("div", "destination-row");
+
+      const kind = h("select");
+      kind.append(
+        new Option("FlowLab wallet", "internal"),
+        new Option("Custom DigiByte address", "external")
+      );
+      kind.value = initial.type === "address"
+        ? "external"
+        : "internal";
+
+      const wallet = sel(
+        "",
+        destinations,
+        initial.wallet || destinations[0]
+      );
+      wallet.removeAttribute("id");
+
+      const address = h("input");
+      address.placeholder = "DigiByte address";
+      address.autocomplete = "off";
+      address.spellcheck = false;
+      address.value = initial.address || "";
+
+      const percent = h("input");
+      percent.inputMode = "decimal";
+      percent.placeholder = "%";
+      percent.value = initial.percent || "100.00";
+
+      const fixed = h("input");
+      fixed.inputMode = "decimal";
+      fixed.placeholder = "DGB";
+      fixed.value = initial.fixed || "1";
+
+      const remainder = h("input");
+      remainder.type = "checkbox";
+      remainder.checked = Boolean(initial.remainder);
+
+      const remainderLabel = h("label", "destination-remainder");
+      remainderLabel.append(
+        remainder,
+        document.createTextNode("Remainder")
+      );
+
+      const remove = h("button", null, "Remove");
+      remove.type = "button";
+
+      row._kind = kind;
+      row._wallet = wallet;
+      row._address = address;
+      row._percent = percent;
+      row._fixed = fixed;
+      row._remainder = remainder;
+      row._remainderLabel = remainderLabel;
+      row._remove = remove;
+
+      kind.onchange = () => {
+        syncRow(row);
+        notify(true);
+      };
+
+      wallet.onchange = () => notify(true);
+      address.oninput = () => notify(false);
+      percent.oninput = () => notify(false);
+      fixed.oninput = () => notify(false);
+
+      remainder.onchange = () => {
+        if (remainder.checked) {
+          destinationSetRows().forEach(other => {
+            if (other !== row)
+              other._remainder.checked = false;
+          });
+        }
+
+        ensureRemainder();
+        syncAll();
+        notify(false);
+      };
+
+      remove.onclick = () => {
+        row.remove();
+
+        if (mode.value === "percentage")
+          rebalancePercentRows();
+        else
+          ensureRemainder();
+
+        syncAll();
+        notify(true);
+      };
+
+      row.append(
+        kind,
+        wallet,
+        address,
+        percent,
+        fixed,
+        remainderLabel,
+        remove
+      );
+
+      rows.append(row);
+
+      if (mode.value === "percentage")
+        rebalancePercentRows();
+      else
+        ensureRemainder();
+
+      syncAll();
+    }
+
+    add.onclick = () => {
+      addRow({
+        type: "wallet",
+        fixed: "1"
+      });
+      notify(true);
+    };
+
+    mode.onchange = () => {
+      if (mode.value === "percentage")
+        rebalancePercentRows();
+      else
+        ensureRemainder();
+
+      syncAll();
+      notify(false);
+    };
+
+    addRow({
+      type: "wallet",
+      wallet: destinations[0],
+      percent: "100.00",
+      fixed: "1",
+      remainder: true
+    });
+
+    syncAll();
+
+    return {
+      field: field("Terminal destinations", editor),
+      sync: syncAll
+    };
+  }
+
   function plays() {
     return window.flowPlays || [];
   }
@@ -130,7 +589,7 @@ const whole = (text, what, min) => {
     return [
       $("f-src").value,
       ...state.workers.filter(x => x.on).map(x => x.name),
-      $("f-dst").value
+      destinationEndpoint().value
     ];
   }
 
@@ -181,7 +640,7 @@ const whole = (text, what, min) => {
 
   function refreshDeterministicWorkers() {
     const src = $("f-src").value;
-    const dst = $("f-dst").value;
+    const dst = destinationEndpoint().value;
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
     state.workers = workloadWallets()
@@ -232,13 +691,17 @@ const whole = (text, what, min) => {
     const workload = workloadWallets();
 
     const src = sel("f-src", reserves, reserves[0]);
-    const dst = sel("f-dst", destinations, destinations[0]);
+
+    const destination = destinationControls(destinations, () => {
+      refreshDeterministicWorkers();
+      refreshPreview();
+    });
 
     const deterministicWallets = [
       ...new Set([...reserves, ...workload, ...destinations])
     ];
 
-    src.onchange = dst.onchange = () => {
+    src.onchange = () => {
       refreshDeterministicWorkers();
       refreshPreview();
     };
@@ -254,7 +717,7 @@ const whole = (text, what, min) => {
       h("legend", null, "Route"),
       field("Reserve / funding wallet", src),
       field("Passes through workers / hubs", mids),
-      field("Final destination", dst),
+      ...destination.fields,
       field("Path", route),
       note("Deterministic routes use reserve → workers/hubs → destination. Stage wallets are reserved for Experimental and Play allocation.")
     );
@@ -293,14 +756,14 @@ const whole = (text, what, min) => {
       use,
       rows,
       add,
-      note("The final explicit hop must end in the destination wallet.")
+      note("The final explicit hop must end in the configured destination. A selected custom address becomes the terminal hop automatically.")
     );
 
     addHopRow(
       rows,
       deterministicWallets,
       src.value,
-      workload[0] || dst.value,
+      workload[0] || destinations[0],
       "2"
     );
 
@@ -310,9 +773,9 @@ const whole = (text, what, min) => {
 
   function collectDeterministic() {
     const src = $("f-src").value;
-    const dst = $("f-dst").value;
+    const destination = destinationEndpoint();
 
-    if (src === dst)
+    if (destination.kind === "internal" && src === destination.value)
       throw new Error("Source and destination must be different wallets");
 
     const amount = toSats($("f-amt").value, "Amount");
@@ -322,7 +785,7 @@ const whole = (text, what, min) => {
       description: $("f-desc").value.trim() || "dashboard run",
       source_wallet: src,
       flow_wallets: state.workers.filter(x => x.on).map(x => x.name),
-      destination_wallet: dst,
+      ...destinationConfig(),
       allocation_sats: amount
     };
 
@@ -344,6 +807,9 @@ const whole = (text, what, min) => {
 
       if (!flow.transfers.length)
         throw new Error("Add at least one hop");
+
+      if (destination.kind === "external")
+        flow.transfers[flow.transfers.length - 1].to = destination.value;
 
       flow.allocation_sats = Math.max(
         amount,
@@ -374,8 +840,11 @@ const whole = (text, what, min) => {
   function experimentalWorkers() {
     const src = $("f-src").value;
     const stage = $("f-stage").value;
-    const dst = $("f-dst").value;
-    return workloadWallets().filter(w => w !== src && w !== stage && w !== dst);
+    const terminal = new Set(destinationSetInternalWallets());
+
+    return workloadWallets().filter(
+      w => w !== src && w !== stage && !terminal.has(w)
+    );
   }
 
   function resetDefaultEdges() {
@@ -453,9 +922,18 @@ const whole = (text, what, min) => {
 
     const src = sel("f-src", reserves, reserves[0]);
     const stage = sel("f-stage", stages, stages[0]);
-    const dst = sel("f-dst", destinations, destinations[0]);
 
-    src.onchange = stage.onchange = dst.onchange = experimentalWalletChanged;
+    const destination = destinationSetControls(
+      destinations,
+      structural => {
+        if (structural)
+          experimentalWalletChanged();
+        else
+          refreshPreview();
+      }
+    );
+
+    src.onchange = stage.onchange = experimentalWalletChanged;
 
     const topology = h("div");
     topology.id = "f-topology";
@@ -465,8 +943,8 @@ const whole = (text, what, min) => {
       h("legend", null, "Wallet roles"),
       field("Reserve / funding wallet", src),
       field("Allocation wallet", stage),
-      field("Final destination", dst),
-      note("The reserve commits the full allocation to the allocation wallet before randomized workload begins. The reserve and destination are outside randomized routing.")
+      destination.field,
+      note("The reserve commits the full allocation to the allocation wallet before randomized workload begins. Terminal destinations are outside randomized routing.")
     );
 
     const workload = h("fieldset");
@@ -510,7 +988,7 @@ const whole = (text, what, min) => {
     topo.append(
       h("legend", null, "Approved topology"),
       topology,
-      note("The allocation wallet is the workload entry point. Diagonal worker cells are self-transfers. The reserve and destination are excluded from experimental routing.")
+      note("The allocation wallet is the workload entry point. Diagonal worker cells are self-transfers. The reserve and all terminal destinations are excluded from experimental routing.")
     );
 
     body.append(walletsBox, workload, random, topo);
@@ -522,11 +1000,18 @@ const whole = (text, what, min) => {
   function collectExperimental() {
     const src = $("f-src").value;
     const stage = $("f-stage").value;
-    const dst = $("f-dst").value;
+    const destinations = destinationSetConfig();
     const workers = experimentalWorkers();
 
-    if (new Set([src, stage, dst]).size !== 3)
-      throw new Error("Reserve, allocation wallet, and destination must be different wallets");
+    const terminalWallets = destinations.items
+      .filter(item => item.type === "wallet")
+      .map(item => item.wallet);
+
+    if (terminalWallets.includes(src) || terminalWallets.includes(stage))
+      throw new Error(
+        "Reserve, allocation wallet, and terminal destination wallets "
+        + "must be different"
+      );
 
     if (!workers.length)
       throw new Error("Experimental mode needs at least one working wallet");
@@ -566,8 +1051,9 @@ const whole = (text, what, min) => {
         description: $("f-desc").value.trim() || "experimental dashboard run",
         source_wallet: src,
         allocation_wallet: stage,
+        finalization_wallet: stage,
         flow_wallets: [stage, ...workers],
-        destination_wallet: dst,
+        destinations,
         allocation_sats: allocation,
         experimental_topology: {transitions}
       }],
@@ -588,7 +1074,7 @@ const whole = (text, what, min) => {
         seed
       },
       finalization: {
-        mode: "sweep_workers_to_destination"
+        mode: "consolidate_then_distribute"
       }
     };
   }
@@ -602,7 +1088,7 @@ const whole = (text, what, min) => {
   function refreshPlayWorkers() {
     const src = $("f-src").value;
     const stage = $("f-stage").value;
-    const dst = $("f-dst").value;
+    const terminal = new Set(destinationSetInternalWallets());
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
     const pool = $("f-play").value === "hub_and_spoke"
@@ -610,7 +1096,7 @@ const whole = (text, what, min) => {
       : workloadWallets();
 
     state.workers = pool
-      .filter(w => w !== src && w !== stage && w !== dst)
+      .filter(w => w !== src && w !== stage && !terminal.has(w))
       .map(w => ({
         name: w,
         on: keep.has(w) ? keep.get(w) : false
@@ -665,16 +1151,23 @@ const whole = (text, what, min) => {
 
     const src = $("f-src").value;
     const stage = $("f-stage").value;
-    const dst = $("f-dst").value;
+    const destinations = destinationSetConfig();
 
-    if (new Set([src, stage, dst]).size !== 3)
-      throw new Error("Reserve, allocation wallet, and destination must be different wallets");
+    const terminalWallets = destinations.items
+      .filter(item => item.type === "wallet")
+      .map(item => item.wallet);
+
+    if (terminalWallets.includes(src) || terminalWallets.includes(stage))
+      throw new Error(
+        "Reserve, allocation wallet, and terminal destination wallets "
+        + "must be different"
+      );
 
     const params = {
       source_wallet: src,
       allocation_wallet: stage,
       workers,
-      destination_wallet: dst,
+      destinations,
       allocation_sats: allocation,
       decisions: whole($("f-jobs").value, "Number of decisions", 1),
       amount_sats_min: minAmount,
@@ -722,7 +1215,15 @@ const whole = (text, what, min) => {
     const src = sel("f-src", reserves, reserves[0]);
     const stage = sel("f-stage", stages, stages[0]);
     const hub = sel("f-hub", hubs, hubs[0]);
-    const dst = sel("f-dst", destinations, destinations[0]);
+
+    const destination = destinationSetControls(
+      destinations,
+      structural => {
+        if (structural)
+          refreshPlayWorkers();
+        refreshPreview();
+      }
+    );
 
     const hubField = field("Hub wallet", hub);
     hubField.id = "f-hub-field";
@@ -761,8 +1262,8 @@ const whole = (text, what, min) => {
       field("Allocation wallet", stage),
       hubField,
       field("Working wallets", workerPicker),
-      field("Final destination", dst),
-      note("Play topology is compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
+      destination.field,
+      note("Play topology and terminal distribution are compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
     );
 
     const workload = h("fieldset");
@@ -805,7 +1306,7 @@ const whole = (text, what, min) => {
       refreshPreview();
     }
 
-    src.onchange = stage.onchange = hub.onchange = dst.onchange = () => {
+    src.onchange = stage.onchange = hub.onchange = () => {
       refreshPlayWorkers();
       refreshPreview();
     };
@@ -890,6 +1391,7 @@ const whole = (text, what, min) => {
     state.workers = [];
     state.edges = new Set();
     state.playConfig = null;
+    state.destinationRows = null;
     state.previewSeq += 1;
     form.replaceChildren();
 

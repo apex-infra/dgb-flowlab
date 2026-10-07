@@ -62,17 +62,26 @@ class FakeChain:
     def get_address_info(self, wallet, address):
         return {"ismine": self.owner.get(address) == wallet}
 
+    def validate_address(self, address):
+        return {
+            "isvalid": (
+                isinstance(address, str)
+                and address.startswith("dgb1q")
+                and len(address) > len("dgb1q")
+            )
+        }
+
     def list_unspent(self, wallet, minconf=0):
         return [{"txid": u["txid"], "vout": v, "amount": Decimal(u["sats"]) / SATS,
                  "spendable": True, "safe": True}
                 for (t, v), u in self.utxos.items()
-                if not u["spent"] and self.owner[u["addr"]] == wallet and self._confs(t) >= minconf]
+                if not u["spent"] and self.owner.get(u["addr"]) == wallet and self._confs(t) >= minconf]
 
     def get_balances(self, wallet):
         tr = sum(u["sats"] for (t, v), u in self.utxos.items()
-                 if not u["spent"] and self.owner[u["addr"]] == wallet and self._confs(t) >= 1)
+                 if not u["spent"] and self.owner.get(u["addr"]) == wallet and self._confs(t) >= 1)
         pe = sum(u["sats"] for (t, v), u in self.utxos.items()
-                 if not u["spent"] and self.owner[u["addr"]] == wallet and self._confs(t) == 0)
+                 if not u["spent"] and self.owner.get(u["addr"]) == wallet and self._confs(t) == 0)
         return {"mine": {"trusted": Decimal(tr) / SATS, "untrusted_pending": Decimal(pe) / SATS}}
 
     def create_raw_transaction(self, inputs, outputs):
@@ -81,22 +90,80 @@ class FakeChain:
         self.raw[h] = {"inputs": [(i["txid"], i["vout"]) for i in inputs], "outputs": dict(outputs)}
         return h
 
-    def fund_raw_transaction(self, wallet, hexstr, change_address, fee_rate=None, subtract_fee=False):
+    def fund_raw_transaction(
+            self,
+            wallet,
+            hexstr,
+            change_address,
+            fee_rate=None,
+            subtract_fee=False,
+            subtract_fee_indexes=None,
+    ):
         r = self.raw[hexstr]
         total = sum(self.utxos[i]["sats"] for i in r["inputs"])
-        if subtract_fee:
-            k = next(iter(r["outputs"]))
-            r["outputs"][k] -= FEE
+
+        if subtract_fee and subtract_fee_indexes is not None:
+            raise RpcError(
+                "use subtract_fee or subtract_fee_indexes, not both",
+                -8,
+            )
+
+        indexes = None
+        if subtract_fee_indexes is not None:
+            indexes = list(subtract_fee_indexes)
+        elif subtract_fee:
+            indexes = [0]
+
+        if indexes:
+            keys = list(r["outputs"])
+            if (
+                not indexes
+                or any(
+                    not isinstance(i, int)
+                    or isinstance(i, bool)
+                    or i < 0
+                    or i >= len(keys)
+                    for i in indexes
+                )
+            ):
+                raise RpcError("bad subtract fee output index", -8)
+
+            each, remainder = divmod(FEE, len(indexes))
+
+            for position, index in enumerate(indexes):
+                deduction = each + (1 if position < remainder else 0)
+                key = keys[index]
+
+                if r["outputs"][key] <= deduction:
+                    raise RpcError("fee exceeds selected output", -4)
+
+                r["outputs"][key] -= deduction
+
         out = sum(r["outputs"].values())
         change = total - out - FEE
-        if subtract_fee:
-            change = total - out - FEE if total - out > FEE else 0
+
+        if indexes:
+            # The selected outputs already paid the fee.
+            change = total - out - FEE
+            if total - out == FEE:
+                change = 0
+
         if change < 0:
             raise RpcError("Insufficient funds", -4)
+
         self.n += 1
         h = f"fund{self.n}"
-        outs = list(r["outputs"].items()) + ([(change_address, change)] if change else [])
-        self.raw[h] = {"inputs": r["inputs"], "outputs": dict(outs), "ordered": outs}
+
+        outs = list(r["outputs"].items())
+        if change:
+            outs.append((change_address, change))
+
+        self.raw[h] = {
+            "inputs": r["inputs"],
+            "outputs": dict(outs),
+            "ordered": outs,
+        }
+
         return {"hex": h, "fee": Decimal(FEE) / SATS}
 
     def sign_raw_transaction(self, wallet, hexstr):
@@ -153,8 +220,14 @@ class FakeChain:
 
     def get_transaction(self, wallet, txid):
         t = self.txs.get(txid)
-        mine_in = sum(s for a, s in (t or {"inputs": []})["inputs"] if self.owner[a] == wallet)
-        mine_out = sum(s for a, s in (t or {"outputs": []})["outputs"] if self.owner[a] == wallet)
+        mine_in = sum(
+            s for a, s in (t or {"inputs": []})["inputs"]
+            if self.owner.get(a) == wallet
+        )
+        mine_out = sum(
+            s for a, s in (t or {"outputs": []})["outputs"]
+            if self.owner.get(a) == wallet
+        )
         if t is None or (mine_in == 0 and mine_out == 0):
             raise RpcError("Invalid or non-wallet transaction id", -5)
         net = mine_out - mine_in

@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from flowlab import ConfigError, Engine
+from flowlab.config_schema import validate
 from flowlab.planner import (
     PlanError,
     experimental_decision,
@@ -26,7 +27,7 @@ T = [
 def cfg_with(transfers):
     c = copy.deepcopy(CFG)
     if transfers is not None:
-        c["flows"][0]["transfers"] = transfers
+        c["flows"][0]["transfers"] = copy.deepcopy(transfers)
     return c
 
 
@@ -73,6 +74,49 @@ class SchemaTests(PlannerBase):
         exp = self.e.create_experiment()
         self.e.configure_experiment(exp, cfg_with(T))
 
+    def test_external_destination_schema_is_explicit_and_terminal(self):
+        cfg = cfg_with(T)
+        flow = cfg["flows"][0]
+
+        external = "D_EXTERNAL_TEST_ADDRESS"
+        flow["destination_address"] = external
+        del flow["destination_wallet"]
+        flow["transfers"][-1]["to"] = external
+
+        validated = validate(cfg)
+
+        self.assertEqual(
+            validated["flows"][0]["destination_address"],
+            external,
+        )
+        self.assertNotIn(
+            "destination_wallet",
+            validated["flows"][0],
+        )
+
+    def test_destination_wallet_and_address_are_mutually_exclusive(self):
+        cfg = cfg_with(T)
+        cfg["flows"][0]["destination_address"] = "D_EXTERNAL_TEST_ADDRESS"
+
+        with self.assertRaisesRegex(
+            ConfigError,
+            "exactly one destination definition",
+        ):
+            validate(cfg)
+
+    def test_external_destination_can_only_be_the_final_sink(self):
+        cfg = cfg_with(T)
+        flow = cfg["flows"][0]
+
+        external = "D_EXTERNAL_TEST_ADDRESS"
+        flow["destination_address"] = external
+        del flow["destination_wallet"]
+
+        flow["transfers"][0]["to"] = external
+
+        with self.assertRaises(ConfigError):
+            validate(cfg)
+
     def test_rejections(self):
         self.bad([])
         self.bad([dict(T[0], to="w9_unknown")])
@@ -82,6 +126,201 @@ class SchemaTests(PlannerBase):
         self.bad([dict(T[0], delay_seconds=-1)])
         self.bad([dict(T[0], amount_sats=100_000_000_001)])
         self.bad([{"from": "w1_source", "to": "w2_flowA", "amount_sats": 5}])
+
+
+class MultiDestinationSchemaTests(PlannerBase):
+    @staticmethod
+    def base_multi():
+        cfg = cfg_with(T)
+        flow = cfg["flows"][0]
+
+        old_destination = flow.pop("destination_wallet")
+
+        # The old deterministic fixture ends by paying its legacy terminal
+        # destination. Multi-destination finalization is a separate terminal
+        # phase, so remove that old terminal hop for schema tests.
+        flow["transfers"] = flow["transfers"][:-1]
+        flow["finalization_wallet"] = flow["flow_wallets"][-1]
+
+        return cfg, flow, old_destination
+
+    def test_percentage_multi_destination_schema(self):
+        cfg, flow, internal = self.base_multi()
+
+        flow["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": internal,
+                    "percent_bps": 5000,
+                },
+                {
+                    "type": "address",
+                    "address": "D_EXTERNAL_TEST_ADDRESS",
+                    "percent_bps": 5000,
+                },
+            ],
+        }
+
+        validated = validate(cfg)
+        spec = validated["flows"][0]["destinations"]
+
+        self.assertEqual(spec["mode"], "percentage")
+        self.assertEqual(len(spec["items"]), 2)
+        self.assertEqual(
+            sum(item["percent_bps"] for item in spec["items"]),
+            10_000,
+        )
+
+    def test_fixed_multi_destination_schema_with_remainder(self):
+        cfg, flow, internal = self.base_multi()
+
+        flow["destinations"] = {
+            "mode": "fixed",
+            "items": [
+                {
+                    "type": "address",
+                    "address": "D_EXTERNAL_TEST_ADDRESS",
+                    "amount_sats": 50_000_000,
+                },
+                {
+                    "type": "wallet",
+                    "wallet": internal,
+                    "remainder": True,
+                },
+            ],
+        }
+
+        validated = validate(cfg)
+
+        self.assertEqual(
+            validated["flows"][0]["destinations"]["items"][1]["remainder"],
+            True,
+        )
+
+    def test_multi_destination_percentage_must_total_100_percent(self):
+        cfg, flow, internal = self.base_multi()
+
+        flow["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": internal,
+                    "percent_bps": 9000,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ConfigError,
+            "10000 basis points",
+        ):
+            validate(cfg)
+
+    def test_fixed_multi_destination_requires_one_remainder(self):
+        cfg, flow, internal = self.base_multi()
+
+        flow["destinations"] = {
+            "mode": "fixed",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": internal,
+                    "amount_sats": 50_000_000,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ConfigError,
+            "exactly one remainder",
+        ):
+            validate(cfg)
+
+    def test_multi_destination_limit_is_ten(self):
+        cfg, flow, _ = self.base_multi()
+
+        flow["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "address",
+                    "address": f"D_EXTERNAL_{i}",
+                    "percent_bps": 1000 if i < 10 else 1,
+                }
+                for i in range(11)
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ConfigError,
+            "1..10 destinations",
+        ):
+            validate(cfg)
+
+    def test_multi_destination_can_be_reviewed_and_approved(self):
+        cfg, flow, internal = self.base_multi()
+
+        flow["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": internal,
+                    "percent_bps": 5000,
+                },
+                {
+                    "type": "address",
+                    "address": "D_EXTERNAL_TEST_ADDRESS",
+                    "percent_bps": 5000,
+                },
+            ],
+        }
+
+        exp = self.e.create_experiment("multi destination approval")
+        h = self.e.configure_experiment(exp, cfg)
+
+        review = self.e.review(exp)
+
+        self.assertIn("terminal distribution: percentage", review["text"])
+        self.assertIn("50.00%", review["text"])
+        self.assertIn(internal, review["text"])
+        self.assertIn("D_EXTERNAL_TEST_ADDRESS", review["text"])
+
+        self.e.approve(exp, h)
+
+        db_flow = self.e.list_flows(exp)[0]
+
+        self.assertTrue(
+            db_flow["destination_wallet"].startswith("destinations:")
+        )
+        self.assertNotEqual(
+            db_flow["destination_wallet"],
+            "D_EXTERNAL_TEST_ADDRESS",
+        )
+
+    def test_multi_destination_cannot_coexist_with_legacy_destination(self):
+        cfg, flow, internal = self.base_multi()
+
+        flow["destination_wallet"] = internal
+        flow["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": internal,
+                    "percent_bps": 10_000,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            ConfigError,
+            "exactly one destination definition",
+        ):
+            validate(cfg)
 
 
 class ExperimentalDecisionTests(PlannerBase):
@@ -632,6 +871,225 @@ class ExperimentalJobTests(ExperimentalDecisionTests):
 
         with self.assertRaises(PlanError):
             generate_experimental_job(self.e, flow, balances)
+
+
+class MultiDestinationFinalizationPlannerTests(PlannerBase):
+    def multi_flow(self):
+        cfg = copy.deepcopy(CFG)
+        flow = cfg["flows"][0]
+
+        flow.pop("destination_wallet")
+
+        flow["allocation_wallet"] = "w2_flowA"
+        flow["finalization_wallet"] = "w2_flowA"
+
+        flow["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": "w4_dest",
+                    "percent_bps": 5000,
+                },
+                {
+                    "type": "address",
+                    "address": "D_EXTERNAL_TEST_ADDRESS",
+                    "percent_bps": 5000,
+                },
+            ],
+        }
+
+        flow.pop("transfers", None)
+
+        flow["experimental_topology"] = {
+            "transitions": [
+                {
+                    "from": "w2_flowA",
+                    "to": "w3_flowB",
+                },
+                {
+                    "from": "w3_flowB",
+                    "to": "w2_flowA",
+                },
+            ],
+        }
+
+        cfg["randomization"] = {
+            "enabled": True,
+            "model": "uniform",
+            "seed": 9020,
+        }
+
+        cfg["finalization"] = {
+            "mode": "consolidate_then_distribute",
+        }
+
+        exp = self.e.create_experiment(
+            "multi destination finalization planner"
+        )
+        h = self.e.configure_experiment(exp, cfg)
+        self.e.approve(exp, h)
+        self.e.start(exp)
+
+        flow_id = self.e.list_flows(exp)[0]["id"]
+        self.e.advance_flow(flow_id, "PLAN")
+
+        return exp, flow_id
+
+    def finish_workload(self, flow_id):
+        cfg = json.loads(
+            self.e.get_experiment(
+                self.e.get_flow(flow_id)["experiment_id"]
+            )["config_json"]
+        )
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 300_000_000,
+            "w3_flowB": 300_000_000,
+        }
+
+        for i in range(cfg["workload"]["jobs"]):
+            jid = generate_experimental_job(
+                self.e,
+                flow_id,
+                balances,
+                fee_reserve_sats=0,
+            )
+            self.confirm(flow_id, jid, 180 + i)
+
+    def test_consolidates_non_finalizer_then_creates_terminal_job(self):
+        _, flow_id = self.multi_flow()
+        self.finish_workload(flow_id)
+
+        first = generate_experimental_finalization_job(
+            self.e,
+            flow_id,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 150_000_000,
+                "w3_flowB": 250_000_000,
+            },
+            fee_reserve_sats=10_000_000,
+        )
+
+        first_job = self.e.get_job(first)
+        first_plan = json.loads(first_job["planned_json"])
+        first_meta = json.loads(
+            first_job["generated_from_json"]
+        )
+
+        self.assertEqual(first_plan["from"], "w3_flowB")
+        self.assertEqual(first_plan["to"], "w2_flowA")
+        self.assertEqual(first_plan["amount_sats"], "all")
+        self.assertEqual(
+            first_meta["source"],
+            "experimental finalization consolidation",
+        )
+        self.assertEqual(
+            first_meta["phase"],
+            "consolidation",
+        )
+
+        self.confirm(flow_id, first, 220)
+
+        terminal = generate_experimental_finalization_job(
+            self.e,
+            flow_id,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 390_000_000,
+                "w3_flowB": 0,
+            },
+            fee_reserve_sats=10_000_000,
+        )
+
+        terminal_job = self.e.get_job(terminal)
+        terminal_plan = json.loads(
+            terminal_job["planned_json"]
+        )
+        terminal_meta = json.loads(
+            terminal_job["generated_from_json"]
+        )
+
+        self.assertEqual(
+            terminal_plan["from"],
+            "w2_flowA",
+        )
+        self.assertEqual(
+            terminal_plan["amount_sats"],
+            "all",
+        )
+        self.assertNotIn("to", terminal_plan)
+        self.assertEqual(
+            terminal_plan["distribution"]["mode"],
+            "percentage",
+        )
+        self.assertEqual(
+            len(terminal_plan["distribution"]["items"]),
+            2,
+        )
+        self.assertEqual(
+            terminal_meta["source"],
+            "experimental terminal distribution",
+        )
+        self.assertEqual(
+            terminal_meta["phase"],
+            "terminal_distribution",
+        )
+
+    def test_finalizer_is_never_swept_to_itself(self):
+        _, flow_id = self.multi_flow()
+        self.finish_workload(flow_id)
+
+        jid = generate_experimental_finalization_job(
+            self.e,
+            flow_id,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 400_000_000,
+                "w3_flowB": 0,
+            },
+            fee_reserve_sats=10_000_000,
+        )
+
+        plan = json.loads(
+            self.e.get_job(jid)["planned_json"]
+        )
+
+        self.assertEqual(plan["from"], "w2_flowA")
+        self.assertNotIn("to", plan)
+        self.assertIn("distribution", plan)
+
+    def test_terminal_job_is_generated_only_once(self):
+        _, flow_id = self.multi_flow()
+        self.finish_workload(flow_id)
+
+        jid = generate_experimental_finalization_job(
+            self.e,
+            flow_id,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 400_000_000,
+                "w3_flowB": 0,
+            },
+            fee_reserve_sats=10_000_000,
+        )
+
+        self.confirm(flow_id, jid, 230)
+
+        self.assertIsNone(
+            generate_experimental_finalization_job(
+                self.e,
+                flow_id,
+                {
+                    "w1_source": 500_000_000,
+                    "w2_flowA": 0,
+                    "w3_flowB": 0,
+                },
+                fee_reserve_sats=10_000_000,
+            )
+        )
 
 
 class PlanTests(PlannerBase):

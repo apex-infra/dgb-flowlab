@@ -70,6 +70,49 @@ class RpcTests(unittest.TestCase):
         with self.assertRaises(RpcError):
             to_dgb(1.5)
 
+    def test_fund_raw_transaction_accepts_explicit_fee_output_indexes(self):
+        seen = {}
+
+        def handler(hexstr, options):
+            seen.update(options)
+            return {"hex": "funded", "fee": Decimal("0.001")}
+
+        self.n.handlers["fundrawtransaction"] = handler
+
+        result = self.c.fund_raw_transaction(
+            "flab_source",
+            "raw",
+            "dgb1qchange",
+            subtract_fee_indexes=[0, 2],
+        )
+
+        self.assertEqual(result["hex"], "funded")
+        self.assertEqual(seen["subtractFeeFromOutputs"], [0, 2])
+        self.assertFalse(seen["add_inputs"])
+        self.assertEqual(seen["changeAddress"], "dgb1qchange")
+
+    def test_fund_raw_transaction_refuses_two_fee_subtraction_modes(self):
+        with self.assertRaises(RpcError):
+            self.c.fund_raw_transaction(
+                "flab_source",
+                "raw",
+                "dgb1qchange",
+                subtract_fee=True,
+                subtract_fee_indexes=[0],
+            )
+
+    def test_validate_address_uses_non_wallet_rpc(self):
+        self.n.handlers["validateaddress"] = lambda a: {
+            "isvalid": a == "dgb1qexternal",
+        }
+
+        self.assertEqual(
+            self.c.validate_address("dgb1qexternal"),
+            {"isvalid": True},
+        )
+        self.assertEqual(self.n.calls[-1][0], "/")
+        self.assertEqual(self.n.calls[-1][1], "validateaddress")
+
     def test_raw_tx_amount_serialized_exactly(self):
         self.n.handlers["createrawtransaction"] = lambda i, o: "00"
         self.c.create_raw_transaction([], {"addr": 1})

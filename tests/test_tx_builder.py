@@ -5,9 +5,11 @@ from flowlab.rpc import RpcClient, RpcError
 from flowlab.tx_builder import BuildError, TxBuilder, broadcast
 from tests import test_engine
 from tests.fake_node import FakeNode
+from tests.fake_chain import FakeChain, FEE
 
 WALLETS = ["flab_source", "flab_a", "flab_b", "flab_dest"]
 DEST = "dgb1qdest"
+EXTERNAL = "dgb1qexternal"
 CHANGE = "dgb1qchange"
 TXID = "ab" * 32
 
@@ -23,6 +25,7 @@ class NodeCase:
             "blocks": blocks,
         }
         h["getaddressinfo"] = lambda a: {"ismine": a in (DEST, CHANGE)}
+        h["validateaddress"] = lambda a: {"isvalid": a == EXTERNAL}
         h["getnewaddress"] = lambda label: CHANGE
         h["listunspent"] = lambda m: [
             {"txid": "11" * 32, "vout": 0, "amount": Decimal("5.0"), "spendable": True, "safe": True},
@@ -75,6 +78,43 @@ class BuildTests(NodeCase, unittest.TestCase):
             self.b.build("flab_source", "dgb1qstranger", 100_000_000)
         self.assertNotIn("createrawtransaction", self.names())
 
+    def test_external_destination_requires_explicit_authorization(self):
+        with self.assertRaises(BuildError):
+            self.b.build(
+                "flab_source",
+                EXTERNAL,
+                100_000_000,
+            )
+        self.assertNotIn("createrawtransaction", self.names())
+
+    def test_explicitly_authorized_valid_external_destination_can_build(self):
+        self.vout[0]["scriptPubKey"]["address"] = EXTERNAL
+
+        p = self.b.build(
+            "flab_source",
+            EXTERNAL,
+            100_000_000,
+            allow_external=True,
+        )
+
+        self.assertEqual(p.address, EXTERNAL)
+        self.assertIn("validateaddress", self.names())
+        self.assertEqual(self.sent, [])
+
+    def test_invalid_external_destination_is_refused_before_build(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "not a valid DigiByte address",
+        ):
+            self.b.build(
+                "flab_source",
+                "not-valid",
+                100_000_000,
+                allow_external=True,
+            )
+
+        self.assertNotIn("createrawtransaction", self.names())
+
     def test_source_must_be_experiment_wallet(self):
         with self.assertRaises(BuildError):
             self.b.build("pool", DEST, 1)
@@ -117,6 +157,205 @@ class BuildTests(NodeCase, unittest.TestCase):
         self.n.handlers["testmempoolaccept"] = lambda l: [{"allowed": False, "reject-reason": "bad"}]
         with self.assertRaises(BuildError):
             self.b.build("flab_source", DEST, 100_000_000)
+
+
+class DistributionBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.chain = FakeChain(WALLETS)
+        self.chain.fund("flab_source", 1_000_000_000)
+        self.chain.mine(3)
+        self.b = TxBuilder(
+            self.chain,
+            WALLETS,
+            max_fee_sats=10_000_000,
+        )
+        self.internal = self.chain.get_new_address(
+            "flab_dest",
+            "distribution-test",
+        )
+        self.external_a = "dgb1qexternalone"
+        self.external_b = "dgb1qexternaltwo"
+
+    def test_percentage_distribution_splits_net_budget_exactly(self):
+        prepared = self.b.build_distribution(
+            "flab_source",
+            "all",
+            "percentage",
+            [
+                {
+                    "address": self.internal,
+                    "percent_bps": 5000,
+                },
+                {
+                    "address": self.external_a,
+                    "percent_bps": 5000,
+                },
+            ],
+            allowed_external_addresses={self.external_a},
+        )
+
+        net = 1_000_000_000 - FEE
+        first = (net + 1) // 2
+        second = net // 2
+
+        self.assertEqual(prepared.budget_sats, 1_000_000_000)
+        self.assertEqual(prepared.fee_sats, FEE)
+        self.assertEqual(prepared.distributed_sats, net)
+        self.assertEqual(
+            prepared.destinations,
+            (
+                (self.internal, first),
+                (self.external_a, second),
+            ),
+        )
+
+    def test_fixed_distribution_preserves_amount_and_uses_remainder(self):
+        prepared = self.b.build_distribution(
+            "flab_source",
+            800_000_000,
+            "fixed",
+            [
+                {
+                    "address": self.external_a,
+                    "amount_sats": 300_000_000,
+                },
+                {
+                    "address": self.internal,
+                    "remainder": True,
+                },
+            ],
+            allowed_external_addresses={self.external_a},
+        )
+
+        self.assertEqual(prepared.budget_sats, 800_000_000)
+        self.assertEqual(prepared.fee_sats, FEE)
+        self.assertEqual(
+            prepared.destinations,
+            (
+                (self.external_a, 300_000_000),
+                (self.internal, 500_000_000 - FEE),
+            ),
+        )
+
+        self.assertIn(
+            (prepared.change_address, 200_000_000),
+            prepared.outputs,
+        )
+
+    def test_distribution_external_address_must_be_explicitly_approved(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "explicitly approved external address",
+        ):
+            self.b.build_distribution(
+                "flab_source",
+                "all",
+                "percentage",
+                [
+                    {
+                        "address": self.external_a,
+                        "percent_bps": 10_000,
+                    },
+                ],
+            )
+
+    def test_distribution_invalid_external_address_is_refused(self):
+        bad = "not-valid"
+
+        with self.assertRaisesRegex(
+            BuildError,
+            "not a valid DigiByte address",
+        ):
+            self.b.build_distribution(
+                "flab_source",
+                "all",
+                "percentage",
+                [
+                    {
+                        "address": bad,
+                        "percent_bps": 10_000,
+                    },
+                ],
+                allowed_external_addresses={bad},
+            )
+
+    def test_percentage_distribution_must_total_exactly_100_percent(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "exactly 10000 basis points",
+        ):
+            self.b.build_distribution(
+                "flab_source",
+                "all",
+                "percentage",
+                [
+                    {
+                        "address": self.internal,
+                        "percent_bps": 9000,
+                    },
+                ],
+            )
+
+    def test_fixed_distribution_requires_exactly_one_remainder(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "exactly one remainder",
+        ):
+            self.b.build_distribution(
+                "flab_source",
+                "all",
+                "fixed",
+                [
+                    {
+                        "address": self.internal,
+                        "amount_sats": 100_000_000,
+                    },
+                ],
+            )
+
+    def test_distribution_refuses_duplicate_destination_addresses(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "must be unique",
+        ):
+            self.b.build_distribution(
+                "flab_source",
+                "all",
+                "percentage",
+                [
+                    {
+                        "address": self.internal,
+                        "percent_bps": 5000,
+                    },
+                    {
+                        "address": self.internal,
+                        "percent_bps": 5000,
+                    },
+                ],
+            )
+
+    def test_distribution_refuses_more_than_ten_destinations(self):
+        items = [
+            {
+                "address": f"dgb1qexternal{i}",
+                "percent_bps": 1000 if i < 10 else 1,
+            }
+            for i in range(11)
+        ]
+
+        with self.assertRaisesRegex(
+            BuildError,
+            "between 1 and 10 destinations",
+        ):
+            self.b.build_distribution(
+                "flab_source",
+                "all",
+                "percentage",
+                items,
+                allowed_external_addresses={
+                    item["address"] for item in items
+                },
+            )
 
 
 class BroadcastTests(NodeCase, test_engine.Base):

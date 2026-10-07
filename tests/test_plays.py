@@ -55,7 +55,22 @@ class PlayCompilerTests(unittest.TestCase):
             flow["flow_wallets"],
             ["flab_stage", "flab_a", "flab_b", "flab_c"],
         )
-        self.assertEqual(flow["destination_wallet"], "flab_dest")
+        self.assertEqual(
+            flow["destinations"],
+            {
+                "mode": "percentage",
+                "items": [{
+                    "type": "wallet",
+                    "wallet": "flab_dest",
+                    "percent_bps": 10_000,
+                }],
+            },
+        )
+        self.assertEqual(
+            flow["finalization_wallet"],
+            "flab_stage",
+        )
+        self.assertNotIn("destination_wallet", flow)
 
         self.assertEqual(
             flow["experimental_topology"]["transitions"],
@@ -80,7 +95,77 @@ class PlayCompilerTests(unittest.TestCase):
         })
         self.assertEqual(
             cfg["finalization"],
-            {"mode": "sweep_workers_to_destination"},
+            {"mode": "consolidate_then_distribute"},
+        )
+
+    def test_play_can_compile_to_external_destination(self):
+        params = dict(BASE)
+        params.pop("destination_wallet")
+        params["destination_address"] = "dgb1qexternaldestination"
+
+        cfg = compile_play("random_walk", params)
+
+        self.assertEqual(validate(cfg), cfg)
+        flow = cfg["flows"][0]
+        self.assertEqual(
+            flow["destinations"],
+            {
+                "mode": "percentage",
+                "items": [{
+                    "type": "address",
+                    "address": "dgb1qexternaldestination",
+                    "percent_bps": 10_000,
+                }],
+            },
+        )
+        self.assertNotIn("destination_wallet", flow)
+        self.assertNotIn("destination_address", flow)
+
+    def test_play_destination_wallet_and_address_are_mutually_exclusive(self):
+        bad = dict(BASE)
+        bad["destination_address"] = "dgb1qexternaldestination"
+
+        with self.assertRaisesRegex(
+            PlayError,
+            "exactly one destination definition",
+        ):
+            compile_play("random_walk", bad)
+
+    def test_play_accepts_multi_destination_set(self):
+        params = dict(BASE)
+        params.pop("destination_wallet")
+        params["destinations"] = {
+            "mode": "fixed",
+            "items": [
+                {
+                    "type": "address",
+                    "address": "dgb1qexternaldestination",
+                    "amount_sats": 100_000_000,
+                },
+                {
+                    "type": "wallet",
+                    "wallet": "flab_dest",
+                    "remainder": True,
+                },
+            ],
+        }
+
+        cfg = compile_play("random_walk", params)
+        self.assertEqual(validate(cfg), cfg)
+
+        flow = cfg["flows"][0]
+
+        self.assertEqual(
+            flow["destinations"],
+            params["destinations"],
+        )
+        self.assertEqual(
+            flow["finalization_wallet"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            cfg["finalization"]["mode"],
+            "consolidate_then_distribute",
         )
 
     def test_ring_compiles_to_entry_plus_worker_cycle(self):

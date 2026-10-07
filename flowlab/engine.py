@@ -203,8 +203,58 @@ class Engine:
             "INITIAL PARAMETERS (fixed once approved)",
         ]
         for i, fl in enumerate(cfg["flows"], 1):
-            path = " -> ".join([fl["source_wallet"], *fl["flow_wallets"], fl["destination_wallet"]])
-            lines.append(f"  flow {i}: {path}   allocation {fl['allocation_sats']} sats")
+            if config_schema.has_multi_destinations(fl):
+                path = " -> ".join([
+                    fl["source_wallet"],
+                    *fl["flow_wallets"],
+                ])
+                lines.append(
+                    f"  flow {i}: {path}   allocation "
+                    f"{fl['allocation_sats']} sats"
+                )
+                lines.append(
+                    f"    finalization wallet: "
+                    f"{fl['finalization_wallet']}"
+                )
+                lines.append(
+                    f"    terminal distribution: "
+                    f"{fl['destinations']['mode']}"
+                )
+
+                for k, item in enumerate(
+                        fl["destinations"]["items"], 1):
+                    target = (
+                        item["wallet"]
+                        if item["type"] == "wallet"
+                        else item["address"]
+                    )
+
+                    if fl["destinations"]["mode"] == "percentage":
+                        amount = (
+                            f"{item['percent_bps'] / 100:.2f}%"
+                        )
+                    elif item.get("remainder"):
+                        amount = "REMAINDER after network fee"
+                    else:
+                        amount = f"{item['amount_sats']} sats"
+
+                    lines.append(
+                        f"      {k:>3}. {amount} -> "
+                        f"{item['type']}:{target}"
+                    )
+
+                destination = None
+            else:
+                destination = config_schema.destination_endpoint(fl)
+                path = " -> ".join([
+                    fl["source_wallet"],
+                    *fl["flow_wallets"],
+                    destination,
+                ])
+                lines.append(
+                    f"  flow {i}: {path}   allocation "
+                    f"{fl['allocation_sats']} sats"
+                )
             for k, t in enumerate(fl.get("transfers", []), 1):
                 amt = "ENTIRE BALANCE minus fee" if t["amount_sats"] == "all" else f"{t['amount_sats']} sats"
                 lines.append(f"    {k:>3}. {t['from']} -> {t['to']}   {amt}   wait {t['delay_seconds']}s")
@@ -220,11 +270,27 @@ class Engine:
                     lines.append(
                         f"    finalization: {finalization['mode']}"
                     )
-                    for worker in fl["flow_wallets"]:
+
+                    if config_schema.has_multi_destinations(fl):
+                        finalizer = fl["finalization_wallet"]
+
+                        for worker in fl["flow_wallets"]:
+                            if worker != finalizer:
+                                lines.append(
+                                    f"      {worker} -> {finalizer}   "
+                                    "ENTIRE BALANCE minus fee"
+                                )
+
                         lines.append(
-                            f"      {worker} -> {fl['destination_wallet']}   "
-                            "ENTIRE BALANCE minus fee"
+                            f"      {finalizer} -> terminal distribution"
                         )
+                    else:
+                        for worker in fl["flow_wallets"]:
+                            lines.append(
+                                f"      {worker} -> {destination}   "
+                                "ENTIRE BALANCE minus fee"
+                            )
+
                     lines.append(
                         f"      source {fl['source_wallet']} is not swept"
                     )
@@ -270,8 +336,15 @@ class Engine:
                               destination_wallet, initial_alloc_sats, state, confirmations_required,
                               randomization_json, random_seed, created_at, updated_at)
                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (fid, exp_id, fl["description"], fl["source_wallet"], json.dumps(fl["flow_wallets"]),
-                     fl["destination_wallet"], fl["allocation_sats"], F.START.value,
+                    (
+                        fid,
+                        exp_id,
+                        fl["description"],
+                        fl["source_wallet"],
+                        json.dumps(fl["flow_wallets"]),
+                        config_schema.destination_identity(fl),
+                        fl["allocation_sats"],
+                        F.START.value,
                      cfg["confirmations_required"], json.dumps(rnd, sort_keys=True),
                      rnd.get("seed") if rnd["enabled"] else None, now, now))
                 self._audit("FLOW CREATED", experiment_id=exp_id, flow_id=fid, resulting_state=F.START.value)

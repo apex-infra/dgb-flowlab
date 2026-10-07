@@ -127,6 +127,9 @@ class RpcClient:
     def get_network_info(self):
         return self._call("getnetworkinfo")
 
+    def validate_address(self, address):
+        return self._call("validateaddress", [address])
+
     def list_wallets(self):
         return self._call("listwallets")
 
@@ -166,14 +169,48 @@ class RpcClient:
         out = {a: to_dgb(s) for a, s in outputs.items()}
         return self._call("createrawtransaction", [inputs, out])
 
-    def fund_raw_transaction(self, wallet, hexstr, change_address, fee_rate_sat_vb=None,
-                             subtract_fee=False):
+    def fund_raw_transaction(
+            self,
+            wallet,
+            hexstr,
+            change_address,
+            fee_rate_sat_vb=None,
+            subtract_fee=False,
+            subtract_fee_indexes=None,
+    ):
         opts = {"add_inputs": False, "changeAddress": change_address}
-        if subtract_fee:
+
+        if subtract_fee_indexes is not None:
+            if subtract_fee:
+                raise RpcError(
+                    "fundrawtransaction: use subtract_fee or "
+                    "subtract_fee_indexes, not both"
+                )
+            if (
+                not isinstance(subtract_fee_indexes, (list, tuple))
+                or not subtract_fee_indexes
+                or any(
+                    not isinstance(i, int) or isinstance(i, bool) or i < 0
+                    for i in subtract_fee_indexes
+                )
+            ):
+                raise RpcError(
+                    "fundrawtransaction: subtract_fee_indexes must be "
+                    "a non-empty list of non-negative integers"
+                )
+            opts["subtractFeeFromOutputs"] = list(subtract_fee_indexes)
+        elif subtract_fee:
+            # Backward-compatible single-output sweep behavior.
             opts["subtractFeeFromOutputs"] = [0]
+
         if fee_rate_sat_vb is not None:
             opts["fee_rate"] = fee_rate_sat_vb
-        return self._call("fundrawtransaction", [hexstr, opts], wallet=wallet)
+
+        return self._call(
+            "fundrawtransaction",
+            [hexstr, opts],
+            wallet=wallet,
+        )
 
     def sign_raw_transaction(self, wallet, hexstr):
         return self._call("signrawtransactionwithwallet", [hexstr], wallet=wallet)
