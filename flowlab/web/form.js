@@ -609,7 +609,7 @@ const whole = (text, what, min) => {
       .filter(w => w !== src && w !== stage && w !== dst)
       .map(w => ({
         name: w,
-        on: keep.has(w) ? keep.get(w) : true
+        on: keep.has(w) ? keep.get(w) : false
       }));
 
     drawPlayWorkers();
@@ -712,13 +712,36 @@ const whole = (text, what, min) => {
     const workerBox = h("div", "row");
     workerBox.id = "f-play-workers";
 
+    const workerControls = h("div", "row");
+
+    const selectAllWorkers = h("button", null, "Select all");
+    const clearWorkers = h("button", null, "Clear");
+    selectAllWorkers.type = clearWorkers.type = "button";
+
+    selectAllWorkers.onclick = () => {
+      state.workers.forEach(w => { w.on = true; });
+      drawPlayWorkers();
+      refreshPreview();
+    };
+
+    clearWorkers.onclick = () => {
+      state.workers.forEach(w => { w.on = false; });
+      drawPlayWorkers();
+      refreshPreview();
+    };
+
+    workerControls.append(selectAllWorkers, clearWorkers);
+
+    const workerPicker = h("div");
+    workerPicker.append(workerControls, workerBox);
+
     const roles = h("fieldset");
     roles.append(
       h("legend", null, "Play"),
       field("Strategy", play),
       field("Reserve / funding wallet", src),
       field("Allocation wallet", stage),
-      field("Working wallets", workerBox),
+      field("Working wallets", workerPicker),
       field("Final destination", dst),
       note("Play topology is compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
     );

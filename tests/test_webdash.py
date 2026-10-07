@@ -340,6 +340,14 @@ class WebReadTests(WebBase):
         self.assertIn('roleWallets("reserve")', form)
         self.assertIn('roleWallets("stage")', form)
         self.assertIn('roleWallets("destinations")', form)
+        self.assertIn(
+            "on: keep.has(w) ? keep.get(w) : false",
+            form,
+        )
+        self.assertIn('"Select all"', form)
+        self.assertIn('"Clear"', form)
+        self.assertIn("state.workers.forEach(w => { w.on = true; })", form)
+        self.assertIn("state.workers.forEach(w => { w.on = false; })", form)
         self.assertIn("orderedWalletNames", app)
         self.assertIn("walletRoleName", app)
         self.assertIn("staged_accounting", app)
