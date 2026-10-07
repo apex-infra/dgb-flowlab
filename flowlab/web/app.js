@@ -133,7 +133,7 @@ function renderHops(flow) {
 }
 
 function showTab(name) {
-  for (const t of ["monitor", "fund", "new", "log"]) $("tab-" + t).hidden = t !== name;
+  for (const t of ["monitor", "fund", "new", "results", "log"]) $("tab-" + t).hidden = t !== name;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
 }
 document.querySelectorAll("#tabs button").forEach(b => { b.onclick = () => showTab(b.dataset.tab); });
@@ -950,6 +950,317 @@ function renderFundReserve(data) {
 }
 
 
+function resultDGB(value) {
+  return Number.isFinite(value) ? dgb(value) + " DGB" : "-";
+}
+
+function resultNumber(value, digits = 2) {
+  return Number.isFinite(value) ? Number(value).toFixed(digits) : "-";
+}
+
+function resultPercent(value) {
+  return Number.isFinite(value) ? (100 * value).toFixed(1) + "%" : "-";
+}
+
+function resultSeconds(value) {
+  if (!Number.isFinite(value)) return "-";
+  if (value < 60) return resultNumber(value, 1) + " s";
+  const minutes = Math.floor(value / 60);
+  const seconds = value - minutes * 60;
+  return minutes + "m " + resultNumber(seconds, 1) + "s";
+}
+
+function resultItem(label, value, cls = "") {
+  const item = h("div", "result-item" + (cls ? " " + cls : ""));
+  item.append(
+    h("span", null, label),
+    h("b", null, String(value)),
+  );
+  return item;
+}
+
+function resultSection(title, items) {
+  const section = h("section", "result-section");
+  const grid = h("div", "result-grid");
+
+  items.forEach(item => {
+    grid.appendChild(resultItem(item[0], item[1], item[2] || ""));
+  });
+
+  section.append(
+    h("h2", null, title),
+    grid,
+  );
+
+  return section;
+}
+
+function renderResults(data) {
+  const box = $("results");
+  const r = data.results;
+
+  box.replaceChildren();
+
+  if (!r) {
+    box.appendChild(
+      h("div", "mute", "No experiment results are available.")
+    );
+    return;
+  }
+
+  const summary = r.summary || {};
+  const activity = r.activity || {};
+  const topology = r.topology || {};
+  const amounts = r.amounts || {};
+  const timing = r.timing || {};
+  const obs = r.observability || {};
+  const mixing = r.mixing || {};
+  const accounting = r.accounting;
+
+  const mix = h("section", "result-mixing");
+  const mixHead = h("div", "result-mixing-head");
+  const score = h(
+    "b",
+    "result-score",
+    Number.isFinite(mixing.score) ? String(mixing.score) : "-"
+  );
+  const label = h(
+    "span",
+    "pill dgb",
+    mixing.label || "-"
+  );
+
+  mixHead.append(
+    h("div", null, "Mixing / Cleanliness"),
+    score,
+    h("span", "mute", "/ 100"),
+    label,
+  );
+
+  mix.append(
+    mixHead,
+    h(
+      "div",
+      "result-model mono mute",
+      mixing.model || "-"
+    ),
+    h(
+      "div",
+      "result-interpretation mute",
+      mixing.interpretation || ""
+    ),
+  );
+
+  box.appendChild(mix);
+
+  box.appendChild(resultSection("Experiment", [
+    ["State", summary.state || "-"],
+    ["Mode", summary.mode || "-"],
+    ["Runtime", resultSeconds(summary.runtime_s)],
+    ["Total jobs", activity.total_jobs ?? "-"],
+  ]));
+
+  if (accounting) {
+    box.appendChild(resultSection("Accounting", [
+      [
+        "Approved principal",
+        resultDGB(accounting.approved_principal_sats),
+      ],
+      [
+        "Committed principal",
+        resultDGB(accounting.committed_principal_sats),
+      ],
+      [
+        "Experiment fees",
+        resultDGB(accounting.experiment_fees_sats),
+      ],
+      [
+        "Cumulative workload",
+        resultDGB(accounting.cumulative_workload_sats),
+      ],
+      [
+        "Destination receipts",
+        resultDGB(accounting.destination_receipts_sats),
+      ],
+      [
+        "Reconciliation",
+        accounting.accounting_reconciled === true
+          ? "reconciled ✓"
+          : accounting.accounting_reconciled === false
+            ? "mismatch"
+            : "pending",
+        accounting.accounting_reconciled === true
+          ? "jade"
+          : accounting.accounting_reconciled === false
+            ? "coral"
+            : "",
+      ],
+    ]));
+  }
+
+  box.appendChild(resultSection("Activity", [
+    ["Confirmed", activity.confirmed ?? 0],
+    ["Workload decisions", activity.workload_jobs ?? 0],
+    ["Allocation jobs", activity.allocation_jobs ?? 0],
+    ["Consolidations", activity.consolidation_jobs ?? 0],
+    ["Finalizations", activity.finalization_jobs ?? 0],
+    [
+      "Terminal distributions",
+      activity.terminal_distribution_jobs ?? 0,
+    ],
+  ]));
+
+  box.appendChild(resultSection("Topology", [
+    ["Route executions", topology.route_executions ?? 0],
+    ["Unique edges", topology.unique_edges ?? 0],
+    [
+      "Repeated-edge ratio",
+      resultPercent(topology.repeated_edge_ratio),
+    ],
+    [
+      "Self-transfer ratio",
+      resultPercent(topology.self_transfer_ratio),
+    ],
+    [
+      "Route entropy",
+      resultNumber(topology.route_entropy_bits, 3) + " bits",
+    ],
+    [
+      "Normalized route entropy",
+      resultNumber(topology.route_entropy_normalized, 3),
+    ],
+    ["Wallets exercised", topology.wallets_exercised ?? 0],
+    [
+      "Wallet entropy",
+      resultNumber(topology.wallet_entropy_normalized, 3),
+    ],
+  ]));
+
+  box.appendChild(resultSection("Amounts", [
+    ["Total moved", resultDGB(amounts.total_sats)],
+    ["Minimum", resultDGB(amounts.min)],
+    ["Median", resultDGB(amounts.median)],
+    ["Mean", resultDGB(amounts.mean)],
+    ["Maximum", resultDGB(amounts.max)],
+    ["Standard deviation", resultDGB(amounts.stdev)],
+  ]));
+
+  const planned = timing.planned_delay_s || {};
+  const gaps = timing.execution_gap_s || {};
+  const confirmations = timing.confirmation_s || {};
+
+  box.appendChild(resultSection("Timing", [
+    ["Planned delay mean", resultSeconds(planned.mean)],
+    ["Planned delay range",
+      planned.count
+        ? resultSeconds(planned.min) + " → " + resultSeconds(planned.max)
+        : "-"
+    ],
+    ["Execution-gap mean", resultSeconds(gaps.mean)],
+    ["Execution-gap median", resultSeconds(gaps.median)],
+    ["Confirmation mean", resultSeconds(confirmations.mean)],
+    ["Confirmation max", resultSeconds(confirmations.max)],
+  ]));
+
+  box.appendChild(resultSection("Observability", [
+    ["Route diversity", resultPercent(obs.route_diversity)],
+    [
+      "Wallet activity diversity",
+      resultPercent(obs.wallet_activity_diversity),
+    ],
+    [
+      "Edge distribution diversity",
+      resultPercent(obs.edge_distribution_diversity),
+    ],
+    ["Amount diversity", resultPercent(obs.amount_diversity)],
+    ["Timing diversity", resultPercent(obs.timing_diversity)],
+    [
+      "Repeated-edge ratio",
+      resultPercent(obs.repeated_edge_ratio),
+    ],
+  ]));
+
+  const edges = Array.isArray(topology.edges)
+    ? topology.edges
+    : [];
+
+  const routes = h("section", "result-section");
+  routes.appendChild(h("h2", null, "Route activity"));
+
+  if (!edges.length) {
+    routes.appendChild(
+      h("div", "mute", "No workload routes have been observed.")
+    );
+  } else {
+    const table = h("div", "result-table");
+
+    table.append(
+      h("div", "result-table-head", "Route"),
+      h("div", "result-table-head result-count", "Executions"),
+    );
+
+    edges.forEach(edge => {
+      table.append(
+        h(
+          "div",
+          "mono",
+          (edge.from || "-") + " → " + (edge.to || "-")
+        ),
+        h("div", "result-count", String(edge.count || 0)),
+      );
+    });
+
+    routes.appendChild(table);
+  }
+
+  box.appendChild(routes);
+
+  const wallets = topology.wallet_activity || {};
+  const names = Object.keys(wallets);
+
+  const walletSection = h("section", "result-section");
+  walletSection.appendChild(h("h2", null, "Wallet activity"));
+
+  if (!names.length) {
+    walletSection.appendChild(
+      h("div", "mute", "No workload wallet activity has been observed.")
+    );
+  } else {
+    const table = h("div", "result-table");
+
+    table.append(
+      h("div", "result-table-head", "Wallet"),
+      h("div", "result-table-head result-count", "Touches"),
+    );
+
+    names.forEach(name => {
+      const role = walletRoleName(
+        name,
+        data.wallet_roles || {}
+      );
+
+      const cell = h("div", "result-wallet");
+      cell.append(
+        h("span", "mono", name),
+        h(
+          "span",
+          "wallet-role role-" + (role || "other"),
+          role || "other"
+        ),
+      );
+
+      table.append(
+        cell,
+        h("div", "result-count", String(wallets[name])),
+      );
+    });
+
+    walletSection.appendChild(table);
+  }
+
+  box.appendChild(walletSection);
+}
+
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
@@ -958,6 +1269,7 @@ function render(data) {
   renderPicker(data); renderExports(data); renderBanner(data); renderActions(data);
   renderUnresolved(data); renderExperimental(data); renderConsole(data);
   renderFundReserve(data);
+  renderResults(data);
   const s = data.snapshot;
   if (!s) { $("state").textContent = "none"; $("state").className = "pill mute"; $("desc").textContent = CONTROL ? "No experiment yet. Open New experiment to create one." : "No experiment yet."; return; }
   const e = s.exp, jobs = s.flows.flatMap(f => f.jobs);

@@ -332,3 +332,140 @@ a.btn:hover{color:var(--paper)}
   image-rendering:pixelated;
   background:#fff;
 }
+
+/* Experiment Results */
+.results-page{
+  max-width:1180px;
+}
+
+#results{
+  display:grid;
+  gap:16px;
+}
+
+.result-mixing{
+  border:1px solid var(--line);
+  border-left:3px solid var(--dgb);
+  background:#0e2236;
+  padding:16px 18px;
+}
+
+.result-mixing-head{
+  display:flex;
+  align-items:baseline;
+  gap:10px;
+  flex-wrap:wrap;
+}
+
+.result-mixing-head>div{
+  margin-right:auto;
+  color:var(--mute);
+  font-size:13px;
+  font-weight:600;
+}
+
+.result-score{
+  font-size:32px;
+  line-height:1;
+}
+
+.result-model{
+  margin-top:8px;
+}
+
+.result-interpretation{
+  margin-top:6px;
+  max-width:780px;
+  font-size:12.5px;
+}
+
+.result-section{
+  border:1px solid var(--line);
+  background:#0e2236;
+  padding:14px 16px 16px;
+}
+
+.result-section>h2{
+  margin-bottom:10px;
+}
+
+.result-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+  gap:1px;
+  background:var(--line);
+  border:1px solid var(--line);
+}
+
+.result-item{
+  background:var(--ink);
+  padding:10px 12px;
+  min-width:0;
+}
+
+.result-item>span{
+  display:block;
+  color:var(--mute);
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  margin-bottom:4px;
+}
+
+.result-item>b{
+  display:block;
+  font-size:14px;
+  font-weight:600;
+  overflow-wrap:anywhere;
+}
+
+.result-item.jade>b{color:var(--jade)}
+.result-item.coral>b{color:var(--coral)}
+
+.result-table{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto;
+  border:1px solid var(--line);
+}
+
+.result-table>div{
+  padding:8px 10px;
+  border-bottom:1px solid var(--line);
+  min-width:0;
+}
+
+.result-table>div:nth-last-child(-n+2){
+  border-bottom:0;
+}
+
+.result-table-head{
+  color:var(--mute);
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  background:var(--ink);
+}
+
+.result-count{
+  text-align:right;
+  white-space:nowrap;
+}
+
+.result-wallet{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+}
+
+@media(max-width:900px){
+  .result-grid{
+    grid-template-columns:repeat(2,minmax(140px,1fr));
+  }
+}
+
+@media(max-width:520px){
+  .result-grid{
+    grid-template-columns:1fr;
+  }
+}

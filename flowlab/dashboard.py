@@ -89,8 +89,14 @@ def snapshot(db_path, exp_id=None, now=None):
         }
         for f in con.execute("SELECT * FROM flows WHERE experiment_id=? ORDER BY created_at", (exp["id"],)):
             jobs, prev = [], None
-            rows = con.execute("SELECT j.*, t.confirmations AS confs FROM jobs j LEFT JOIN flow_txids t "
-                               "ON t.txid=j.txid WHERE j.flow_id=? ORDER BY j.seq", (f["id"],)).fetchall()
+            rows = con.execute(
+                "SELECT j.*, t.confirmations AS confs, "
+                "t.confirmed_at AS confirmed_at "
+                "FROM jobs j LEFT JOIN flow_txids t "
+                "ON t.txid=j.txid "
+                "WHERE j.flow_id=? ORDER BY j.seq",
+                (f["id"],),
+            ).fetchall()
             for j in rows:
                 plan = json.loads(j["planned_json"])
                 res = json.loads(j["result_json"] or "{}")
@@ -111,6 +117,8 @@ def snapshot(db_path, exp_id=None, now=None):
                     "txid": j["txid"],
                     "confs": j["confs"],
                     "delay_s": j["planned_delay_s"],
+                    "actual_executed_at": j["actual_executed_at"],
+                    "confirmed_at": j["confirmed_at"],
                     "generated": generated or None,
                 })
                 if j["state"] == "PLANNED" and snap["next_due_s"] is None and now is not None:

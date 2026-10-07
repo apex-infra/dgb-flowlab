@@ -223,6 +223,42 @@ class WebReadTests(WebBase):
             self.assertIn(want, css)
 
 
+    def test_page_contains_results_section(self):
+        self.start()
+
+        page = self.get("/")[2].decode()
+        app = self.get("/app.js")[2].decode()
+
+        self.assertIn(
+            'data-tab="results"',
+            page,
+        )
+        self.assertIn(
+            'id="tab-results"',
+            page,
+        )
+        self.assertIn(
+            'id="results"',
+            page,
+        )
+
+        self.assertIn(
+            'function renderResults(data)',
+            app,
+        )
+        self.assertIn(
+            '"Mixing / Cleanliness"',
+            app,
+        )
+        self.assertIn(
+            '"Route activity"',
+            app,
+        )
+        self.assertIn(
+            '"Wallet activity"',
+            app,
+        )
+
     def test_page_contains_experimental_monitor_anchors(self):
         self.start()
         page = self.get()[2].decode()
@@ -445,6 +481,54 @@ class WebReadTests(WebBase):
         self.assertIn("Principal after fees", app)
         self.assertIn("Destination receipts", app)
         self.assertIn("reconciled ✓", app)
+
+    def test_snapshot_exposes_derived_results(self):
+        self.start()
+
+        data = self.snap()
+
+        self.assertIn("results", data)
+        self.assertIsNotNone(data["results"])
+
+        results = data["results"]
+
+        self.assertEqual(
+            results["summary"]["id"],
+            data["snapshot"]["exp"]["id"],
+        )
+
+        self.assertIn("activity", results)
+        self.assertIn("topology", results)
+        self.assertIn("amounts", results)
+        self.assertIn("timing", results)
+        self.assertIn("observability", results)
+        self.assertIn("mixing", results)
+
+        self.assertEqual(
+            results["mixing"]["model"],
+            "mixing_model_v1",
+        )
+
+    def test_snapshot_results_do_not_expose_raw_config_payloads(self):
+        self.start()
+
+        data = self.snap()
+        results = data["results"]
+
+        encoded = json.dumps(results)
+
+        self.assertNotIn("config_json", encoded)
+        self.assertNotIn("planned_json", encoded)
+        self.assertNotIn("result_json", encoded)
+        self.assertNotIn("generated_from_json", encoded)
+
+    def test_missing_database_has_no_results(self):
+        self.serve(db="/nonexistent/none.db")
+
+        data = self.snap()
+
+        self.assertIsNone(data["snapshot"])
+        self.assertIsNone(data["results"])
 
     def test_snapshot_exposes_wallet_roles(self):
         roles = {

@@ -60,6 +60,38 @@ class DashboardTests(DashBase):
             self.assertIn(want, text)
         self.assertNotIn("PLANNED", text)
 
+    def test_completed_snapshot_exposes_safe_job_timestamps(self):
+        exp = self.make()
+        self.assertEqual(self.call("run", exp)[0], 0)
+
+        snap = snapshot(self.db, exp)
+        jobs = [
+            job
+            for flow in snap["flows"]
+            for job in flow["jobs"]
+        ]
+
+        self.assertTrue(jobs)
+
+        for job in jobs:
+            self.assertIsInstance(
+                job["actual_executed_at"],
+                str,
+            )
+            self.assertTrue(job["actual_executed_at"])
+
+            self.assertIsInstance(
+                job["confirmed_at"],
+                str,
+            )
+            self.assertTrue(job["confirmed_at"])
+
+            # Results gets only the safe dashboard projection,
+            # never raw database payloads.
+            self.assertNotIn("planned_json", job)
+            self.assertNotIn("result_json", job)
+            self.assertNotIn("generated_from_json", job)
+
     def test_mid_run_shows_planned_hops_and_countdown(self):
         exp = self.make()
         calls = []
