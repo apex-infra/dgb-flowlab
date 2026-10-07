@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from math import ceil
 
 from .rpc import RpcError, to_sats
+from .utxo_policy import UtxoPolicyError, select_utxos
 
 
 class BuildError(Exception):
@@ -34,6 +35,7 @@ class Prepared:
     fee_sats: int
     inputs: tuple
     outputs: tuple
+    utxo_selection: dict | None = None
 
     def summary(self):
         lines = [f"from wallet : {self.source_wallet}",
@@ -59,6 +61,7 @@ class PreparedDistribution:
     inputs: tuple
     outputs: tuple
     destinations: tuple
+    utxo_selection: dict | None = None
 
     def summary(self):
         lines = [
@@ -119,6 +122,64 @@ class TxBuilder:
                 or n_inputs < 1):
             raise BuildError("planning fee input count must be a positive integer")
         return self._fee_reserve(n_inputs)
+
+    def _policy_select_inputs(
+            self,
+            source_wallet,
+            amount_sats,
+            *,
+            sweep,
+            utxo_policy,
+            phase,
+            cohort_outpoints,
+            seed_material,
+            reserve_fee=True,
+    ):
+        """Apply an approved UTXO policy to the source wallet.
+
+        TxBuilder deliberately knows nothing about experiments, databases,
+        Plays, or cohort persistence. The caller supplies only the approved
+        policy context and, when applicable, the already-persisted outpoints.
+        """
+        coins = self.rpc.list_unspent(
+            source_wallet,
+            0,
+        )
+
+        try:
+            result = select_utxos(
+                coins,
+                utxo_policy,
+                required_sats=None if sweep else amount_sats,
+                sweep=sweep,
+                phase=phase,
+                cohort_outpoints=cohort_outpoints,
+                seed_material=seed_material,
+                fee_reserve_for_n=(
+                    self._fee_reserve
+                    if reserve_fee
+                    else (lambda _n: 0)
+                ),
+            )
+        except UtxoPolicyError as exc:
+            message = str(exc)
+
+            if "cannot satisfy requested amount" in message:
+                raise BuildError(
+                    "insufficient funds under approved UTXO policy"
+                ) from exc
+
+            raise BuildError(
+                f"UTXO policy selection failed: {message}"
+            ) from exc
+
+        telemetry = result.telemetry()
+        telemetry["selected_outpoints"] = [
+            [u["txid"], u["vout"]]
+            for u in result.selected
+        ]
+
+        return list(result.selected), telemetry
 
     def _owned(self, address):
         for w in self.wallets:
@@ -262,6 +323,10 @@ class TxBuilder:
             minconf=1,
             fee_rate=None,
             allowed_external_addresses=(),
+            utxo_policy=None,
+            phase=None,
+            cohort_outpoints=None,
+            seed_material="",
     ):
         """Build one exact, multi-output terminal distribution transaction.
 
@@ -377,31 +442,7 @@ class TxBuilder:
             allowed_external_addresses,
         )
 
-        coins = [
-            u for u in self.rpc.list_unspent(source_wallet, minconf)
-            if u.get("spendable", True) and u.get("safe", True)
-        ]
-        coins.sort(
-            key=lambda u: (
-                -to_sats(u["amount"]),
-                u["txid"],
-                u["vout"],
-            )
-        )
-
-        if budget_sats == "all":
-            chosen = list(coins)
-            total = sum(to_sats(u["amount"]) for u in chosen)
-
-            if not chosen:
-                raise BuildError(
-                    "nothing to distribute: the wallet has no confirmed "
-                    "spendable coins"
-                )
-
-            budget = total
-
-        else:
+        if budget_sats != "all":
             if (
                 not isinstance(budget_sats, int)
                 or isinstance(budget_sats, bool)
@@ -412,22 +453,96 @@ class TxBuilder:
                     "of satoshis or \"all\""
                 )
 
-            chosen = []
-            total = 0
+        selection_telemetry = None
 
-            for u in coins:
-                chosen.append(u)
-                total += to_sats(u["amount"])
-                if total >= budget_sats:
-                    break
+        if utxo_policy is None:
+            # Legacy compatibility path.
+            coins = [
+                u for u in self.rpc.list_unspent(source_wallet, minconf)
+                if u.get("spendable", True) and u.get("safe", True)
+            ]
+            coins.sort(
+                key=lambda u: (
+                    -to_sats(u["amount"]),
+                    u["txid"],
+                    u["vout"],
+                )
+            )
 
-            if total < budget_sats:
-                raise BuildError(
-                    f"insufficient funds: have {total} sats, "
-                    f"distribution budget is {budget_sats}"
+            if budget_sats == "all":
+                chosen = list(coins)
+                total = sum(
+                    to_sats(u["amount"])
+                    for u in chosen
                 )
 
-            budget = budget_sats
+                if not chosen:
+                    raise BuildError(
+                        "nothing to distribute: the wallet has no confirmed "
+                        "spendable coins"
+                    )
+
+                budget = total
+
+            else:
+                chosen = []
+                total = 0
+
+                for u in coins:
+                    chosen.append(u)
+                    total += to_sats(u["amount"])
+
+                    if total >= budget_sats:
+                        break
+
+                if total < budget_sats:
+                    raise BuildError(
+                        f"insufficient funds: have {total} sats, "
+                        f"distribution budget is {budget_sats}"
+                    )
+
+                budget = budget_sats
+
+        else:
+            sweep = budget_sats == "all"
+
+            chosen, selection_telemetry = (
+                self._policy_select_inputs(
+                    source_wallet,
+                    None if sweep else budget_sats,
+                    sweep=sweep,
+                    utxo_policy=utxo_policy,
+                    phase=phase,
+                    cohort_outpoints=cohort_outpoints,
+                    seed_material=seed_material,
+                    reserve_fee=False,
+                )
+            )
+
+            total = sum(
+                u["amount_sats"]
+                if "amount_sats" in u
+                else to_sats(u["amount"])
+                for u in chosen
+            )
+
+            if sweep:
+                if not chosen:
+                    raise BuildError(
+                        "nothing to distribute: UTXO policy produced "
+                        "no eligible inputs"
+                    )
+
+                budget = total
+
+            else:
+                if total < budget_sats:
+                    raise BuildError(
+                        "approved UTXO policy selected insufficient "
+                        "value for the distribution budget"
+                    )
+
+                budget = budget_sats
 
         value_of = {
             (u["txid"], u["vout"]): to_sats(u["amount"])
@@ -637,6 +752,7 @@ class TxBuilder:
             inputs=tuple(sorted(ins)),
             outputs=tuple(outs),
             destinations=tuple(destinations),
+            utxo_selection=selection_telemetry,
         )
 
     def build(
@@ -647,6 +763,10 @@ class TxBuilder:
             minconf=1,
             fee_rate=None,
             allow_external=False,
+            utxo_policy=None,
+            phase=None,
+            cohort_outpoints=None,
+            seed_material="",
     ):
         if source_wallet not in self.wallets:
             raise BuildError("source wallet is not an experiment wallet")
@@ -673,29 +793,112 @@ class TxBuilder:
             if not isinstance(valid, dict) or valid.get("isvalid") is not True:
                 raise BuildError("external destination is not a valid DigiByte address")
 
-        coins = [u for u in self.rpc.list_unspent(source_wallet, minconf)
-                 if u.get("spendable", True) and u.get("safe", True)]
-        coins.sort(key=lambda u: (-to_sats(u["amount"]), u["txid"], u["vout"]))
-        chosen, total = [], 0
-        if sweep:
-            chosen, total = coins, sum(to_sats(u["amount"]) for u in coins)
-            if not chosen:
-                raise BuildError("nothing to send: the wallet has no confirmed spendable coins")
-            request = total
-            reserve = self._fee_reserve(len(chosen))
-            if total <= reserve:
-                raise BuildError(f"balance {total} sats does not cover the fee reserve {reserve}")
+        selection_telemetry = None
+
+        if utxo_policy is None:
+            # Legacy compatibility path. Keep the original FlowLab
+            # largest-first behavior unchanged.
+            coins = [
+                u for u in self.rpc.list_unspent(source_wallet, minconf)
+                if u.get("spendable", True) and u.get("safe", True)
+            ]
+            coins.sort(
+                key=lambda u: (
+                    -to_sats(u["amount"]),
+                    u["txid"],
+                    u["vout"],
+                )
+            )
+
+            chosen, total = [], 0
+
+            if sweep:
+                chosen = coins
+                total = sum(
+                    to_sats(u["amount"])
+                    for u in coins
+                )
+
+                if not chosen:
+                    raise BuildError(
+                        "nothing to send: the wallet has no confirmed "
+                        "spendable coins"
+                    )
+
+                request = total
+                reserve = self._fee_reserve(len(chosen))
+
+                if total <= reserve:
+                    raise BuildError(
+                        f"balance {total} sats does not cover "
+                        f"the fee reserve {reserve}"
+                    )
+
+            else:
+                request = amount_sats
+
+                for u in coins:
+                    chosen.append(u)
+                    total += to_sats(u["amount"])
+
+                    if (
+                        total
+                        >= amount_sats
+                        + self._fee_reserve(len(chosen))
+                    ):
+                        break
+
+                reserve = self._fee_reserve(
+                    max(1, len(chosen))
+                )
+
+                if total < amount_sats + reserve:
+                    raise BuildError(
+                        f"insufficient funds: have {total} sats, need "
+                        f"{amount_sats} plus a fee reserve of {reserve}"
+                    )
+
         else:
-            request = amount_sats
-            for u in coins:
-                chosen.append(u)
-                total += to_sats(u["amount"])
-                if total >= amount_sats + self._fee_reserve(len(chosen)):
-                    break
-            reserve = self._fee_reserve(max(1, len(chosen)))
-            if total < amount_sats + reserve:
-                raise BuildError(f"insufficient funds: have {total} sats, need "
-                                 f"{amount_sats} plus a fee reserve of {reserve}")
+            chosen, selection_telemetry = (
+                self._policy_select_inputs(
+                    source_wallet,
+                    amount_sats,
+                    sweep=sweep,
+                    utxo_policy=utxo_policy,
+                    phase=phase,
+                    cohort_outpoints=cohort_outpoints,
+                    seed_material=seed_material,
+                )
+            )
+
+            total = sum(
+                u["amount_sats"]
+                if "amount_sats" in u
+                else to_sats(u["amount"])
+                for u in chosen
+            )
+
+            reserve = self._fee_reserve(
+                max(1, len(chosen))
+            )
+
+            if sweep:
+                request = total
+
+                if total <= reserve:
+                    raise BuildError(
+                        f"balance {total} sats does not cover "
+                        f"the fee reserve {reserve}"
+                    )
+
+            else:
+                request = amount_sats
+
+                if total < amount_sats + reserve:
+                    raise BuildError(
+                        "approved UTXO policy selected insufficient "
+                        "value after fee reserve"
+                    )
         value_of = {(u["txid"], u["vout"]): to_sats(u["amount"]) for u in chosen}
 
         change = self.rpc.get_new_address(source_wallet, "flowlab-change")
@@ -731,8 +934,18 @@ class TxBuilder:
         verdict = self.rpc.test_mempool_accept(hexstr)[0]
         if verdict.get("allowed") is not True:
             raise BuildError(f"node would reject it: {verdict.get('reject-reason')}")
-        return Prepared(source_wallet, address, amount_sats, change, hexstr, dec["txid"], fee,
-                        tuple(sorted(ins)), tuple(outs))
+        return Prepared(
+            source_wallet,
+            address,
+            amount_sats,
+            change,
+            hexstr,
+            dec["txid"],
+            fee,
+            tuple(sorted(ins)),
+            tuple(outs),
+            selection_telemetry,
+        )
 
 
 def broadcast_distribution(
@@ -804,6 +1017,9 @@ def broadcast_distribution(
         ).hexdigest(),
     }
 
+    if prepared.utxo_selection is not None:
+        payload["utxo_selection"] = prepared.utxo_selection
+
     action_id = engine.begin_action(
         job_id,
         "broadcast",
@@ -833,6 +1049,9 @@ def broadcast_distribution(
         "destinations": normalized,
     }
 
+    if prepared.utxo_selection is not None:
+        result["utxo_selection"] = prepared.utxo_selection
+
     engine.complete_action(
         action_id,
         result,
@@ -853,6 +1072,10 @@ def broadcast(engine, rpc, job_id, prepared):
                "source_wallet": prepared.source_wallet, "expected_txid": prepared.txid,
                "fee_sats": prepared.fee_sats,
                "tx_sha256": hashlib.sha256(prepared.hex.encode()).hexdigest()}
+
+    if prepared.utxo_selection is not None:
+        payload["utxo_selection"] = prepared.utxo_selection
+
     action_id = engine.begin_action(job_id, "broadcast", payload)
     try:
         txid = rpc.send_raw_transaction(prepared.hex)
@@ -863,12 +1086,20 @@ def broadcast(engine, rpc, job_id, prepared):
         # Anything else (timeout, dropped connection, "already known") may mean the
         # node HAS the transaction: leave the intent in place for recovery to settle.
         raise
-    engine.complete_action(action_id, {
+    result = {
         "txid": txid,
         "fee_sats": prepared.fee_sats,
         "amount_sats": prepared.amount_sats,
         "address": prepared.address,
-    })
+    }
+
+    if prepared.utxo_selection is not None:
+        result["utxo_selection"] = prepared.utxo_selection
+
+    engine.complete_action(
+        action_id,
+        result,
+    )
     if txid != prepared.txid:
         raise BuildError(f"node returned txid {txid}, expected {prepared.txid} (recorded as sent)")
     return txid

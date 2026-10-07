@@ -12,6 +12,7 @@ import json
 import hashlib
 
 from . import audit
+from .utxo_policy import UtxoPolicyError, validate_policy
 
 WORKLOAD_MODES = ("count", "duration", "automatic")
 ADDRESS_POLICIES = ("existing", "new")
@@ -548,6 +549,11 @@ def validate(cfg):
     _need(isinstance(cfg.get("fee_policy"), dict), "fee_policy must be an object")
     _need(cfg.get("address_policy") in ADDRESS_POLICIES,
           f"address_policy must be one of {ADDRESS_POLICIES}")
+
+    try:
+        cfg["utxo_policy"] = validate_policy(cfg.get("utxo_policy"))
+    except UtxoPolicyError as exc:
+        raise ConfigError(f"invalid utxo_policy: {exc}") from exc
 
     rnd = cfg.get("randomization", {"enabled": False})
     _need(isinstance(rnd, dict) and isinstance(rnd.get("enabled"), bool),

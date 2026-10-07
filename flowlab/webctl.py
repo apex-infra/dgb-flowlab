@@ -39,6 +39,7 @@ TOP_KEYS = {
     "confirmations_required",
     "fee_policy",
     "address_policy",
+    "utxo_policy",
     "randomization",
     "finalization",
 }

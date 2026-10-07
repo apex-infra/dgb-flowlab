@@ -593,6 +593,7 @@ def generate_experimental_job(
     )
 
     generated_from = dict(decision["generated_from"])
+    generated_from["phase"] = "workload"
     generated_from["balance_snapshot_sats"] = dict(balances_sats)
     generated_from["source_budget_used_sats"] = source_used_sats
 
@@ -622,7 +623,11 @@ def generate_jobs(engine, flow_id):
             flow_id,
             {"from": t["from"], "to": t["to"], "amount_sats": t["amount_sats"], "step": i},
             planned_delay_s=t["delay_seconds"],
-            generated_from={"step": i, "source": "approved config"},
+            generated_from={
+                "step": i,
+                "source": "approved config",
+                "phase": "workload",
+            },
             depends_on=[ids[-1]] if ids else ()))
     return ids
 

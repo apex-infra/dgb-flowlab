@@ -99,6 +99,155 @@ class Engine:
     def get_job(self, job_id):
         return self._one("SELECT * FROM jobs WHERE id=?", (job_id,), f"job {job_id}")
 
+    def flow_stats(self, flow_id):
+        """Return one flow's durable internal statistics/state object."""
+        flow = self.get_flow(flow_id)
+
+        try:
+            stats = json.loads(flow["stats_json"] or "{}")
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise EngineError(
+                f"flow {flow_id} has invalid stats_json"
+            ) from exc
+
+        if not isinstance(stats, dict):
+            raise EngineError(
+                f"flow {flow_id} stats_json must contain an object"
+            )
+
+        return stats
+
+    def get_utxo_cohort(self, flow_id, scope, *, phase=None):
+        """Return a persisted UTXO cohort or None if it has not been captured."""
+        stats = self.flow_stats(flow_id)
+        root = stats.get("utxo_cohorts", {})
+
+        if not isinstance(root, dict):
+            raise EngineError(
+                f"flow {flow_id} has invalid utxo_cohorts state"
+            )
+
+        if scope == "snapshot_at_start":
+            cohort = root.get("experiment_start")
+
+        elif scope == "snapshot_at_phase_start":
+            if not isinstance(phase, str) or not phase:
+                raise EngineError(
+                    "phase required for snapshot_at_phase_start"
+                )
+
+            phases = root.get("phase_start", {})
+
+            if not isinstance(phases, dict):
+                raise EngineError(
+                    f"flow {flow_id} has invalid phase_start cohort state"
+                )
+
+            cohort = phases.get(phase)
+
+        else:
+            raise EngineError(
+                f"unsupported persisted UTXO cohort scope {scope!r}"
+            )
+
+        if cohort is None:
+            return None
+
+        if not isinstance(cohort, dict):
+            raise EngineError(
+                f"flow {flow_id} has invalid persisted UTXO cohort"
+            )
+
+        return cohort
+
+    def save_utxo_cohort(
+            self,
+            flow_id,
+            scope,
+            cohort,
+            *,
+            phase=None,
+    ):
+        """Persist a cohort exactly once.
+
+        Existing cohort data is immutable. Re-capturing the same logical
+        cohort is refused rather than silently replacing experiment state.
+        """
+        if not isinstance(cohort, dict):
+            raise EngineError("UTXO cohort must be an object")
+
+        flow = self.get_flow(flow_id)
+        exp = self.get_experiment(flow["experiment_id"])
+
+        if exp["state"] != E.RUNNING.value:
+            raise EngineError(
+                "UTXO cohorts can only be captured while RUNNING"
+            )
+
+        with db.tx(self.conn):
+            stats = self.flow_stats(flow_id)
+            root = stats.setdefault("utxo_cohorts", {})
+
+            if not isinstance(root, dict):
+                raise EngineError(
+                    f"flow {flow_id} has invalid utxo_cohorts state"
+                )
+
+            if scope == "snapshot_at_start":
+                if "experiment_start" in root:
+                    raise EngineError(
+                        "experiment-start UTXO cohort already exists"
+                    )
+
+                root["experiment_start"] = cohort
+
+            elif scope == "snapshot_at_phase_start":
+                if not isinstance(phase, str) or not phase:
+                    raise EngineError(
+                        "phase required for snapshot_at_phase_start"
+                    )
+
+                phases = root.setdefault("phase_start", {})
+
+                if not isinstance(phases, dict):
+                    raise EngineError(
+                        f"flow {flow_id} has invalid phase_start cohort state"
+                    )
+
+                if phase in phases:
+                    raise EngineError(
+                        f"UTXO cohort for phase {phase!r} already exists"
+                    )
+
+                phases[phase] = cohort
+
+            else:
+                raise EngineError(
+                    f"unsupported persisted UTXO cohort scope {scope!r}"
+                )
+
+            self.conn.execute(
+                "UPDATE flows SET stats_json=?, updated_at=? WHERE id=?",
+                (
+                    json.dumps(stats, sort_keys=True),
+                    self.now(),
+                    flow_id,
+                ),
+            )
+
+            self._audit(
+                "UTXO COHORT CAPTURED",
+                experiment_id=exp["id"],
+                flow_id=flow_id,
+                detail={
+                    "scope": scope,
+                    "phase": phase,
+                    "wallet_count": len(
+                        cohort.get("wallets", {})
+                    ),
+                },
+            )
+
     def list_flows(self, exp_id):
         return [dict(r) for r in self.conn.execute(
             "SELECT * FROM flows WHERE experiment_id=? ORDER BY created_at, id", (exp_id,))]
@@ -303,10 +452,46 @@ class Engine:
                 f"  amount bounds: {wl['amount_sats_min']}..{wl['amount_sats_max']} sats",
                 f"  delay bounds: {wl['delay_seconds_min']}..{wl['delay_seconds_max']} s",
             ]
+        utxo_policy = cfg["utxo_policy"]
+        utxo_default = utxo_policy["default"]
+
         lines += [
             f"  address policy: {cfg['address_policy']}",
             f"  confirmations required: {cfg['confirmations_required']}",
             f"  fee policy: {json.dumps(cfg['fee_policy'], sort_keys=True)}",
+            "  UTXO policy:",
+            f"    version: {utxo_policy['version']}",
+            f"    default strategy: {utxo_default['strategy']}",
+            f"    default scope: {utxo_default['scope']}",
+            f"    confirmations: min={utxo_default['min_confirmations']} "
+            f"max={utxo_default['max_confirmations']}",
+            f"    UTXO size sats: min={utxo_default['min_utxo_sats']} "
+            f"max={utxo_default['max_utxo_sats']}",
+            f"    max inputs: {utxo_default['max_inputs']}",
+            f"    require spendable: {utxo_default['require_spendable']}",
+            f"    require safe: {utxo_default['require_safe']}",
+            f"    fallback: {utxo_default['fallback']}",
+        ]
+
+        if utxo_default["strategy"] == "seeded_selection":
+            lines.append(
+                f"    seed: {utxo_default['seed']}"
+            )
+
+        if utxo_policy["phases"]:
+            lines.append("    phase overrides:")
+
+            for phase, rule in sorted(utxo_policy["phases"].items()):
+                lines.append(
+                    f"      {phase}: strategy={rule['strategy']} "
+                    f"scope={rule['scope']} "
+                    f"minconf={rule['min_confirmations']} "
+                    f"max_inputs={rule['max_inputs']}"
+                )
+        else:
+            lines.append("    phase overrides: none")
+
+        lines += [
             "  randomization: "
             + (f"ENABLED model={cfg['randomization']['model']} seed={cfg['randomization']['seed']}"
                if cfg["randomization"]["enabled"] else "disabled"),

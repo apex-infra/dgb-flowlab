@@ -86,10 +86,22 @@ class FakeChain:
         }
 
     def list_unspent(self, wallet, minconf=0):
-        return [{"txid": u["txid"], "vout": v, "amount": Decimal(u["sats"]) / SATS,
-                 "spendable": True, "safe": True}
-                for (t, v), u in self.utxos.items()
-                if not u["spent"] and self.owner.get(u["addr"]) == wallet and self._confs(t) >= minconf]
+        return [
+            {
+                "txid": u["txid"],
+                "vout": v,
+                "amount": Decimal(u["sats"]) / SATS,
+                "confirmations": self._confs(t),
+                "spendable": True,
+                "safe": True,
+            }
+            for (t, v), u in self.utxos.items()
+            if (
+                not u["spent"]
+                and self.owner.get(u["addr"]) == wallet
+                and self._confs(t) >= minconf
+            )
+        ]
 
     def get_balances(self, wallet):
         tr = sum(u["sats"] for (t, v), u in self.utxos.items()

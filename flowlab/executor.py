@@ -33,6 +33,7 @@ from .tx_builder import (
     broadcast,
     broadcast_distribution,
 )
+from .utxo_policy import resolve_policy
 
 POLL_SECONDS = 15
 
@@ -51,6 +52,8 @@ class Executor:
             return out
         waits = []
         try:
+            self._ensure_experiment_start_cohorts(exp_id)
+
             for flow in e.list_flows(exp_id):
                 self._tick_flow(exp_id, flow["id"], out["actions"], waits)
             flows = e.list_flows(exp_id)
@@ -85,6 +88,252 @@ class Executor:
     def _is_experimental(self, flow):
         cfg = self._config_for_flow(flow)
         return bool(cfg.get("randomization", {}).get("enabled"))
+
+    def _policy_uses_scope(self, flow, scope):
+        cfg = self._config_for_flow(flow)
+        policy = cfg["utxo_policy"]
+
+        if policy["default"]["scope"] == scope:
+            return True
+
+        return any(
+            rule["scope"] == scope
+            for rule in policy["phases"].values()
+        )
+
+    @staticmethod
+    def _cohort_wallets(flow):
+        """Wallets that may act as senders inside this flow."""
+        wallets = [
+            flow["source_wallet"],
+            *json.loads(flow["flow_wallets_json"]),
+        ]
+
+        # Preserve approved order while refusing accidental duplicates.
+        return list(dict.fromkeys(wallets))
+
+    def _capture_utxo_cohort(
+            self,
+            flow,
+            scope,
+            *,
+            phase=None,
+    ):
+        """Capture and persist one immutable outpoint cohort."""
+        existing = self.engine.get_utxo_cohort(
+            flow["id"],
+            scope,
+            phase=phase,
+        )
+
+        if existing is not None:
+            return existing
+
+        wallets = {}
+
+        for wallet in self._cohort_wallets(flow):
+            coins = self.rpc.list_unspent(wallet, 0)
+
+            outpoints = []
+
+            for coin in coins:
+                txid = coin.get("txid")
+                vout = coin.get("vout")
+
+                if (
+                    not isinstance(txid, str)
+                    or not txid
+                    or not isinstance(vout, int)
+                    or isinstance(vout, bool)
+                    or vout < 0
+                ):
+                    raise PlanError(
+                        f"invalid UTXO returned for wallet {wallet}"
+                    )
+
+                outpoints.append([txid, vout])
+
+            outpoints.sort(
+                key=lambda item: (item[0], item[1])
+            )
+
+            wallets[wallet] = outpoints
+
+        cohort = {
+            "captured_at": self.engine.now(),
+            "wallets": wallets,
+        }
+
+        self.engine.save_utxo_cohort(
+            flow["id"],
+            scope,
+            cohort,
+            phase=phase,
+        )
+
+        return cohort
+
+    def _ensure_experiment_start_cohorts(self, exp_id):
+        """Persist every required experiment-start cohort before execution."""
+        for flow in self.engine.list_flows(exp_id):
+            if not self._policy_uses_scope(
+                    flow,
+                    "snapshot_at_start",
+            ):
+                continue
+
+            self._capture_utxo_cohort(
+                flow,
+                "snapshot_at_start",
+            )
+
+    def _ensure_phase_start_cohort(self, flow, job):
+        """Capture a phase cohort immediately before its first execution."""
+        phase = self._utxo_phase(job)
+        cfg = self._config_for_flow(flow)
+
+        rule = resolve_policy(
+            cfg["utxo_policy"],
+            phase,
+        )
+
+        if rule["scope"] != "snapshot_at_phase_start":
+            return None
+
+        return self._capture_utxo_cohort(
+            flow,
+            "snapshot_at_phase_start",
+            phase=phase,
+        )
+
+    def _utxo_build_context(
+            self,
+            flow,
+            job,
+            source_wallet,
+    ):
+        """Resolve the immutable UTXO-selection context for one job."""
+        cfg = self._config_for_flow(flow)
+        phase = self._utxo_phase(job)
+
+        rule = resolve_policy(
+            cfg["utxo_policy"],
+            phase,
+        )
+
+        cohort_outpoints = None
+        scope = rule["scope"]
+
+        if scope == "snapshot_at_start":
+            cohort = self.engine.get_utxo_cohort(
+                flow["id"],
+                "snapshot_at_start",
+            )
+
+            if cohort is None:
+                raise PlanError(
+                    "required experiment-start UTXO cohort is missing"
+                )
+
+            wallets = cohort.get("wallets")
+
+            if not isinstance(wallets, dict):
+                raise PlanError(
+                    "experiment-start UTXO cohort has invalid wallets"
+                )
+
+            rows = wallets.get(source_wallet)
+
+            if not isinstance(rows, list):
+                raise PlanError(
+                    f"experiment-start UTXO cohort is missing "
+                    f"source wallet {source_wallet}"
+                )
+
+            cohort_outpoints = {
+                (row[0], row[1])
+                for row in rows
+                if (
+                    isinstance(row, list)
+                    and len(row) == 2
+                    and isinstance(row[0], str)
+                    and isinstance(row[1], int)
+                    and not isinstance(row[1], bool)
+                )
+            }
+
+            if len(cohort_outpoints) != len(rows):
+                raise PlanError(
+                    "experiment-start UTXO cohort contains "
+                    "invalid outpoints"
+                )
+
+        elif scope == "snapshot_at_phase_start":
+            cohort = self.engine.get_utxo_cohort(
+                flow["id"],
+                "snapshot_at_phase_start",
+                phase=phase,
+            )
+
+            if cohort is None:
+                raise PlanError(
+                    f"required UTXO cohort for phase {phase!r} "
+                    "is missing"
+                )
+
+            wallets = cohort.get("wallets")
+
+            if not isinstance(wallets, dict):
+                raise PlanError(
+                    f"UTXO cohort for phase {phase!r} "
+                    "has invalid wallets"
+                )
+
+            rows = wallets.get(source_wallet)
+
+            if not isinstance(rows, list):
+                raise PlanError(
+                    f"UTXO cohort for phase {phase!r} is missing "
+                    f"source wallet {source_wallet}"
+                )
+
+            cohort_outpoints = {
+                (row[0], row[1])
+                for row in rows
+                if (
+                    isinstance(row, list)
+                    and len(row) == 2
+                    and isinstance(row[0], str)
+                    and isinstance(row[1], int)
+                    and not isinstance(row[1], bool)
+                )
+            }
+
+            if len(cohort_outpoints) != len(rows):
+                raise PlanError(
+                    f"UTXO cohort for phase {phase!r} contains "
+                    "invalid outpoints"
+                )
+
+        elif scope != "live_wallet":
+            raise PlanError(
+                f"unsupported UTXO policy scope {scope!r}"
+            )
+
+        seed_material = (
+            f"{flow['experiment_id']}:"
+            f"{flow['id']}:"
+            f"{job['seq']}:"
+            f"{phase}:"
+            f"{source_wallet}"
+        )
+
+        return {
+            "utxo_policy": cfg["utxo_policy"],
+            "phase": phase,
+            "cohort_outpoints": cohort_outpoints,
+            "seed_material": seed_material,
+        }
 
     def _approved_flow_config(self, flow):
         cfg = self._config_for_flow(flow)
@@ -270,6 +519,34 @@ class Executor:
     def _step(job):
         return json.loads(job["planned_json"])["step"] + 1
 
+    @staticmethod
+    def _utxo_phase(job):
+        """Return the UTXO-policy phase for one job.
+
+        Jobs created before phase metadata existed are treated as ordinary
+        workload jobs for backwards compatibility.
+        """
+        generated = json.loads(job["generated_from_json"] or "{}")
+        phase = generated.get("phase", "workload")
+
+        allowed = {
+            "allocation",
+            "workload",
+            "consolidation",
+            "finalization",
+            "terminal_distribution",
+            "settlement",
+            "return_workload",
+            "reserve_return",
+        }
+
+        if phase not in allowed:
+            raise PlanError(
+                f"job has unsupported UTXO policy phase {phase!r}"
+            )
+
+        return phase
+
     def _execute(self, flow_id, actions):
         e = self.engine
         jobs = [
@@ -300,6 +577,17 @@ class Executor:
         plan = json.loads(job["planned_json"])
         flow = e.get_flow(flow_id)
         approved_flow = self._approved_flow_config(flow)
+
+        self._ensure_phase_start_cohort(
+            flow,
+            job,
+        )
+
+        utxo_context = self._utxo_build_context(
+            flow,
+            job,
+            plan["from"],
+        )
 
         # --------------------------------------------------
         # Multi-destination terminal transaction.
@@ -395,6 +683,7 @@ class Executor:
                 spec["mode"],
                 builder_items,
                 allowed_external_addresses=external_addresses,
+                **utxo_context,
             )
 
             self.log(
@@ -441,6 +730,7 @@ class Executor:
             addr,
             plan["amount_sats"],
             allow_external=external,
+            **utxo_context,
         )
 
         self.log(
