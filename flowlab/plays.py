@@ -34,6 +34,16 @@ PLAY_SPECS = {
         ),
         "min_workers": 2,
     },
+    "hub_and_spoke": {
+        "name": "hub_and_spoke",
+        "title": "Hub-and-Spoke",
+        "description": (
+            "A dedicated hub receives the allocation entry and connects to "
+            "approved spokes in both directions."
+        ),
+        "min_workers": 1,
+        "requires_hub": True,
+    },
 }
 
 
@@ -64,7 +74,10 @@ def _need(cond, msg):
 
 def list_plays():
     """Return public play metadata in stable catalog order."""
-    return [deepcopy(PLAY_SPECS[name]) for name in ("random_walk", "ring")]
+    return [
+        deepcopy(PLAY_SPECS[name])
+        for name in ("random_walk", "ring", "hub_and_spoke")
+    ]
 
 
 def get_play_spec(name):
@@ -103,10 +116,21 @@ def _validate_params(name, params):
         + ("" if min_workers == 1 else "s"),
     )
 
-    names = [src, stage, *workers, dst]
+    extra_wallets = []
+
+    if name == "hub_and_spoke":
+        hub = params.get("hub_wallet")
+        _need(
+            isinstance(hub, str) and hub,
+            "hub_wallet is required for hub_and_spoke",
+        )
+        extra_wallets.append(hub)
+
+    names = [src, stage, *extra_wallets, *workers, dst]
     _need(
         len(set(names)) == len(names),
-        "source, allocation wallet, workers, and destination must all be distinct",
+        "source, allocation wallet, play wallets, and destination "
+        "must all be distinct",
     )
 
     allocation = params["allocation_sats"]
@@ -153,6 +177,18 @@ def _ring_transitions(src, workers):
     return transitions
 
 
+def _hub_and_spoke_transitions(src, hub, workers):
+    transitions = [{"from": src, "to": hub}]
+
+    for worker in workers:
+        transitions.append({"from": hub, "to": worker})
+
+    for worker in workers:
+        transitions.append({"from": worker, "to": hub})
+
+    return transitions
+
+
 def compile_play(name, params):
     """
     Compile a named play into the existing experimental FlowLab config schema.
@@ -165,20 +201,29 @@ def compile_play(name, params):
     stage = params["allocation_wallet"]
     workers = list(params["workers"])
     dst = params["destination_wallet"]
+    hub = None
 
     if name == "random_walk":
         transitions = _random_walk_transitions(stage, workers)
     elif name == "ring":
         transitions = _ring_transitions(stage, workers)
+    elif name == "hub_and_spoke":
+        hub = params["hub_wallet"]
+        transitions = _hub_and_spoke_transitions(stage, hub, workers)
     else:
         raise PlayError(f"unknown play: {name}")
+
+    workload_wallets = [stage]
+    if hub is not None:
+        workload_wallets.append(hub)
+    workload_wallets.extend(workers)
 
     cfg = {
         "flows": [{
             "description": PLAY_SPECS[name]["title"],
             "source_wallet": src,
             "allocation_wallet": stage,
-            "flow_wallets": [stage, *workers],
+            "flow_wallets": workload_wallets,
             "destination_wallet": dst,
             "allocation_sats": params["allocation_sats"],
             "experimental_topology": {

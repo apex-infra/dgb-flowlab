@@ -21,9 +21,12 @@ BASE = {
 
 
 class PlayCatalogTests(unittest.TestCase):
-    def test_first_catalog_contains_random_walk_and_ring(self):
+    def test_first_catalog_contains_random_walk_ring_and_hub_and_spoke(self):
         names = [p["name"] for p in list_plays()]
-        self.assertEqual(names, ["random_walk", "ring"])
+        self.assertEqual(
+            names,
+            ["random_walk", "ring", "hub_and_spoke"],
+        )
 
     def test_get_play_spec_returns_public_metadata(self):
         p = get_play_spec("ring")
@@ -94,6 +97,61 @@ class PlayCompilerTests(unittest.TestCase):
                 {"from": "flab_c", "to": "flab_a"},
             ],
         )
+
+    def test_hub_and_spoke_compiles_to_dedicated_hub_topology(self):
+        params = {
+            **BASE,
+            "hub_wallet": "flab_hub_a",
+        }
+
+        cfg = compile_play("hub_and_spoke", params)
+        self.assertEqual(validate(cfg), cfg)
+
+        flow = cfg["flows"][0]
+
+        self.assertEqual(
+            flow["flow_wallets"],
+            [
+                "flab_stage",
+                "flab_hub_a",
+                "flab_a",
+                "flab_b",
+                "flab_c",
+            ],
+        )
+
+        self.assertEqual(
+            flow["experimental_topology"]["transitions"],
+            [
+                {"from": "flab_stage", "to": "flab_hub_a"},
+                {"from": "flab_hub_a", "to": "flab_a"},
+                {"from": "flab_hub_a", "to": "flab_b"},
+                {"from": "flab_hub_a", "to": "flab_c"},
+                {"from": "flab_a", "to": "flab_hub_a"},
+                {"from": "flab_b", "to": "flab_hub_a"},
+                {"from": "flab_c", "to": "flab_hub_a"},
+            ],
+        )
+
+    def test_hub_and_spoke_requires_a_distinct_hub(self):
+        missing = dict(BASE)
+
+        with self.assertRaisesRegex(
+            PlayError,
+            "hub_wallet is required",
+        ):
+            compile_play("hub_and_spoke", missing)
+
+        duplicate = {
+            **BASE,
+            "hub_wallet": "flab_a",
+        }
+
+        with self.assertRaisesRegex(
+            PlayError,
+            "must all be distinct",
+        ):
+            compile_play("hub_and_spoke", duplicate)
 
     def test_same_play_parameters_compile_identically(self):
         a = compile_play("random_walk", BASE)

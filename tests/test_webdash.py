@@ -348,6 +348,12 @@ class WebReadTests(WebBase):
         self.assertIn('"Clear"', form)
         self.assertIn("state.workers.forEach(w => { w.on = true; })", form)
         self.assertIn("state.workers.forEach(w => { w.on = false; })", form)
+        self.assertIn('"hub_and_spoke"', form)
+        self.assertIn('"f-hub"', form)
+        self.assertIn('"Hub wallet"', form)
+        self.assertIn('roleWallets("hubs")', form)
+        self.assertIn('roleWallets("workers")', form)
+        self.assertIn("params.hub_wallet = hub.value", form)
         self.assertIn("orderedWalletNames", app)
         self.assertIn("walletRoleName", app)
         self.assertIn("staged_accounting", app)
@@ -382,7 +388,13 @@ class WebControlTests(WebBase):
 
     def up(self, **kw):
         kw.setdefault("sleep", lambda s: self.chain.mine(2))
-        return self.serve(self.chain, wallets=tuple(self.chain.wallets), builder=self.builder, **kw)
+        wallets = kw.pop("wallets", tuple(self.chain.wallets))
+        return self.serve(
+            self.chain,
+            wallets=wallets,
+            builder=self.builder,
+            **kw,
+        )
 
     def wait_idle(self):
         self.until(lambda: not self.srv.controller.active())
@@ -551,7 +563,7 @@ class WebControlTests(WebBase):
 
         self.assertEqual(
             [p["name"] for p in data["plays"]],
-            ["random_walk", "ring"],
+            ["random_walk", "ring", "hub_and_spoke"],
         )
 
     def test_compile_play_returns_config_without_creating_experiment(self):
@@ -684,6 +696,78 @@ class WebControlTests(WebBase):
         })
         self.assertEqual(s, 400)
         self.assertIn("destination role", out["error"])
+
+    def test_compile_hub_and_spoke_enforces_hub_and_spoke_roles(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b", "flab_c"],
+            "hubs": ["flab_hub_a", "flab_hub_b"],
+            "destinations": ["flab_dest"],
+        }
+        self.up(
+            wallet_roles=roles,
+            wallets=tuple(self.chain.wallets) + (
+                "flab_c",
+                "flab_hub_a",
+                "flab_hub_b",
+            ),
+        )
+
+        def params():
+            return {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "hub_wallet": "flab_hub_a",
+                "workers": ["flab_a", "flab_b"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            }
+
+        s, out = self.do("compile_play", {
+            "play": "hub_and_spoke",
+            "params": params(),
+        })
+        self.assertEqual(s, 200, out)
+        self.assertEqual(
+            out["config"]["flows"][0]["experimental_topology"]["transitions"],
+            [
+                {"from": "flab_stage", "to": "flab_hub_a"},
+                {"from": "flab_hub_a", "to": "flab_a"},
+                {"from": "flab_hub_a", "to": "flab_b"},
+                {"from": "flab_a", "to": "flab_hub_a"},
+                {"from": "flab_b", "to": "flab_hub_a"},
+            ],
+        )
+
+        bad = params()
+        bad["hub_wallet"] = "flab_c"
+
+        s, out = self.do("compile_play", {
+            "play": "hub_and_spoke",
+            "params": bad,
+        })
+        self.assertEqual(s, 400)
+        self.assertIn("hub role", out["error"])
+
+        # Wrong spoke: use a second hub-role wallet so it stays distinct
+        # from the selected hub and reaches dashboard role enforcement.
+        bad = params()
+        bad["workers"] = ["flab_hub_b"]
+
+        s, out = self.do("compile_play", {
+            "play": "hub_and_spoke",
+            "params": bad,
+        })
+        self.assertEqual(s, 400)
+        self.assertIn("worker role", out["error"])
 
     def test_compile_play_refuses_allowlisted_wallet_without_workload_role(self):
         roles = {

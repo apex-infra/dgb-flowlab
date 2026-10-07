@@ -605,7 +605,11 @@ const whole = (text, what, min) => {
     const dst = $("f-dst").value;
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
-    state.workers = workloadWallets()
+    const pool = $("f-play").value === "hub_and_spoke"
+      ? roleWallets("workers")
+      : workloadWallets();
+
+    state.workers = pool
       .filter(w => w !== src && w !== stage && w !== dst)
       .map(w => ({
         name: w,
@@ -666,7 +670,7 @@ const whole = (text, what, min) => {
     if (new Set([src, stage, dst]).size !== 3)
       throw new Error("Reserve, allocation wallet, and destination must be different wallets");
 
-    return {
+    const params = {
       source_wallet: src,
       allocation_wallet: stage,
       workers,
@@ -680,6 +684,15 @@ const whole = (text, what, min) => {
       confirmations_required: whole($("f-conf").value, "Confirmations", 1),
       seed: whole($("f-seed").value, "Seed", 0)
     };
+
+    if ($("f-play").value === "hub_and_spoke") {
+      const hub = $("f-hub");
+      if (!hub || !hub.value)
+        throw new Error("Hub-and-Spoke needs a hub wallet");
+      params.hub_wallet = hub.value;
+    }
+
+    return params;
   }
 
   function playRequest() {
@@ -703,11 +716,16 @@ const whole = (text, what, min) => {
 
     const reserves = roleWallets("reserve");
     const stages = roleWallets("stage");
+    const hubs = roleWallets("hubs");
     const destinations = roleWallets("destinations");
 
     const src = sel("f-src", reserves, reserves[0]);
     const stage = sel("f-stage", stages, stages[0]);
+    const hub = sel("f-hub", hubs, hubs[0]);
     const dst = sel("f-dst", destinations, destinations[0]);
+
+    const hubField = field("Hub wallet", hub);
+    hubField.id = "f-hub-field";
 
     const workerBox = h("div", "row");
     workerBox.id = "f-play-workers";
@@ -741,6 +759,7 @@ const whole = (text, what, min) => {
       field("Strategy", play),
       field("Reserve / funding wallet", src),
       field("Allocation wallet", stage),
+      hubField,
       field("Working wallets", workerPicker),
       field("Final destination", dst),
       note("Play topology is compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
@@ -778,14 +797,22 @@ const whole = (text, what, min) => {
 
     body.append(roles, workload, replay);
 
-    src.onchange = stage.onchange = dst.onchange = () => {
+    function refreshPlayShape() {
+      const hubMode = play.value === "hub_and_spoke";
+      hubField.hidden = !hubMode;
+      hub.disabled = !hubMode;
+      refreshPlayWorkers();
+      refreshPreview();
+    }
+
+    src.onchange = stage.onchange = hub.onchange = dst.onchange = () => {
       refreshPlayWorkers();
       refreshPreview();
     };
 
-    play.onchange = refreshPreview;
+    play.onchange = refreshPlayShape;
 
-    refreshPlayWorkers();
+    refreshPlayShape();
   }
 
   async function compilePlayForPreview() {

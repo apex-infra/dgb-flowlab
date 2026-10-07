@@ -144,11 +144,26 @@ class Controller:
         if self.wallet_roles:
             reserve = set(self.wallet_roles.get("reserve", []))
             stage_role = set(self.wallet_roles.get("stage", []))
-            workload = (
-                set(self.wallet_roles.get("workers", []))
-                | set(self.wallet_roles.get("hubs", []))
-            )
+            worker_role = set(self.wallet_roles.get("workers", []))
+            hub_role = set(self.wallet_roles.get("hubs", []))
+            workload = worker_role | hub_role
             destinations = set(self.wallet_roles.get("destinations", []))
+
+            if name == "hub_and_spoke":
+                hub = params.get("hub_wallet")
+                if hub not in hub_role:
+                    raise ControlError(
+                        f"play hub wallet {hub} must have hub role"
+                    )
+
+                wrong_spokes = sorted(
+                    set(params.get("workers", [])) - worker_role
+                )
+                if wrong_spokes:
+                    raise ControlError(
+                        "Hub-and-Spoke spoke wallet(s) must have worker role: "
+                        + ", ".join(wrong_spokes)
+                    )
 
             for fl in cfg["flows"]:
                 source = fl["source_wallet"]
