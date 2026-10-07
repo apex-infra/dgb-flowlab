@@ -216,6 +216,12 @@ class WebReadTests(WebBase):
             "delay_seconds_min",
             "delay_seconds_max",
             "seeded_deterministic",
+            'roleWallets("reserve")',
+            'roleWallets("destinations")',
+            "workloadWallets()",
+            "Reserve / funding wallet",
+            "Passes through workers / hubs",
+            "Stage wallets are reserved for Experimental and Play allocation",
         ):
             self.assertIn(want, script)
 
@@ -414,6 +420,75 @@ class WebControlTests(WebBase):
         self.assertEqual(self.state(exp), "COMPLETE")
         self.assertEqual(self.snap(exp)["snapshot"]["flows"][0]["jobs"][-1]["state"], "CONFIRMED")
         self.assertEqual(self.do("run", {"exp": exp})[0], 400)          # finished
+
+    def test_new_enforces_deterministic_wallet_roles(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a"],
+            "hubs": ["flab_b"],
+            "destinations": ["flab_dest"],
+        }
+
+        # The normal deterministic route is valid under the role contract.
+        self.up(wallet_roles=roles)
+        s, out = self.do("new", {"config": cfg_sweep()})
+        self.assertEqual(s, 200, out)
+
+    def test_new_refuses_wrong_deterministic_wallet_roles(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a"],
+            "hubs": ["flab_b"],
+            "destinations": ["flab_dest"],
+        }
+        self.up(wallet_roles=roles)
+
+        # Stage cannot act as deterministic reserve/source.
+        bad = cfg_sweep()
+        fl = bad["flows"][0]
+        fl["source_wallet"] = "flab_stage"
+        fl["transfers"][0]["from"] = "flab_stage"
+
+        s, out = self.do("new", {"config": bad})
+        self.assertEqual(s, 400)
+        self.assertIn("reserve role", out["error"])
+
+        # Stage cannot act as an intermediate deterministic wallet.
+        bad = cfg_sweep()
+        fl = bad["flows"][0]
+        fl["flow_wallets"] = ["flab_a", "flab_stage"]
+        fl["transfers"][1]["to"] = "flab_stage"
+        fl["transfers"][2]["from"] = "flab_stage"
+
+        s, out = self.do("new", {"config": bad})
+        self.assertEqual(s, 400)
+        self.assertIn("worker or hub role", out["error"])
+
+        # A hub/worker cannot act as the configured final destination.
+        bad = cfg_sweep()
+        fl = bad["flows"][0]
+        fl["destination_wallet"] = "flab_b"
+        fl["flow_wallets"] = ["flab_a"]
+        fl["transfers"] = [
+            {
+                "from": "flab_source",
+                "to": "flab_a",
+                "amount_sats": 200_000_000,
+                "delay_seconds": 0,
+            },
+            {
+                "from": "flab_a",
+                "to": "flab_b",
+                "amount_sats": "all",
+                "delay_seconds": 0,
+            },
+        ]
+
+        s, out = self.do("new", {"config": bad})
+        self.assertEqual(s, 400)
+        self.assertIn("destination role", out["error"])
 
     def test_new_refuses_bad_and_randomising_configs(self):
         self.up()

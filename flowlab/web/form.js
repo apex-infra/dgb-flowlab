@@ -184,7 +184,7 @@ const whole = (text, what, min) => {
     const dst = $("f-dst").value;
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
-    state.workers = wallets()
+    state.workers = workloadWallets()
       .filter(w => w !== src && w !== dst)
       .map(w => ({
         name: w,
@@ -227,8 +227,16 @@ const whole = (text, what, min) => {
   }
 
   function buildDeterministic(body, ws) {
-    const src = sel("f-src", ws, ws[0]);
-    const dst = sel("f-dst", ws, ws[ws.length - 1]);
+    const reserves = roleWallets("reserve");
+    const destinations = roleWallets("destinations");
+    const workload = workloadWallets();
+
+    const src = sel("f-src", reserves, reserves[0]);
+    const dst = sel("f-dst", destinations, destinations[0]);
+
+    const deterministicWallets = [
+      ...new Set([...reserves, ...workload, ...destinations])
+    ];
 
     src.onchange = dst.onchange = () => {
       refreshDeterministicWorkers();
@@ -244,10 +252,11 @@ const whole = (text, what, min) => {
     const wal = h("fieldset");
     wal.append(
       h("legend", null, "Route"),
-      field("Starts at", src),
-      field("Passes through", mids),
-      field("Ends at", dst),
-      field("Path", route)
+      field("Reserve / funding wallet", src),
+      field("Passes through workers / hubs", mids),
+      field("Final destination", dst),
+      field("Path", route),
+      note("Deterministic routes use reserve → workers/hubs → destination. Stage wallets are reserved for Experimental and Play allocation.")
     );
 
     const amt = h("fieldset");
@@ -269,7 +278,7 @@ const whole = (text, what, min) => {
     const add = h("button", null, "Add hop");
     add.type = "button";
     add.onclick = () => {
-      addHopRow(rows, ws);
+      addHopRow(rows, deterministicWallets);
       refreshPreview();
     };
 
@@ -287,7 +296,13 @@ const whole = (text, what, min) => {
       note("The final explicit hop must end in the destination wallet.")
     );
 
-    addHopRow(rows, ws, ws[0], ws[1] || ws[0], "2");
+    addHopRow(
+      rows,
+      deterministicWallets,
+      src.value,
+      workload[0] || dst.value,
+      "2"
+    );
 
     body.append(wal, amt, adv);
     refreshDeterministicWorkers();

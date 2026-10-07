@@ -201,10 +201,43 @@ class Controller:
 
         experimental = bool(cfg.get("randomization", {}).get("enabled"))
         if not experimental:
+            reserve = set(self.wallet_roles.get("reserve", []))
+            workload = (
+                set(self.wallet_roles.get("workers", []))
+                | set(self.wallet_roles.get("hubs", []))
+            )
+            destinations = set(self.wallet_roles.get("destinations", []))
+
             for fl in cfg["flows"]:
                 ts = fl.get("transfers") or []
                 if not ts or ts[-1]["to"] != fl["destination_wallet"]:
                     raise ControlError("the last hop must end in the destination wallet")
+
+                if self.wallet_roles:
+                    source = fl["source_wallet"]
+                    destination = fl["destination_wallet"]
+
+                    if source not in reserve:
+                        raise ControlError(
+                            f"deterministic source wallet {source} "
+                            "must have reserve role"
+                        )
+
+                    if destination not in destinations:
+                        raise ControlError(
+                            f"deterministic destination wallet {destination} "
+                            "must have destination role"
+                        )
+
+                    wrong_workers = sorted(
+                        set(fl["flow_wallets"]) - workload
+                    )
+                    if wrong_workers:
+                        raise ControlError(
+                            "deterministic intermediate wallet(s) must have "
+                            "worker or hub role: "
+                            + ", ".join(wrong_workers)
+                        )
 
         def go(e):
             exp = e.create_experiment(_text(body, "description", required=False, limit=200))
