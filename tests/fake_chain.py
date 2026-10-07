@@ -14,6 +14,8 @@ class FakeChain:
         self.allowed_wallets = frozenset(wallets)
         self.height = 100
         self.owner, self.utxos, self.txs, self.raw = {}, {}, {}, {}
+        self.labels = {}
+        self.address_types = {}
         self.n = 0
         self.fail_send = None          # set to an RpcError to make broadcasts fail
 
@@ -56,11 +58,23 @@ class FakeChain:
     def list_wallets(self):
         return list(self.wallets)
 
-    def get_new_address(self, wallet, label=""):
-        return self._addr(wallet)
+    def get_new_address(self, wallet, label="", address_type=None):
+        address = self._addr(wallet)
+        self.labels[address] = label
+        self.address_types[address] = address_type
+        return address
 
     def get_address_info(self, wallet, address):
-        return {"ismine": self.owner.get(address) == wallet}
+        return {
+            "ismine": self.owner.get(address) == wallet,
+            "label": self.labels.get(address, ""),
+        }
+
+    def set_label(self, wallet, address, label):
+        if self.owner.get(address) != wallet:
+            raise RpcError("setlabel: address is not owned by wallet")
+        self.labels[address] = label
+        return None
 
     def validate_address(self, address):
         return {

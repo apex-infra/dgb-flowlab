@@ -7,6 +7,8 @@ config hash, fail-closed verification, write-ahead journal. Nothing here can
 bypass them. At most one run is active at a time, in a background thread.
 """
 
+import base64
+import subprocess
 import threading
 import time
 from collections import deque
@@ -23,6 +25,13 @@ from .config_schema import (
 from .plays import compile_play, get_play_spec
 
 FINISHED = ("COMPLETE", "IDLE", "ABORTED")
+FUND_ADDRESS_TYPES = frozenset({
+    "legacy",
+    "p2sh-segwit",
+    "bech32",
+    "bech32m",
+})
+
 # The dashboard accepts only the config fields it knows how to present and review.
 TOP_KEYS = {
     "flows",
@@ -82,6 +91,8 @@ class Controller:
             "new": self.new,
             "compile_play": self.compile_play,
             "fund_reserve_address": self.fund_reserve_address,
+            "fund_reserve_label": self.fund_reserve_label,
+            "fund_reserve_qr": self.fund_reserve_qr,
             "approve": self.approve,
             "run": self.run,
             "stop": self.stop,
@@ -155,9 +166,8 @@ class Controller:
         return self._with_engine(lambda e: {"exp": exp, "text": e.review(exp)["text"],
                                             "hash": e.get_experiment(exp)["config_hash"]})
 
-    def fund_reserve_address(self, body):
+    def _reserve_wallet(self, body):
         wallet = _text(body, "wallet", limit=64)
-
         reserve = set(self.wallet_roles.get("reserve", []))
 
         if not reserve:
@@ -175,13 +185,35 @@ class Controller:
 
         if not self.rpc:
             raise ControlError(
-                "the node is not connected; cannot generate a receiving address"
+                "the node is not connected; reserve wallet action unavailable"
+            )
+
+        return wallet
+
+    def fund_reserve_address(self, body):
+        wallet = self._reserve_wallet(body)
+        label = _text(
+            body,
+            "label",
+            required=False,
+            limit=100,
+        )
+
+        address_type = body.get("address_type", "bech32")
+        if (
+            not isinstance(address_type, str)
+            or address_type not in FUND_ADDRESS_TYPES
+        ):
+            raise ControlError(
+                "address_type must be one of: "
+                "legacy, p2sh-segwit, bech32, bech32m"
             )
 
         try:
             address = self.rpc.get_new_address(
                 wallet,
-                "flowlab-reserve",
+                label,
+                address_type,
             )
         except Exception as exc:
             raise ControlError(
@@ -209,6 +241,96 @@ class Controller:
         return {
             "wallet": wallet,
             "address": address,
+            "label": label,
+            "address_type": address_type,
+        }
+
+    def fund_reserve_label(self, body):
+        wallet = self._reserve_wallet(body)
+        address = _text(body, "address", limit=128)
+        label = _text(
+            body,
+            "label",
+            required=False,
+            limit=100,
+        )
+
+        try:
+            info = self.rpc.get_address_info(wallet, address)
+        except Exception as exc:
+            raise ControlError(
+                f"could not verify reserve receiving address: {exc}"
+            ) from exc
+
+        if not isinstance(info, dict) or info.get("ismine") is not True:
+            raise ControlError(
+                "reserve receiving address is not owned by "
+                f"{wallet}"
+            )
+
+        try:
+            self.rpc.set_label(wallet, address, label)
+        except Exception as exc:
+            raise ControlError(
+                f"could not update reserve address label: {exc}"
+            ) from exc
+
+        return {
+            "wallet": wallet,
+            "address": address,
+            "label": label,
+        }
+
+    def fund_reserve_qr(self, body):
+        uri = _text(body, "uri", limit=1000)
+
+        if not uri.startswith("digibyte:"):
+            raise ControlError(
+                "payment URI must use the digibyte: scheme"
+            )
+
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in uri):
+            raise ControlError(
+                "payment URI contains invalid control characters"
+            )
+
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/qrencode",
+                    "-o", "-",
+                    "-t", "PNG",
+                    "-s", "6",
+                    "-m", "3",
+                ],
+                input=uri.encode("utf-8"),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ControlError(
+                f"could not generate payment QR: {type(exc).__name__}"
+            ) from exc
+
+        if result.returncode != 0:
+            raise ControlError(
+                "could not generate payment QR"
+            )
+
+        png = result.stdout
+
+        if not png.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ControlError(
+                "QR encoder returned invalid PNG data"
+            )
+
+        encoded = base64.b64encode(png).decode("ascii")
+
+        return {
+            "uri": uri,
+            "image": "data:image/png;base64," + encoded,
         }
 
     def compile_play(self, body):

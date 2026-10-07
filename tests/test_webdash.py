@@ -5,6 +5,7 @@ import re
 import threading
 import time
 from decimal import Decimal
+from unittest.mock import patch
 
 from flowlab.webdash import make_server
 from tests.test_dashboard import DashBase
@@ -188,7 +189,27 @@ class WebReadTests(WebBase):
             '"fund_reserve_address"',
             '"Generate receiving address"',
             '"New address"',
+            '"Copy address"',
+            '"Copy URI"',
+            '"Update Core label"',
+            '"Clear"',
+            '"Fund Reserve request cleared."',
+            '"Payment URI"',
+            '"Payment QR"',
+            '"Amount (DGB)"',
+            '"Address type"',
+            '"Bech32"',
+            '"Legacy"',
+            '"P2SH-SegWit"',
+            '"Bech32m (Taproot-era)"',
+            '"fund_reserve_qr"',
+            "scheduleFundQR",
+            "fundPaymentURI",
             "fundAddresses",
+            "fundQRImages",
+            'dataset.fundField = "label"',
+            'dataset.fundField = "amount"',
+            "setSelectionRange",
         ):
             self.assertIn(want, app)
 
@@ -196,6 +217,8 @@ class WebReadTests(WebBase):
             ".fund-card",
             ".fund-address",
             ".fund-note",
+            ".fund-qr-box",
+            ".fund-qr",
         ):
             self.assertIn(want, css)
 
@@ -490,9 +513,9 @@ class WebControlTests(WebBase):
         calls = []
         real = self.chain.get_new_address
 
-        def counted(wallet, label=""):
-            calls.append((wallet, label))
-            return real(wallet, label)
+        def counted(wallet, label="", address_type=None):
+            calls.append((wallet, label, address_type))
+            return real(wallet, label, address_type)
 
         self.chain.get_new_address = counted
         self.up(wallet_roles=roles)
@@ -512,7 +535,7 @@ class WebControlTests(WebBase):
         self.assertTrue(out["address"])
         self.assertEqual(
             calls,
-            [("flab_source", "flowlab-reserve")],
+            [("flab_source", "", "bech32")],
         )
 
         info = self.chain.get_address_info(
@@ -520,6 +543,209 @@ class WebControlTests(WebBase):
             out["address"],
         )
         self.assertTrue(info["ismine"])
+        self.assertEqual(info["label"], "")
+
+    def test_fund_reserve_generation_uses_selected_address_type(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(wallet_roles=roles)
+
+        for address_type in (
+            "legacy",
+            "p2sh-segwit",
+            "bech32",
+            "bech32m",
+        ):
+            s, out = self.do(
+                "fund_reserve_address",
+                {
+                    "wallet": "flab_source",
+                    "label": "type test",
+                    "address_type": address_type,
+                },
+            )
+
+            self.assertEqual(s, 200, out)
+            self.assertEqual(out["address_type"], address_type)
+            self.assertEqual(
+                self.chain.address_types[out["address"]],
+                address_type,
+            )
+
+    def test_fund_reserve_refuses_unknown_address_type(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(wallet_roles=roles)
+
+        s, out = self.do(
+            "fund_reserve_address",
+            {
+                "wallet": "flab_source",
+                "address_type": "future-magic",
+            },
+        )
+
+        self.assertEqual(s, 400)
+        self.assertIn(
+            "address_type must be one of",
+            out["error"],
+        )
+
+    def test_fund_reserve_generation_persists_operator_label(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(wallet_roles=roles)
+
+        s, out = self.do(
+            "fund_reserve_address",
+            {
+                "wallet": "flab_source",
+                "label": "FlowLab Reserve 001",
+            },
+        )
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(
+            out["label"],
+            "FlowLab Reserve 001",
+        )
+        self.assertEqual(
+            self.chain.labels[out["address"]],
+            "FlowLab Reserve 001",
+        )
+
+    def test_fund_reserve_can_explicitly_update_core_label(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(wallet_roles=roles)
+
+        s, made = self.do(
+            "fund_reserve_address",
+            {
+                "wallet": "flab_source",
+                "label": "first",
+            },
+        )
+        self.assertEqual(s, 200, made)
+
+        s, out = self.do(
+            "fund_reserve_label",
+            {
+                "wallet": "flab_source",
+                "address": made["address"],
+                "label": "second",
+            },
+        )
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(out["label"], "second")
+        self.assertEqual(
+            self.chain.labels[made["address"]],
+            "second",
+        )
+
+    def test_fund_reserve_qr_returns_local_png_data_uri(self):
+        png = b"\x89PNG\r\n\x1a\nfake-qr-payload"
+
+        class Result:
+            returncode = 0
+            stdout = png
+            stderr = b""
+
+        with patch(
+            "flowlab.webctl.subprocess.run",
+            return_value=Result(),
+        ) as run:
+            self.up()
+
+            uri = (
+                "digibyte:dgb1qexample"
+                "?amount=250&label=FlowLab%20Reserve"
+            )
+
+            s, out = self.do(
+                "fund_reserve_qr",
+                {"uri": uri},
+            )
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(out["uri"], uri)
+        self.assertTrue(
+            out["image"].startswith(
+                "data:image/png;base64,"
+            )
+        )
+
+        run.assert_called_once()
+        kwargs = run.call_args.kwargs
+
+        self.assertEqual(
+            kwargs["input"],
+            uri.encode("utf-8"),
+        )
+        self.assertEqual(
+            run.call_args.args[0][0],
+            "/usr/bin/qrencode",
+        )
+        self.assertNotIn("shell", kwargs)
+
+    def test_fund_reserve_qr_refuses_non_digibyte_uri(self):
+        self.up()
+
+        s, out = self.do(
+            "fund_reserve_qr",
+            {"uri": "https://example.com/not-a-payment"},
+        )
+
+        self.assertEqual(s, 400)
+        self.assertIn("digibyte:", out["error"])
+
+    def test_fund_reserve_qr_refuses_bad_encoder_output(self):
+        class Result:
+            returncode = 0
+            stdout = b"not a png"
+            stderr = b""
+
+        with patch(
+            "flowlab.webctl.subprocess.run",
+            return_value=Result(),
+        ):
+            self.up()
+
+            s, out = self.do(
+                "fund_reserve_qr",
+                {"uri": "digibyte:dgb1qexample"},
+            )
+
+        self.assertEqual(s, 400)
+        self.assertIn(
+            "invalid PNG",
+            out["error"],
+        )
 
     def test_fund_reserve_refuses_non_reserve_wallet(self):
         roles = {
@@ -544,7 +770,17 @@ class WebControlTests(WebBase):
     def test_read_only_switches_every_action_off(self):
         self.up(control=False)
         before = self.digest() if os.path.exists(self.db) else None
-        for a in ("new", "approve", "run", "stop", "clear_stop", "resolve"):
+        for a in (
+            "new",
+            "approve",
+            "run",
+            "stop",
+            "clear_stop",
+            "resolve",
+            "fund_reserve_address",
+            "fund_reserve_label",
+            "fund_reserve_qr",
+        ):
             self.assertEqual(self.do(a)[0], 403, a)
         self.assertEqual(self.snap()["control"], False)
         self.assertEqual(self.digest() if os.path.exists(self.db) else None, before)

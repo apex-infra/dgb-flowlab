@@ -101,6 +101,74 @@ class RpcTests(unittest.TestCase):
                 subtract_fee_indexes=[0],
             )
 
+    def test_get_new_address_can_select_address_type(self):
+        seen = {}
+
+        def handler(label, address_type):
+            seen["label"] = label
+            seen["address_type"] = address_type
+            return "dgb1qtype"
+
+        self.n.handlers["getnewaddress"] = handler
+
+        result = self.c.get_new_address(
+            "flab_a",
+            "deposit one",
+            "bech32",
+        )
+
+        self.assertEqual(result, "dgb1qtype")
+        self.assertEqual(
+            seen,
+            {
+                "label": "deposit one",
+                "address_type": "bech32",
+            },
+        )
+        self.assertEqual(self.n.calls[-1][0], "/wallet/flab_a")
+        self.assertEqual(self.n.calls[-1][1], "getnewaddress")
+        self.assertEqual(
+            self.n.calls[-1][2],
+            ["deposit one", "bech32"],
+        )
+
+    def test_set_label_uses_wallet_rpc(self):
+        seen = {}
+
+        def handler(address, label):
+            seen["address"] = address
+            seen["label"] = label
+            return None
+
+        self.n.handlers["setlabel"] = handler
+
+        result = self.c.set_label(
+            "flab_a",
+            "dgb1qabc",
+            "reserve one",
+        )
+
+        self.assertIsNone(result)
+        self.assertEqual(
+            seen,
+            {
+                "address": "dgb1qabc",
+                "label": "reserve one",
+            },
+        )
+        self.assertEqual(
+            self.n.calls[-1][0],
+            "/wallet/flab_a",
+        )
+        self.assertEqual(
+            self.n.calls[-1][1],
+            "setlabel",
+        )
+        self.assertEqual(
+            self.n.calls[-1][2],
+            ["dgb1qabc", "reserve one"],
+        )
+
     def test_validate_address_uses_non_wallet_rpc(self):
         self.n.handlers["validateaddress"] = lambda a: {
             "isvalid": a == "dgb1qexternal",

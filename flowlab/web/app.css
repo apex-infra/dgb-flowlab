@@ -307,3 +307,28 @@ a.btn:hover{color:var(--paper)}
     grid-template-columns:1fr;
   }
 }
+
+.fund-qr-box{
+  margin:14px 0;
+  padding:14px;
+  border:1px solid var(--line);
+  background:var(--ink);
+}
+.fund-qr-box>span{
+  display:block;
+  margin-bottom:10px;
+}
+.fund-qr-content{
+  min-height:210px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.fund-qr{
+  display:block;
+  width:210px;
+  height:210px;
+  max-width:100%;
+  image-rendering:pixelated;
+  background:#fff;
+}

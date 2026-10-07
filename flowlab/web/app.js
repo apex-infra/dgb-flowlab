@@ -8,6 +8,14 @@ const TOKEN = document.querySelector('meta[name="flowlab-token"]').content;
 const CONTROL = document.querySelector('meta[name="flowlab-control"]').content === "1";
 let last = null, fetchedAt = 0, beads = [], picked = null, sigs = {};
 const fundAddresses = {};
+const fundLabels = {};
+const fundAmounts = {};
+const fundCoreLabels = {};
+const fundAddressTypes = {};
+const fundQRImages = {};
+const fundQRUris = {};
+const fundQRPending = {};
+const fundQRTimers = {};
 
 const $ = id => document.getElementById(id);
 const dgb = s => { s = Math.round(s); const neg = s < 0 ? "-" : ""; s = Math.abs(s);
@@ -412,9 +420,121 @@ function walletRoleGroup(role) {
 }
 
 
+function fundPaymentURI(address, amount, label) {
+  if (!address) return "";
+
+  const params = [];
+
+  if (amount)
+    params.push("amount=" + encodeURIComponent(amount));
+
+  if (label)
+    params.push("label=" + encodeURIComponent(label));
+
+  return "digibyte:" + address
+    + (params.length ? "?" + params.join("&") : "");
+}
+
+function validFundAmount(text) {
+  const t = String(text || "").trim();
+
+  if (!t) return true;
+  if (!/^\d+(\.\d{1,8})?$/.test(t)) return false;
+
+  const n = Number(t);
+  return Number.isFinite(n) && n > 0;
+}
+
+async function copyFundText(text, what) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(what + " copied.");
+  } catch (err) {
+    toast("Could not copy " + what.toLowerCase() + ".", true);
+  }
+}
+
+function scheduleFundQR(wallet, uri) {
+  if (!uri) return;
+
+  if (
+    fundQRUris[wallet] === uri
+    && fundQRImages[wallet]
+  )
+    return;
+
+  if (fundQRPending[wallet] === uri)
+    return;
+
+  if (fundQRTimers[wallet])
+    clearTimeout(fundQRTimers[wallet]);
+
+  fundQRTimers[wallet] = setTimeout(async () => {
+    delete fundQRTimers[wallet];
+    fundQRPending[wallet] = uri;
+
+    try {
+      const result = await api(
+        "fund_reserve_qr",
+        {uri}
+      );
+
+      if (fundQRPending[wallet] !== uri)
+        return;
+
+      fundQRUris[wallet] = result.uri;
+      fundQRImages[wallet] = result.image;
+    } catch (err) {
+      if (fundQRPending[wallet] === uri) {
+        delete fundQRUris[wallet];
+        delete fundQRImages[wallet];
+        toast(err.message, true);
+      }
+    } finally {
+      if (fundQRPending[wallet] === uri)
+        delete fundQRPending[wallet];
+
+      if (last)
+        renderFundReserve(last);
+    }
+  }, 300);
+}
+
+
 function renderFundReserve(data) {
   const box = $("fund-reserve");
   if (!box) return;
+
+  const active = document.activeElement;
+
+  if (
+    active
+    && box.contains(active)
+    && active.dataset
+    && active.dataset.fundField
+  ) {
+    return;
+  }
+  let restoreField = null;
+  let restoreStart = null;
+  let restoreEnd = null;
+
+  if (
+    active
+    && box.contains(active)
+    && active.dataset
+    && active.dataset.fundField
+  ) {
+    restoreField = active.dataset.fundField;
+
+    if (
+      typeof active.selectionStart === "number"
+      && typeof active.selectionEnd === "number"
+    ) {
+      restoreStart = active.selectionStart;
+      restoreEnd = active.selectionEnd;
+    }
+  }
 
   const roles = data.wallet_roles || {};
   const reserves = Array.isArray(roles.reserve)
@@ -444,6 +564,7 @@ function renderFundReserve(data) {
     walletControl = h("span", "mono fund-wallet", reserves[0]);
   } else {
     walletControl = h("select");
+
     reserves.forEach(wallet => {
       walletControl.append(new Option(wallet, wallet));
     });
@@ -479,6 +600,59 @@ function renderFundReserve(data) {
     h("span", "mono", balance)
   );
 
+  const labelInput = h("input");
+  labelInput.type = "text";
+  labelInput.dataset.fundField = "label";
+  labelInput.maxLength = 100;
+  labelInput.placeholder = "optional Core address label";
+  labelInput.value = fundLabels[wallet] || "";
+
+  const labelRow = h("div", "fund-line");
+  labelRow.append(
+    h("span", "mute", "Label"),
+    labelInput
+  );
+
+  const amountInput = h("input");
+  amountInput.type = "text";
+  amountInput.dataset.fundField = "amount";
+  amountInput.inputMode = "decimal";
+  amountInput.placeholder = "optional DGB amount";
+  amountInput.value = fundAmounts[wallet] || "";
+
+  const amountRow = h("div", "fund-line");
+  amountRow.append(
+    h("span", "mute", "Amount (DGB)"),
+    amountInput
+  );
+
+  const addressTypeSelect = h("select");
+  addressTypeSelect.dataset.fundField = "address_type";
+
+  for (const [value, label] of [
+    ["legacy", "Legacy"],
+    ["p2sh-segwit", "P2SH-SegWit"],
+    ["bech32", "Bech32"],
+    ["bech32m", "Bech32m (Taproot-era)"],
+  ]) {
+    addressTypeSelect.append(
+      new Option(label, value)
+    );
+  }
+
+  addressTypeSelect.value =
+    fundAddressTypes[wallet] || "bech32";
+
+  addressTypeSelect.onchange = () => {
+    fundAddressTypes[wallet] = addressTypeSelect.value;
+  };
+
+  const addressTypeRow = h("div", "fund-line");
+  addressTypeRow.append(
+    h("span", "mute", "Address type"),
+    addressTypeSelect
+  );
+
   const address = fundAddresses[wallet] || null;
 
   const addressRow = h("div", "fund-address-box");
@@ -499,14 +673,123 @@ function renderFundReserve(data) {
     );
   }
 
+  const uriBox = h("div", "fund-address-box");
+  const uriValue = h(
+    "div",
+    "mono fund-address",
+    address
+      ? fundPaymentURI(
+          address,
+          amountInput.value.trim(),
+          labelInput.value.trim()
+        )
+      : "-"
+  );
+
+  uriBox.append(
+    h("span", "mute", "Payment URI"),
+    uriValue
+  );
+
+  const qrBox = h("div", "fund-qr-box");
+  const qrTitle = h("span", "mute", "Payment QR");
+  const qrContent = h("div", "fund-qr-content");
+
+  qrBox.append(
+    qrTitle,
+    qrContent
+  );
+
+  const amountError = h("div", "err");
+  amountError.hidden = true;
+
   const controls = h("div", "row");
+
   const generate = h(
     "button",
     "primary",
     address ? "New address" : "Generate receiving address"
   );
 
-  generate.disabled = !(CONTROL && data.control);
+  const copyAddress = h("button", null, "Copy address");
+  const copyURI = h("button", null, "Copy URI");
+  const updateLabel = h("button", null, "Update Core label");
+  const clearRequest = h("button", null, "Clear");
+
+  const sync = () => {
+    fundLabels[wallet] = labelInput.value;
+    fundAmounts[wallet] = amountInput.value;
+
+    const amountOK = validFundAmount(amountInput.value);
+
+    amountError.hidden = amountOK;
+    amountError.textContent = amountOK
+      ? ""
+      : "Amount must be a positive DGB value with at most 8 decimals.";
+
+    const uri = address
+      ? fundPaymentURI(
+          address,
+          amountInput.value.trim(),
+          labelInput.value.trim()
+        )
+      : "";
+
+    uriValue.textContent = uri || "-";
+
+    qrContent.replaceChildren();
+
+    if (!address) {
+      qrContent.append(
+        h(
+          "div",
+          "fund-empty",
+          "Generate a receiving address to create a payment QR."
+        )
+      );
+    } else if (!amountOK) {
+      qrContent.append(
+        h(
+          "div",
+          "fund-empty",
+          "Enter a valid amount to update the payment QR."
+        )
+      );
+    } else if (
+      fundQRUris[wallet] === uri
+      && fundQRImages[wallet]
+    ) {
+      const img = document.createElement("img");
+      img.className = "fund-qr";
+      img.alt = "DigiByte payment QR code";
+      img.src = fundQRImages[wallet];
+      qrContent.append(img);
+    } else {
+      qrContent.append(
+        h(
+          "div",
+          "fund-empty",
+          "Generating QR..."
+        )
+      );
+
+      scheduleFundQR(wallet, uri);
+    }
+
+    generate.disabled = !(CONTROL && data.control) || !amountOK;
+    copyAddress.disabled = !address;
+    copyURI.disabled = !address || !amountOK;
+
+    updateLabel.disabled = !(
+      CONTROL
+      && data.control
+      && address
+      && labelInput.value !== (fundCoreLabels[wallet] || "")
+    );
+  };
+
+  labelInput.oninput = sync;
+  amountInput.oninput = sync;
 
   generate.onclick = async () => {
     generate.disabled = true;
@@ -514,10 +797,20 @@ function renderFundReserve(data) {
     try {
       const result = await api(
         "fund_reserve_address",
-        {wallet}
+        {
+          wallet,
+          label: labelInput.value.trim(),
+          address_type: addressTypeSelect.value,
+        }
       );
 
       fundAddresses[wallet] = result.address;
+      fundCoreLabels[wallet] = result.label || "";
+      fundAddressTypes[wallet] =
+        result.address_type || addressTypeSelect.value;
+      fundLabels[wallet] = labelInput.value;
+      fundAmounts[wallet] = amountInput.value;
+
       toast(
         address
           ? "New reserve receiving address generated."
@@ -527,36 +820,133 @@ function renderFundReserve(data) {
       renderFundReserve(last);
     } catch (err) {
       toast(err.message, true);
-      generate.disabled = false;
+      sync();
     }
   };
 
-  controls.append(generate);
+  copyAddress.onclick = () => {
+    if (address)
+      copyFundText(address, "Address");
+  };
+
+  copyURI.onclick = () => {
+    const uri = fundPaymentURI(
+      address,
+      amountInput.value.trim(),
+      labelInput.value.trim()
+    );
+
+    if (uri)
+      copyFundText(uri, "Payment URI");
+  };
+
+  updateLabel.onclick = async () => {
+    updateLabel.disabled = true;
+
+    try {
+      const result = await api(
+        "fund_reserve_label",
+        {
+          wallet,
+          address,
+          label: labelInput.value.trim(),
+        }
+      );
+
+      fundCoreLabels[wallet] = result.label || "";
+      toast("Core address label updated.");
+      sync();
+    } catch (err) {
+      toast(err.message, true);
+      sync();
+    }
+  };
+
+  clearRequest.onclick = () => {
+    if (fundQRTimers[wallet]) {
+      clearTimeout(fundQRTimers[wallet]);
+      delete fundQRTimers[wallet];
+    }
+
+    delete fundAddresses[wallet];
+    delete fundLabels[wallet];
+    delete fundAmounts[wallet];
+    delete fundCoreLabels[wallet];
+    delete fundAddressTypes[wallet];
+    delete fundQRImages[wallet];
+    delete fundQRUris[wallet];
+    delete fundQRPending[wallet];
+
+    toast("Fund Reserve request cleared.");
+    renderFundReserve(last);
+  };
+
+  controls.append(
+    generate,
+    copyAddress,
+    copyURI,
+    updateLabel,
+    clearRequest
+  );
 
   if (!(CONTROL && data.control))
     controls.append(
       h(
         "span",
         "mute",
-        "Address generation is unavailable in read-only mode."
+        "Reserve wallet changes are unavailable in read-only mode."
       )
     );
 
   card.append(
     walletRow,
     balanceRow,
+    labelRow,
+    amountRow,
+    addressTypeRow,
+    amountError,
     addressRow,
+    uriBox,
+    qrBox,
     controls,
     h(
       "div",
       "mute fund-note",
-      "A receiving address is generated only when you explicitly press "
-      + "the button above. Loading or refreshing this dashboard does not "
-      + "derive a new address."
+      "Generating a new address stores the current label in DigiByte Core. "
+      + "Changing the amount only changes the payment request. Changing the "
+      + "label does not modify Core until you press Update Core label. "
+      + "Clear only resets this dashboard form; it does not delete an "
+      + "address or label from DigiByte Core."
     )
   );
 
   box.append(card);
+  sync();
+
+  if (restoreField) {
+    const target = restoreField === "label"
+      ? labelInput
+      : restoreField === "amount"
+        ? amountInput
+        : restoreField === "address_type"
+          ? addressTypeSelect
+          : null;
+
+    if (target) {
+      target.focus({preventScroll: true});
+
+      if (
+        restoreStart !== null
+        && restoreEnd !== null
+        && typeof target.setSelectionRange === "function"
+      ) {
+        target.setSelectionRange(
+          Math.min(restoreStart, target.value.length),
+          Math.min(restoreEnd, target.value.length)
+        );
+      }
+    }
+  }
 }
 
 
