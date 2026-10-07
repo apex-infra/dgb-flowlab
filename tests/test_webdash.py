@@ -541,6 +541,98 @@ class WebControlTests(WebBase):
         self.assertEqual(s, 400)
         self.assertIn("wallet", out["error"].lower())
 
+    def test_compile_play_enforces_configured_wallet_roles(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a"],
+            "hubs": ["flab_b"],
+            "destinations": ["flab_dest"],
+        }
+        self.up(wallet_roles=roles)
+
+        def params():
+            return {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_b"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            }
+
+        # A hub is a valid workload wallet.
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": params(),
+        })
+        self.assertEqual(s, 200, out)
+
+        bad = params()
+        bad["source_wallet"] = "flab_a"
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": bad,
+        })
+        self.assertEqual(s, 400)
+        self.assertIn("reserve role", out["error"])
+
+        bad = params()
+        bad["allocation_wallet"] = "flab_a"
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": bad,
+        })
+        self.assertEqual(s, 400)
+        self.assertIn("stage role", out["error"])
+
+        bad = params()
+        bad["workers"] = ["flab_a"]
+        bad["destination_wallet"] = "flab_b"
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": bad,
+        })
+        self.assertEqual(s, 400)
+        self.assertIn("destination role", out["error"])
+
+    def test_compile_play_refuses_allowlisted_wallet_without_workload_role(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+        self.up(wallet_roles=roles)
+
+        s, out = self.do("compile_play", {
+            "play": "random_walk",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_b"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "decisions": 20,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn("worker or hub role", out["error"])
+
     def test_compile_play_refuses_unknown_play(self):
         self.up()
 

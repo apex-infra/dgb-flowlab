@@ -138,6 +138,50 @@ class Controller:
                 + ", ".join(outside)
             )
 
+        # When wallet-role metadata is configured, it is authoritative for
+        # dashboard Plays. The generic play compiler intentionally remains
+        # environment-agnostic.
+        if self.wallet_roles:
+            reserve = set(self.wallet_roles.get("reserve", []))
+            stage_role = set(self.wallet_roles.get("stage", []))
+            workload = (
+                set(self.wallet_roles.get("workers", []))
+                | set(self.wallet_roles.get("hubs", []))
+            )
+            destinations = set(self.wallet_roles.get("destinations", []))
+
+            for fl in cfg["flows"]:
+                source = fl["source_wallet"]
+                stage = fl.get("allocation_wallet")
+                destination = fl["destination_wallet"]
+
+                if source not in reserve:
+                    raise ControlError(
+                        f"play source wallet {source} must have reserve role"
+                    )
+
+                if stage not in stage_role:
+                    raise ControlError(
+                        f"play allocation wallet {stage} must have stage role"
+                    )
+
+                if destination not in destinations:
+                    raise ControlError(
+                        f"play destination wallet {destination} "
+                        "must have destination role"
+                    )
+
+                workers = set(fl["flow_wallets"])
+                if stage is not None:
+                    workers.discard(stage)
+
+                wrong_workers = sorted(workers - workload)
+                if wrong_workers:
+                    raise ControlError(
+                        "play workload wallet(s) must have worker or hub role: "
+                        + ", ".join(wrong_workers)
+                    )
+
         return {
             "play": get_play_spec(name),
             "config": cfg,
