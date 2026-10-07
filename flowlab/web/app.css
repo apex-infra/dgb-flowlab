@@ -260,3 +260,50 @@ a.btn:hover{color:var(--paper)}
     max-width:100%;
   }
 }
+
+/* Fund Reserve */
+.fund-card{
+  max-width:760px;
+  border:1px solid var(--line);
+  background:#0e2236;
+  padding:18px;
+}
+.fund-line{
+  display:grid;
+  grid-template-columns:170px minmax(0,1fr);
+  gap:10px 18px;
+  align-items:center;
+  padding:8px 0;
+  border-bottom:1px solid var(--line);
+}
+.fund-wallet{
+  font-size:14px;
+}
+.fund-address-box{
+  margin:18px 0 14px;
+  padding:14px;
+  border:1px solid var(--line);
+  background:var(--ink);
+}
+.fund-address-box>span{
+  display:block;
+  margin-bottom:7px;
+}
+.fund-address{
+  font-size:14px;
+  overflow-wrap:anywhere;
+  user-select:all;
+}
+.fund-empty{
+  color:var(--mute);
+}
+.fund-note{
+  margin-top:14px;
+  max-width:680px;
+  font-size:12.5px;
+}
+@media(max-width:600px){
+  .fund-line{
+    grid-template-columns:1fr;
+  }
+}

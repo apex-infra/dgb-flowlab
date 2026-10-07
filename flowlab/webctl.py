@@ -81,6 +81,7 @@ class Controller:
             "review": self.review,
             "new": self.new,
             "compile_play": self.compile_play,
+            "fund_reserve_address": self.fund_reserve_address,
             "approve": self.approve,
             "run": self.run,
             "stop": self.stop,
@@ -153,6 +154,62 @@ class Controller:
         exp = _text(body, "exp")
         return self._with_engine(lambda e: {"exp": exp, "text": e.review(exp)["text"],
                                             "hash": e.get_experiment(exp)["config_hash"]})
+
+    def fund_reserve_address(self, body):
+        wallet = _text(body, "wallet", limit=64)
+
+        reserve = set(self.wallet_roles.get("reserve", []))
+
+        if not reserve:
+            raise ControlError("no reserve-role wallet is configured")
+
+        if wallet not in reserve:
+            raise ControlError(
+                f"wallet {wallet} does not have the reserve role"
+            )
+
+        if wallet not in self.wallets:
+            raise ControlError(
+                f"reserve wallet {wallet} is outside the dashboard allowlist"
+            )
+
+        if not self.rpc:
+            raise ControlError(
+                "the node is not connected; cannot generate a receiving address"
+            )
+
+        try:
+            address = self.rpc.get_new_address(
+                wallet,
+                "flowlab-reserve",
+            )
+        except Exception as exc:
+            raise ControlError(
+                f"could not generate reserve receiving address: {exc}"
+            ) from exc
+
+        if not isinstance(address, str) or not address:
+            raise ControlError(
+                "node returned an invalid reserve receiving address"
+            )
+
+        try:
+            info = self.rpc.get_address_info(wallet, address)
+        except Exception as exc:
+            raise ControlError(
+                f"could not verify reserve receiving address: {exc}"
+            ) from exc
+
+        if not isinstance(info, dict) or info.get("ismine") is not True:
+            raise ControlError(
+                "generated reserve receiving address is not owned by "
+                f"{wallet}"
+            )
+
+        return {
+            "wallet": wallet,
+            "address": address,
+        }
 
     def compile_play(self, body):
         name = _text(body, "play", limit=64)

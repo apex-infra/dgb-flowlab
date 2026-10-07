@@ -7,6 +7,7 @@ const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const TOKEN = document.querySelector('meta[name="flowlab-token"]').content;
 const CONTROL = document.querySelector('meta[name="flowlab-control"]').content === "1";
 let last = null, fetchedAt = 0, beads = [], picked = null, sigs = {};
+const fundAddresses = {};
 
 const $ = id => document.getElementById(id);
 const dgb = s => { s = Math.round(s); const neg = s < 0 ? "-" : ""; s = Math.abs(s);
@@ -124,7 +125,7 @@ function renderHops(flow) {
 }
 
 function showTab(name) {
-  for (const t of ["monitor", "new", "log"]) $("tab-" + t).hidden = t !== name;
+  for (const t of ["monitor", "fund", "new", "log"]) $("tab-" + t).hidden = t !== name;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
 }
 document.querySelectorAll("#tabs button").forEach(b => { b.onclick = () => showTab(b.dataset.tab); });
@@ -411,6 +412,154 @@ function walletRoleGroup(role) {
 }
 
 
+function renderFundReserve(data) {
+  const box = $("fund-reserve");
+  if (!box) return;
+
+  const roles = data.wallet_roles || {};
+  const reserves = Array.isArray(roles.reserve)
+    ? roles.reserve
+    : [];
+
+  box.replaceChildren();
+
+  if (!reserves.length) {
+    box.append(
+      h("div", "fund-card"),
+      h("div", "mute", "No reserve-role wallet is configured.")
+    );
+    return;
+  }
+
+  const card = h("div", "fund-card");
+
+  const walletRow = h("div", "fund-line");
+  walletRow.append(
+    h("span", "mute", "Reserve wallet")
+  );
+
+  let walletControl;
+
+  if (reserves.length === 1) {
+    walletControl = h("span", "mono fund-wallet", reserves[0]);
+  } else {
+    walletControl = h("select");
+    reserves.forEach(wallet => {
+      walletControl.append(new Option(wallet, wallet));
+    });
+
+    if (
+      box.dataset.wallet
+      && reserves.includes(box.dataset.wallet)
+    )
+      walletControl.value = box.dataset.wallet;
+
+    walletControl.onchange = () => {
+      box.dataset.wallet = walletControl.value;
+      renderFundReserve(last);
+    };
+  }
+
+  walletRow.append(walletControl);
+
+  const wallet = reserves.length === 1
+    ? reserves[0]
+    : walletControl.value;
+
+  box.dataset.wallet = wallet;
+
+  const balance = data.balances
+    && typeof data.balances[wallet] === "number"
+    ? dgb(data.balances[wallet]) + " DGB"
+    : "-";
+
+  const balanceRow = h("div", "fund-line");
+  balanceRow.append(
+    h("span", "mute", "Current balance"),
+    h("span", "mono", balance)
+  );
+
+  const address = fundAddresses[wallet] || null;
+
+  const addressRow = h("div", "fund-address-box");
+
+  if (address) {
+    addressRow.append(
+      h("span", "mute", "Receiving address"),
+      h("div", "mono fund-address", address)
+    );
+  } else {
+    addressRow.append(
+      h("span", "mute", "Receiving address"),
+      h(
+        "div",
+        "fund-empty",
+        "No receiving address generated in this dashboard session."
+      )
+    );
+  }
+
+  const controls = h("div", "row");
+  const generate = h(
+    "button",
+    "primary",
+    address ? "New address" : "Generate receiving address"
+  );
+
+  generate.disabled = !(CONTROL && data.control);
+
+  generate.onclick = async () => {
+    generate.disabled = true;
+
+    try {
+      const result = await api(
+        "fund_reserve_address",
+        {wallet}
+      );
+
+      fundAddresses[wallet] = result.address;
+      toast(
+        address
+          ? "New reserve receiving address generated."
+          : "Reserve receiving address generated."
+      );
+
+      renderFundReserve(last);
+    } catch (err) {
+      toast(err.message, true);
+      generate.disabled = false;
+    }
+  };
+
+  controls.append(generate);
+
+  if (!(CONTROL && data.control))
+    controls.append(
+      h(
+        "span",
+        "mute",
+        "Address generation is unavailable in read-only mode."
+      )
+    );
+
+  card.append(
+    walletRow,
+    balanceRow,
+    addressRow,
+    controls,
+    h(
+      "div",
+      "mute fund-note",
+      "A receiving address is generated only when you explicitly press "
+      + "the button above. Loading or refreshing this dashboard does not "
+      + "derive a new address."
+    )
+  );
+
+  box.append(card);
+}
+
+
 function render(data) {
   last = data; fetchedAt = performance.now();
   window.flowWallets = data.wallets || [];
@@ -418,6 +567,7 @@ function render(data) {
   window.flowPlays = data.plays || [];
   renderPicker(data); renderExports(data); renderBanner(data); renderActions(data);
   renderUnresolved(data); renderExperimental(data); renderConsole(data);
+  renderFundReserve(data);
   const s = data.snapshot;
   if (!s) { $("state").textContent = "none"; $("state").className = "pill mute"; $("desc").textContent = CONTROL ? "No experiment yet. Open New experiment to create one." : "No experiment yet."; return; }
   const e = s.exp, jobs = s.flows.flatMap(f => f.jobs);

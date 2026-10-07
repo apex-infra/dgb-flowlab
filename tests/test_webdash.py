@@ -168,6 +168,38 @@ class WebReadTests(WebBase):
         for p in ("/app.css", "/app.js", "/form.js"):
             self.assertEqual(self.get(p)[0], 200, p)
 
+    def test_page_contains_fund_reserve_section(self):
+        self.start()
+
+        page = self.get()[2].decode()
+        app = self.get("/app.js")[2].decode()
+        css = self.get("/app.css")[2].decode()
+
+        for want in (
+            'data-tab="fund"',
+            "Fund Reserve",
+            'id="tab-fund"',
+            'id="fund-reserve"',
+        ):
+            self.assertIn(want, page)
+
+        for want in (
+            "renderFundReserve",
+            '"fund_reserve_address"',
+            '"Generate receiving address"',
+            '"New address"',
+            "fundAddresses",
+        ):
+            self.assertIn(want, app)
+
+        for want in (
+            ".fund-card",
+            ".fund-address",
+            ".fund-note",
+        ):
+            self.assertIn(want, css)
+
+
     def test_page_contains_experimental_monitor_anchors(self):
         self.start()
         page = self.get()[2].decode()
@@ -445,6 +477,69 @@ class WebControlTests(WebBase):
         self.assertEqual(s, 413)
         self.assertEqual(self.do("nonsense")[0], 404)
         self.assertEqual(self.do("stop", headers={"Content-Type": "application/json"})[0], 200)
+
+    def test_fund_reserve_generates_address_only_on_explicit_action(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        calls = []
+        real = self.chain.get_new_address
+
+        def counted(wallet, label=""):
+            calls.append((wallet, label))
+            return real(wallet, label)
+
+        self.chain.get_new_address = counted
+        self.up(wallet_roles=roles)
+
+        # Ordinary dashboard reads must never derive addresses.
+        self.snap()
+        self.snap()
+        self.assertEqual(calls, [])
+
+        s, out = self.do(
+            "fund_reserve_address",
+            {"wallet": "flab_source"},
+        )
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(out["wallet"], "flab_source")
+        self.assertTrue(out["address"])
+        self.assertEqual(
+            calls,
+            [("flab_source", "flowlab-reserve")],
+        )
+
+        info = self.chain.get_address_info(
+            "flab_source",
+            out["address"],
+        )
+        self.assertTrue(info["ismine"])
+
+    def test_fund_reserve_refuses_non_reserve_wallet(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(wallet_roles=roles)
+
+        s, out = self.do(
+            "fund_reserve_address",
+            {"wallet": "flab_a"},
+        )
+
+        self.assertEqual(s, 400)
+        self.assertIn("reserve role", out["error"])
+
 
     def test_read_only_switches_every_action_off(self):
         self.up(control=False)
