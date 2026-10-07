@@ -177,8 +177,31 @@ class WebReadTests(WebBase):
             'id="m-mode"',
             'id="m-hops-l"',
             'id="panel-experimental"',
+            "transaction jobs",
+            "total network fees",
         ):
             self.assertIn(want, page)
+
+        app = self.get("/app.js")[2].decode()
+        css = self.get("/app.css")[2].decode()
+
+        for want in (
+            "walletRoleGroup",
+            "wallet-group",
+            "wallet-role",
+            "wallet-balance",
+        ):
+            self.assertIn(want, app)
+
+        for want in (
+            ".wallet-group",
+            ".wallet-role.role-reserve",
+            ".wallet-role.role-stage",
+            ".wallet-role.role-worker",
+            ".wallet-role.role-hub",
+            ".wallet-role.role-destination",
+        ):
+            self.assertIn(want, css)
 
     def test_form_script_contains_both_experiment_modes(self):
         self.start()

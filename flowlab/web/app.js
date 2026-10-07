@@ -400,6 +400,16 @@ function walletRoleName(wallet, roles) {
   return null;
 }
 
+function walletRoleGroup(role) {
+  return {
+    reserve: "Reserve",
+    stage: "Stage",
+    worker: "Workers",
+    hub: "Hubs",
+    destination: "Destination"
+  }[role] || "Other";
+}
+
 
 function render(data) {
   last = data; fetchedAt = performance.now();
@@ -436,20 +446,47 @@ function render(data) {
   if (e.state === "CONFIGURED") hops.append(h("div", "mute", "Not approved yet. The plan is shown above the table."));
   const bal = data.balances, tot = bal ? Object.values(bal).reduce((a, v) => a + (v || 0), 0) : 0;
   if (!bal) wal.appendChild(h("div", "mute", "Balances need the node, which is not answering."));
-  else for (const w of orderedWalletNames(bal, data.wallet_roles || {})) {
-    const r = h("div", "w"), bar = h("div", "bar"), i = h("i");
-    const role = walletRoleName(w, data.wallet_roles || {});
-    const name = role ? w + " · " + role : w;
+  else {
+    let lastRole = null;
 
-    i.style.width = (tot && bal[w] ? Math.round(100 * bal[w] / tot) : 0) + "%";
-    bar.appendChild(i);
+    for (const w of orderedWalletNames(bal, data.wallet_roles || {})) {
+      const role = walletRoleName(w, data.wallet_roles || {});
+      const group = walletRoleGroup(role);
 
-    r.append(
-      h("span", null, name),
-      h("span", null, bal[w] == null ? "-" : dgb(bal[w]) + " DGB"),
-      bar
-    );
-    wal.appendChild(r);
+      if (role !== lastRole) {
+        wal.appendChild(h("div", "wallet-group", group));
+        lastRole = role;
+      }
+
+      const r = h("div", "w"), bar = h("div", "bar"), i = h("i");
+      const ident = h("div", "wallet-ident");
+      const name = h("span", "wallet-name mono", w);
+      const roleBadge = h(
+        "span",
+        "wallet-role role-" + (role || "other"),
+        role || "other"
+      );
+      const amount = h(
+        "span",
+        "wallet-balance mono",
+        bal[w] == null ? "-" : dgb(bal[w]) + " DGB"
+      );
+
+      if (role) r.classList.add("role-" + role);
+      if (bal[w] === 0) r.classList.add("zero");
+
+      ident.append(name, roleBadge);
+
+      i.style.width = (
+        tot && bal[w]
+        ? Math.round(100 * bal[w] / tot)
+        : 0
+      ) + "%";
+
+      bar.appendChild(i);
+      r.append(ident, amount, bar);
+      wal.appendChild(r);
+    }
   }
   s.events.forEach(x => {
     const d = h("div", "ev"), e1 = x.event.charAt(0) + x.event.slice(1).toLowerCase();
