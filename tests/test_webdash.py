@@ -1625,6 +1625,72 @@ class WebControlTests(WebBase):
         self.assertEqual(s, 400)
         self.assertIn("worker or hub role", out["error"])
 
+    def test_deterministic_allocation_wallet_may_have_stage_role(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(
+            wallet_roles=roles,
+            wallets=tuple(self.chain.wallets) + ("flab_stage",),
+        )
+
+        cfg = {
+            "flows": [{
+                "description": "deterministic staged flow",
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "flow_wallets": [
+                    "flab_stage",
+                    "flab_a",
+                    "flab_b",
+                ],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "transfers": [
+                    {
+                        "from": "flab_source",
+                        "to": "flab_stage",
+                        "amount_sats": 500_000_000,
+                        "delay_seconds": 0,
+                    },
+                    {
+                        "from": "flab_stage",
+                        "to": "flab_a",
+                        "amount_sats": 100_000_000,
+                        "delay_seconds": 0,
+                    },
+                    {
+                        "from": "flab_a",
+                        "to": "flab_b",
+                        "amount_sats": "all",
+                        "delay_seconds": 0,
+                    },
+                    {
+                        "from": "flab_b",
+                        "to": "flab_dest",
+                        "amount_sats": "all",
+                        "delay_seconds": 0,
+                    },
+                ],
+            }],
+            "confirmations_required": 1,
+            "fee_policy": {"type": "minimum"},
+            "address_policy": "new",
+        }
+
+        status, out = self.do("new", {
+            "config": cfg,
+            "description": "deterministic staged flow",
+        })
+
+        self.assertEqual(status, 200, out)
+        self.assertIn("exp", out)
+
     def test_compile_play_refuses_unknown_play(self):
         self.up()
 

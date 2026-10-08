@@ -444,6 +444,7 @@ class Controller:
                 )
 
             reserve = set(self.wallet_roles.get("reserve", []))
+            stage_role = set(self.wallet_roles.get("stage", []))
             workload = (
                 set(self.wallet_roles.get("workers", []))
                 | set(self.wallet_roles.get("hubs", []))
@@ -476,8 +477,19 @@ class Controller:
                                 "must have destination role"
                             )
 
+                    intermediates = set(fl["flow_wallets"])
+                    allocation_wallet = fl.get("allocation_wallet")
+
+                    if allocation_wallet is not None:
+                        if allocation_wallet not in stage_role:
+                            raise ControlError(
+                                f"deterministic allocation wallet "
+                                f"{allocation_wallet} must have stage role"
+                            )
+                        intermediates.discard(allocation_wallet)
+
                     wrong_workers = sorted(
-                        set(fl["flow_wallets"]) - workload
+                        intermediates - workload
                     )
                     if wrong_workers:
                         raise ControlError(
