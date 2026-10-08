@@ -613,6 +613,635 @@ def generate_experimental_job(
     return job_id
 
 
+def settlement_cycle_decision(
+        engine,
+        flow_id,
+        phase,
+        decision_index,
+        balances_sats,
+        fee_reserve_sats=0,
+):
+    """Return one reproducible Settlement Cycle workload decision."""
+    if phase not in ("workload", "return_workload"):
+        raise PlanError(
+            "Settlement Cycle decision phase must be "
+            "workload or return_workload"
+        )
+
+    if (
+        not isinstance(decision_index, int)
+        or isinstance(decision_index, bool)
+        or decision_index < 0
+    ):
+        raise PlanError(
+            "decision_index must be a non-negative integer"
+        )
+
+    if (
+        not isinstance(fee_reserve_sats, int)
+        or isinstance(fee_reserve_sats, bool)
+        or fee_reserve_sats < 0
+    ):
+        raise PlanError(
+            "fee_reserve_sats must be a non-negative integer"
+        )
+
+    if not isinstance(balances_sats, dict):
+        raise PlanError(
+            "balances_sats must be a wallet -> integer sats mapping"
+        )
+
+    for wallet, value in balances_sats.items():
+        if (
+            not isinstance(wallet, str)
+            or not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise PlanError(
+                "balances_sats must contain non-negative "
+                "integer satoshi balances"
+            )
+
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(
+        engine.get_experiment(flow["experiment_id"])["config_json"]
+    )
+
+    play = cfg.get("play") or {}
+    if not (
+        play.get("name") == "settlement_cycle"
+        and play.get("version") == 1
+    ):
+        raise PlanError(
+            "settlement_cycle_decision requires Settlement Cycle V1"
+        )
+
+    matches = [
+        (i, f)
+        for i, f in enumerate(cfg["flows"])
+        if f["source_wallet"] == flow["source_wallet"]
+        and destination_identity(f) == flow["destination_wallet"]
+    ]
+
+    if len(matches) != 1:
+        raise PlanError(
+            "cannot match this flow to exactly one flow "
+            "in the approved config"
+        )
+
+    flow_index, _ = matches[0]
+
+    rnd = cfg.get("randomization") or {}
+    if not (
+        rnd.get("enabled") is True
+        and rnd.get("model") == "seeded_deterministic"
+    ):
+        raise PlanError(
+            "Settlement Cycle requires seeded_deterministic "
+            "randomization"
+        )
+
+    cycle = cfg["settlement_cycle"]
+
+    if phase == "workload":
+        spec_name = "outbound"
+        source_name = "settlement cycle outbound"
+    else:
+        spec_name = "return"
+        source_name = "settlement cycle return"
+
+    spec = cycle[spec_name]
+    minimum = spec["amount_sats_min"]
+
+    material = (
+        f"flowlab-settlement-v{GENERATOR_VERSION}:"
+        f"{rnd['seed']}:{flow_index}:{phase}:{decision_index}"
+    ).encode()
+
+    derived_seed = int.from_bytes(
+        hashlib.sha256(material).digest(),
+        "big",
+    )
+    rng = random.Random(derived_seed)
+
+    def spendable(transition):
+        return (
+            balances_sats.get(transition["from"], 0)
+            - fee_reserve_sats
+        )
+
+    eligible = [
+        transition
+        for transition in spec["transitions"]
+        if spendable(transition) >= minimum
+    ]
+
+    if not eligible:
+        raise PlanError(
+            "no approved Settlement Cycle transition currently "
+            "has enough confirmed balance"
+        )
+
+    route = eligible[rng.randrange(len(eligible))]
+
+    available = min(
+        spec["amount_sats_max"],
+        spendable(route),
+    )
+
+    if available < minimum:
+        raise PlanError(
+            "selected Settlement Cycle route cannot satisfy "
+            "the approved minimum amount"
+        )
+
+    amount = rng.randint(
+        minimum,
+        available,
+    )
+
+    delay = rng.randint(
+        spec["delay_seconds_min"],
+        spec["delay_seconds_max"],
+    )
+
+    return {
+        "from": route["from"],
+        "to": route["to"],
+        "amount_sats": amount,
+        "delay_seconds": delay,
+        "generated_from": {
+            "source": source_name,
+            "phase": phase,
+            "generator_version": GENERATOR_VERSION,
+            "model": rnd["model"],
+            "seed": rnd["seed"],
+            "flow_index": flow_index,
+            "decision_index": decision_index,
+            "eligible_transition_count": len(eligible),
+            "observed_balance_sats":
+                balances_sats.get(route["from"], 0),
+            "fee_reserve_sats": fee_reserve_sats,
+        },
+    }
+
+
+def generate_settlement_cycle_phase_job(
+        engine,
+        flow_id,
+        balances_sats,
+        fee_reserve_sats=0,
+):
+    """Generate one Settlement Cycle V1 lifecycle job."""
+    if (
+        not isinstance(fee_reserve_sats, int)
+        or isinstance(fee_reserve_sats, bool)
+        or fee_reserve_sats < 0
+    ):
+        raise PlanError(
+            "fee_reserve_sats must be a non-negative integer"
+        )
+
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(
+        engine.get_experiment(flow["experiment_id"])["config_json"]
+    )
+
+    play = cfg.get("play") or {}
+    if not (
+        play.get("name") == "settlement_cycle"
+        and play.get("version") == 1
+    ):
+        raise PlanError(
+            "generate_settlement_cycle_phase_job requires "
+            "Settlement Cycle V1"
+        )
+
+    cycle = cfg["settlement_cycle"]
+    stage = cycle["settlement"]["source_wallet"]
+
+    jobs = engine.list_jobs(flow_id)
+
+    if any(job["state"] != "CONFIRMED" for job in jobs):
+        raise PlanError(
+            "previous Settlement Cycle job must be confirmed "
+            "before generating the next"
+        )
+
+    progress = settlement_cycle_progress(
+        engine,
+        flow_id,
+    )
+
+    if progress["transaction_limit_reached"]:
+        raise PlanError(
+            "Settlement Cycle max_total_transactions reached"
+        )
+
+    phase = settlement_cycle_next_phase(
+        engine,
+        flow_id,
+        balances_sats,
+    )
+
+    depends_on = [jobs[-1]["id"]] if jobs else ()
+
+    if phase in ("workload", "return_workload"):
+        if phase == "workload":
+            decision_index = progress["outbound_decisions"]
+        else:
+            decision_index = progress["return_decisions"]
+
+        decision = settlement_cycle_decision(
+            engine,
+            flow_id,
+            phase,
+            decision_index,
+            balances_sats=balances_sats,
+            fee_reserve_sats=fee_reserve_sats,
+        )
+
+        generated_from = dict(decision["generated_from"])
+        generated_from["balance_snapshot_sats"] = dict(
+            balances_sats
+        )
+
+        return engine.add_job(
+            flow_id,
+            {
+                "from": decision["from"],
+                "to": decision["to"],
+                "amount_sats": decision["amount_sats"],
+                "step": len(jobs),
+            },
+            planned_delay_s=decision["delay_seconds"],
+            generated_from=generated_from,
+            depends_on=depends_on,
+        )
+
+    if phase == "settlement":
+        spec = cycle["settlement"]
+
+        material = (
+            f"flowlab-settlement-delay-v{GENERATOR_VERSION}:"
+            f"{cfg['randomization']['seed']}:"
+            f"{flow_id}:settlement"
+        ).encode()
+
+        derived_seed = int.from_bytes(
+            hashlib.sha256(material).digest(),
+            "big",
+        )
+        rng = random.Random(derived_seed)
+
+        delay = rng.randint(
+            spec["delay_seconds_min"],
+            spec["delay_seconds_max"],
+        )
+
+        return engine.add_job(
+            flow_id,
+            {
+                "from": spec["source_wallet"],
+                "amount_sats": "all",
+                "settlement": spec,
+                "step": len(jobs),
+            },
+            planned_delay_s=delay,
+            generated_from={
+                "source": "settlement cycle settlement",
+                "phase": "settlement",
+                "generator_version": GENERATOR_VERSION,
+                "model": cfg["randomization"]["model"],
+                "seed": cfg["randomization"]["seed"],
+                "balance_snapshot_sats": dict(balances_sats),
+            },
+            depends_on=depends_on,
+        )
+
+    if phase == "consolidation":
+        internal_wallets = list(dict.fromkeys([
+            *cycle["hubs"],
+            *cycle["workers"],
+        ]))
+
+        for wallet in internal_wallets:
+            balance = balances_sats.get(wallet, 0)
+
+            if (
+                not isinstance(balance, int)
+                or isinstance(balance, bool)
+                or balance < 0
+            ):
+                raise PlanError(
+                    "Settlement Cycle consolidation balances must be "
+                    "non-negative integer satoshis"
+                )
+
+            if balance == 0:
+                continue
+
+            if balance <= fee_reserve_sats:
+                raise PlanError(
+                    f"wallet {wallet} balance {balance} sats does not "
+                    f"cover consolidation fee reserve "
+                    f"{fee_reserve_sats}"
+                )
+
+            return engine.add_job(
+                flow_id,
+                {
+                    "from": wallet,
+                    "to": stage,
+                    "amount_sats": "all",
+                    "step": len(jobs),
+                },
+                planned_delay_s=0,
+                generated_from={
+                    "source": "settlement cycle consolidation",
+                    "phase": "consolidation",
+                    "wallet": wallet,
+                    "stage_wallet": stage,
+                    "balance_snapshot_sats":
+                        dict(balances_sats),
+                    "fee_reserve_sats":
+                        fee_reserve_sats,
+                },
+                depends_on=depends_on,
+            )
+
+        raise PlanError(
+            "Settlement Cycle consolidation requested with no "
+            "positive internal wallet balance"
+        )
+
+    if phase == "reserve_return":
+        spec = cycle["reserve_return"]
+        stage_balance = balances_sats.get(spec["from_wallet"], 0)
+
+        if (
+            not isinstance(stage_balance, int)
+            or isinstance(stage_balance, bool)
+            or stage_balance < 0
+        ):
+            raise PlanError(
+                "Settlement Cycle Stage balance must be a "
+                "non-negative integer number of satoshis"
+            )
+
+        if stage_balance <= fee_reserve_sats:
+            raise PlanError(
+                f"Stage balance {stage_balance} sats does not cover "
+                f"reserve-return fee reserve {fee_reserve_sats}"
+            )
+
+        material = (
+            f"flowlab-settlement-delay-v{GENERATOR_VERSION}:"
+            f"{cfg['randomization']['seed']}:"
+            f"{flow_id}:reserve_return"
+        ).encode()
+
+        derived_seed = int.from_bytes(
+            hashlib.sha256(material).digest(),
+            "big",
+        )
+        rng = random.Random(derived_seed)
+
+        delay = rng.randint(
+            spec["delay_seconds_min"],
+            spec["delay_seconds_max"],
+        )
+
+        return engine.add_job(
+            flow_id,
+            {
+                "from": spec["from_wallet"],
+                "to": spec["to_wallet"],
+                "amount_sats": "all",
+                "step": len(jobs),
+            },
+            planned_delay_s=delay,
+            generated_from={
+                "source": "settlement cycle reserve return",
+                "phase": "reserve_return",
+                "generator_version": GENERATOR_VERSION,
+                "model": cfg["randomization"]["model"],
+                "seed": cfg["randomization"]["seed"],
+                "stage_wallet": spec["from_wallet"],
+                "reserve_wallet": spec["to_wallet"],
+                "balance_snapshot_sats":
+                    dict(balances_sats),
+                "fee_reserve_sats":
+                    fee_reserve_sats,
+            },
+            depends_on=depends_on,
+        )
+
+    raise PlanError(
+        f"Settlement Cycle phase {phase!r} does not yet have "
+        "a job generator"
+    )
+
+
+def settlement_cycle_next_phase(engine, flow_id, balances_sats):
+    """Return the next Settlement Cycle V1 lifecycle phase."""
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(
+        engine.get_experiment(flow["experiment_id"])["config_json"]
+    )
+
+    play = cfg.get("play") or {}
+    if not (
+        play.get("name") == "settlement_cycle"
+        and play.get("version") == 1
+    ):
+        raise PlanError(
+            "settlement_cycle_next_phase requires Settlement Cycle V1"
+        )
+
+    cycle = cfg.get("settlement_cycle")
+    if not isinstance(cycle, dict):
+        raise PlanError(
+            "approved Settlement Cycle config is missing settlement_cycle"
+        )
+
+    if not isinstance(balances_sats, dict):
+        raise PlanError(
+            "Settlement Cycle balances must be a wallet -> sats mapping"
+        )
+
+    for wallet, value in balances_sats.items():
+        if (
+            not isinstance(wallet, str)
+            or not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise PlanError(
+                "Settlement Cycle balances must contain "
+                "non-negative integer satoshi balances"
+            )
+
+    jobs = engine.list_jobs(flow_id)
+
+    def phase_jobs(phase):
+        result = []
+        for job in jobs:
+            generated = json.loads(
+                job["generated_from_json"] or "{}"
+            )
+            if generated.get("phase") == phase:
+                result.append(job)
+        return result
+
+    # Never plan past an unfinished persisted transaction.
+    unfinished = [
+        job for job in jobs
+        if job["state"] != "CONFIRMED"
+    ]
+    if unfinished:
+        generated = json.loads(
+            unfinished[0]["generated_from_json"] or "{}"
+        )
+        phase = generated.get("phase")
+        if not isinstance(phase, str) or not phase:
+            raise PlanError(
+                "unfinished Settlement Cycle job has no lifecycle phase"
+            )
+        return phase
+
+    allocation_jobs = phase_jobs("allocation")
+    if not allocation_jobs:
+        return "allocation"
+
+    progress = settlement_cycle_progress(
+        engine,
+        flow_id,
+    )
+
+    if progress["outbound_decisions"] < cycle["outbound"]["decisions"]:
+        if progress["transaction_limit_reached"]:
+            raise PlanError(
+                "Settlement Cycle max_total_transactions reached "
+                "before outbound workload completed"
+            )
+        return "workload"
+
+    settlement_jobs = phase_jobs("settlement")
+
+    internal_wallets = list(dict.fromkeys([
+        *cycle["hubs"],
+        *cycle["workers"],
+    ]))
+
+    internal_balance = sum(
+        balances_sats.get(wallet, 0)
+        for wallet in internal_wallets
+    )
+
+    # Before the intermediate settlement, every worker/hub balance
+    # must first return to Stage.
+    if not settlement_jobs:
+        if internal_balance > 0:
+            if progress["transaction_limit_reached"]:
+                raise PlanError(
+                    "Settlement Cycle max_total_transactions reached "
+                    "before pre-settlement consolidation completed"
+                )
+            return "consolidation"
+
+        if progress["transaction_limit_reached"]:
+            raise PlanError(
+                "Settlement Cycle max_total_transactions reached "
+                "before settlement"
+            )
+        return "settlement"
+
+    if progress["return_decisions"] < cycle["return"]["decisions"]:
+        if progress["transaction_limit_reached"]:
+            raise PlanError(
+                "Settlement Cycle max_total_transactions reached "
+                "before return workload completed"
+            )
+        return "return_workload"
+
+    # After the return workload, consolidate again before returning
+    # the retained experiment principal to Reserve.
+    if internal_balance > 0:
+        if progress["transaction_limit_reached"]:
+            raise PlanError(
+                "Settlement Cycle max_total_transactions reached "
+                "before return consolidation completed"
+            )
+        return "consolidation"
+
+    reserve_return_jobs = phase_jobs("reserve_return")
+    if reserve_return_jobs:
+        return "complete"
+
+    if progress["transaction_limit_reached"]:
+        raise PlanError(
+            "Settlement Cycle max_total_transactions reached "
+            "before reserve return"
+        )
+
+    return "reserve_return"
+
+
+def settlement_cycle_progress(engine, flow_id):
+    """Return deterministic persisted progress for Settlement Cycle V1."""
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(
+        engine.get_experiment(flow["experiment_id"])["config_json"]
+    )
+
+    play = cfg.get("play") or {}
+    if not (
+        play.get("name") == "settlement_cycle"
+        and play.get("version") == 1
+    ):
+        raise PlanError(
+            "settlement_cycle_progress requires Settlement Cycle V1"
+        )
+
+    cycle = cfg.get("settlement_cycle")
+    if not isinstance(cycle, dict):
+        raise PlanError(
+            "approved Settlement Cycle config is missing settlement_cycle"
+        )
+
+    jobs = engine.list_jobs(flow_id)
+
+    outbound = 0
+    returned = 0
+
+    for job in jobs:
+        generated = json.loads(
+            job["generated_from_json"] or "{}"
+        )
+        phase = generated.get("phase")
+
+        if phase == "workload":
+            outbound += 1
+        elif phase == "return_workload":
+            returned += 1
+
+    maximum = cycle["max_total_transactions"]
+
+    return {
+        "outbound_decisions": outbound,
+        "return_decisions": returned,
+        "total_transactions": len(jobs),
+        "all_jobs_confirmed": all(
+            job["state"] == "CONFIRMED"
+            for job in jobs
+        ),
+        "max_total_transactions": maximum,
+        "transaction_limit_reached": len(jobs) >= maximum,
+    }
+
+
 def generate_jobs(engine, flow_id, play_context=None):
     """Create one job per configured transfer, in order. Returns the job ids."""
     if engine.list_jobs(flow_id):

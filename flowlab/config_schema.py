@@ -54,13 +54,47 @@ MAX_DESTINATIONS = 10
 DESTINATION_MODES = ("percentage", "fixed")
 
 
+def settlement_cycle_identity(flow, cycle):
+    """Return the stable DB identity for one Settlement Cycle V1 flow.
+
+    The identity commits to both the flow-level allocation/topology fields
+    and the complete Settlement Cycle lifecycle contract. The identity
+    itself is deliberately excluded from the hashed payload.
+    """
+    payload = {
+        "version": 1,
+        "flow": {
+            "source_wallet": flow["source_wallet"],
+            "allocation_wallet": flow["allocation_wallet"],
+            "flow_wallets": flow["flow_wallets"],
+            "allocation_sats": flow["allocation_sats"],
+        },
+        "settlement_cycle": cycle,
+    }
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    digest = hashlib.sha256(encoded).hexdigest()
+    return f"settlement_cycle:{digest}"
+
+
 def destination_identity(flow):
     """Stable flow identity for DB matching.
 
     Legacy single-destination configs retain their old endpoint string.
-    New multi-destination configs use a deterministic hash marker so the
-    existing flows.destination_wallet TEXT column can remain unchanged.
+    Multi-destination and Settlement Cycle configs use deterministic
+    synthetic markers so the existing flows.destination_wallet TEXT
+    column can remain unchanged.
     """
+    flow_identity = flow.get("flow_identity")
+
+    if isinstance(flow_identity, str) and flow_identity:
+        return flow_identity
+
     if flow.get("destinations") is None:
         return destination_endpoint(flow)
 
@@ -372,7 +406,10 @@ def validate(cfg):
             "config.play must contain exactly name and version",
         )
         _need(
-            play.get("name") == "fan_out_fan_in",
+            play.get("name") in (
+                "fan_out_fan_in",
+                "settlement_cycle",
+            ),
             "config.play.name is not supported",
         )
         _need(
@@ -380,11 +417,62 @@ def validate(cfg):
             "config.play.version is not supported",
         )
 
+    settlement_cycle_play = (
+        isinstance(play, dict)
+        and play.get("name") == "settlement_cycle"
+        and play.get("version") == 1
+    )
+
+    if settlement_cycle_play:
+        cycle = cfg.get("settlement_cycle")
+
+        _need(
+            isinstance(cycle, dict),
+            "config.settlement_cycle must be an object",
+        )
+        _need(
+            set(cycle) == {
+                "workers",
+                "hubs",
+                "outbound",
+                "settlement",
+                "return",
+                "reserve_return",
+                "max_total_transactions",
+            },
+            "config.settlement_cycle has unsupported fields",
+        )
+
     flows = cfg.get("flows")
     _need(isinstance(flows, list) and flows, "config.flows must be a non-empty list")
     for i, fl in enumerate(flows):
         where = f"flows[{i}]"
         _need(isinstance(fl, dict), f"{where} must be an object")
+
+        if settlement_cycle_play:
+            flow_identity = fl.get("flow_identity")
+
+            _need(
+                isinstance(flow_identity, str)
+                and flow_identity.startswith("settlement_cycle:"),
+                f"{where}.flow_identity must be a Settlement Cycle identity",
+            )
+
+            expected_identity = settlement_cycle_identity(
+                fl,
+                cfg["settlement_cycle"],
+            )
+
+            _need(
+                flow_identity == expected_identity,
+                f"{where}.flow_identity does not match the immutable "
+                "Settlement Cycle contract",
+            )
+        else:
+            _need(
+                fl.get("flow_identity") is None,
+                f"{where}.flow_identity is only valid for Settlement Cycle",
+            )
         _need(
             isinstance(fl.get("source_wallet"), str) and fl["source_wallet"],
             f"{where}.source_wallet required",
@@ -400,15 +488,24 @@ def validate(cfg):
         )
         has_destination_set = fl.get("destinations") is not None
 
-        _need(
-            sum((
-                bool(has_destination_wallet),
-                bool(has_destination_address),
-                bool(has_destination_set),
-            )) == 1,
-            f"{where} requires exactly one destination definition: "
-            "destination_wallet, destination_address, or destinations",
-        )
+        destination_count = sum((
+            bool(has_destination_wallet),
+            bool(has_destination_address),
+            bool(has_destination_set),
+        ))
+
+        if settlement_cycle_play:
+            _need(
+                destination_count == 0,
+                f"{where}: Settlement Cycle must not define a "
+                "terminal destination",
+            )
+        else:
+            _need(
+                destination_count == 1,
+                f"{where} requires exactly one destination definition: "
+                "destination_wallet, destination_address, or destinations",
+            )
 
         legacy_destination = (
             fl["destination_wallet"]
@@ -497,6 +594,44 @@ def validate(cfg):
                 f"{where}.finalization_wallet is only valid with destinations",
             )
 
+        if settlement_cycle_play:
+            cycle = cfg["settlement_cycle"]
+
+            _need(
+                fl.get("allocation_wallet") is not None,
+                f"{where}.allocation_wallet required for Settlement Cycle",
+            )
+            _need(
+                cycle["reserve_return"]["from_wallet"]
+                == fl["allocation_wallet"],
+                "Settlement Cycle reserve return must originate from "
+                "allocation_wallet",
+            )
+            _need(
+                cycle["reserve_return"]["to_wallet"]
+                == fl["source_wallet"],
+                "Settlement Cycle reserve return must return to source_wallet",
+            )
+
+            expected_flow_wallets = [
+                fl["allocation_wallet"],
+                *cycle["hubs"],
+                *cycle["workers"],
+            ]
+
+            _need(
+                fl["flow_wallets"] == expected_flow_wallets,
+                f"{where}.flow_wallets do not match the approved "
+                "Settlement Cycle topology",
+            )
+
+            _need(
+                cycle["settlement"]["source_wallet"]
+                == fl["allocation_wallet"],
+                "Settlement Cycle settlement source must be "
+                "allocation_wallet",
+            )
+
         fl.setdefault("description", "")
         if fl.get("repeat") is not None:
             _need(
@@ -574,6 +709,305 @@ def validate(cfg):
     rnd = cfg.get("randomization", {"enabled": False})
     _need(isinstance(rnd, dict) and isinstance(rnd.get("enabled"), bool),
           "randomization.enabled must be a bool")
+
+    if settlement_cycle_play:
+        _need(
+            rnd.get("enabled") is True,
+            "Settlement Cycle requires randomization.enabled=true",
+        )
+        _need(
+            rnd.get("model") == "seeded_deterministic",
+            "Settlement Cycle requires seeded_deterministic randomization",
+        )
+        _need(
+            _is_int(rnd.get("seed")) and rnd["seed"] >= 0,
+            "Settlement Cycle seed must be a non-negative integer",
+        )
+
+        cycle = cfg["settlement_cycle"]
+
+        _need(
+            isinstance(cycle["workers"], list)
+            and len(cycle["workers"]) >= 2
+            and all(
+                isinstance(w, str) and w
+                for w in cycle["workers"]
+            ),
+            "Settlement Cycle requires at least two workers",
+        )
+        _need(
+            isinstance(cycle["hubs"], list)
+            and all(
+                isinstance(w, str) and w
+                for w in cycle["hubs"]
+            ),
+            "Settlement Cycle hubs must be a list of wallet names",
+        )
+
+        for phase_name in ("outbound", "return"):
+            phase = cycle[phase_name]
+
+            _need(
+                isinstance(phase, dict)
+                and set(phase) == {
+                    "decisions",
+                    "amount_sats_min",
+                    "amount_sats_max",
+                    "delay_seconds_min",
+                    "delay_seconds_max",
+                    "multi_output",
+                    "transitions",
+                },
+                f"Settlement Cycle {phase_name} contract is invalid",
+            )
+            _need(
+                _is_int(phase["decisions"])
+                and phase["decisions"] > 0,
+                f"Settlement Cycle {phase_name}.decisions "
+                "must be positive",
+            )
+            _need(
+                phase["multi_output"] is True,
+                f"Settlement Cycle {phase_name} must enable "
+                "multi-output",
+            )
+            _need(
+                _is_int(phase["amount_sats_min"])
+                and phase["amount_sats_min"] > 0
+                and _is_int(phase["amount_sats_max"])
+                and phase["amount_sats_max"]
+                >= phase["amount_sats_min"],
+                f"Settlement Cycle {phase_name} amount bounds "
+                "are invalid",
+            )
+            _need(
+                _is_int(phase["delay_seconds_min"])
+                and phase["delay_seconds_min"] >= 0
+                and _is_int(phase["delay_seconds_max"])
+                and phase["delay_seconds_max"]
+                >= phase["delay_seconds_min"],
+                f"Settlement Cycle {phase_name} delay bounds "
+                "are invalid",
+            )
+
+            _need(
+                isinstance(phase["transitions"], list)
+                and phase["transitions"],
+                f"Settlement Cycle {phase_name}.transitions "
+                "must be a non-empty list",
+            )
+
+            for i, transition in enumerate(
+                    phase["transitions"]
+            ):
+                _need(
+                    isinstance(transition, dict)
+                    and set(transition) == {"from", "to"}
+                    and isinstance(transition["from"], str)
+                    and bool(transition["from"])
+                    and isinstance(transition["to"], str)
+                    and bool(transition["to"])
+                    and transition["from"] != transition["to"],
+                    f"Settlement Cycle {phase_name}.transitions[{i}] "
+                    "is invalid",
+                )
+
+            stage = fl["allocation_wallet"]
+            workers = cycle["workers"]
+            hubs = cycle["hubs"]
+
+            if phase_name == "outbound":
+                expected_transitions = [
+                    *(
+                        {"from": stage, "to": hub}
+                        for hub in hubs
+                    ),
+                    *(
+                        {"from": stage, "to": worker}
+                        for worker in workers
+                    ),
+                    *(
+                        {"from": hub, "to": worker}
+                        for hub in hubs
+                        for worker in workers
+                    ),
+                ]
+            else:
+                expected_transitions = [
+                    *(
+                        {"from": stage, "to": hub}
+                        for hub in hubs
+                    ),
+                    *(
+                        {"from": stage, "to": worker}
+                        for worker in workers
+                    ),
+                    *(
+                        {"from": hub, "to": worker}
+                        for hub in hubs
+                        for worker in workers
+                    ),
+                ]
+
+            _need(
+                phase["transitions"] == expected_transitions,
+                f"Settlement Cycle {phase_name}.transitions "
+                "do not match the approved topology",
+            )
+
+        settlement = cycle["settlement"]
+
+        _need(
+            isinstance(settlement, dict)
+            and set(settlement) == {
+                "source_wallet",
+                "mode",
+                "items",
+                "retain_remainder",
+                "delay_seconds_min",
+                "delay_seconds_max",
+            },
+            "Settlement Cycle settlement contract is invalid",
+        )
+        _need(
+            settlement["mode"] in DESTINATION_MODES,
+            "Settlement Cycle settlement mode must be "
+            "percentage or fixed",
+        )
+        _need(
+            settlement["retain_remainder"] is True,
+            "Settlement Cycle must retain a remainder",
+        )
+        _need(
+            isinstance(settlement["items"], list)
+            and 1 <= len(settlement["items"]) <= MAX_DESTINATIONS,
+            "Settlement Cycle settlement requires 1..10 payouts",
+        )
+
+        settlement_targets = []
+        settlement_total = 0
+
+        for i, item in enumerate(settlement["items"]):
+            w = f"settlement_cycle.settlement.items[{i}]"
+
+            _need(isinstance(item, dict), f"{w} must be an object")
+
+            kind = item.get("type")
+            _need(
+                kind in ("wallet", "address"),
+                f"{w}.type must be wallet or address",
+            )
+
+            target_key = "wallet" if kind == "wallet" else "address"
+            target = item.get(target_key)
+
+            _need(
+                isinstance(target, str) and target,
+                f"{w}.{target_key} must be a non-empty string",
+            )
+            settlement_targets.append((kind, target))
+
+            value_key = (
+                "percent_bps"
+                if settlement["mode"] == "percentage"
+                else "amount_sats"
+            )
+
+            _need(
+                set(item) == {"type", target_key, value_key},
+                f"{w} has unsupported fields",
+            )
+
+            value = item[value_key]
+
+            _need(
+                _is_int(value) and value > 0,
+                f"{w}.{value_key} must be a positive integer",
+            )
+
+            if settlement["mode"] == "percentage":
+                _need(
+                    value <= 10_000,
+                    f"{w}.percent_bps must be <= 10000",
+                )
+
+            settlement_total += value
+
+        _need(
+            len(set(settlement_targets))
+            == len(settlement_targets),
+            "Settlement Cycle settlement contains duplicate targets",
+        )
+
+        smallest_alloc = min(
+            fl["allocation_sats"]
+            for fl in flows
+        )
+
+        if settlement["mode"] == "percentage":
+            _need(
+                settlement_total < 10_000,
+                "Settlement Cycle payout percentages must total "
+                "less than 10000 basis points",
+            )
+        else:
+            _need(
+                settlement_total < smallest_alloc,
+                "Settlement Cycle fixed payouts must leave retained "
+                "experiment value",
+            )
+
+        for lo, hi in (
+            ("delay_seconds_min", "delay_seconds_max"),
+        ):
+            _need(
+                _is_int(settlement[lo])
+                and settlement[lo] >= 0
+                and _is_int(settlement[hi])
+                and settlement[hi] >= settlement[lo],
+                "Settlement Cycle settlement delay bounds are invalid",
+            )
+
+        reserve_return = cycle["reserve_return"]
+
+        _need(
+            isinstance(reserve_return, dict)
+            and set(reserve_return) == {
+                "from_wallet",
+                "to_wallet",
+                "delay_seconds_min",
+                "delay_seconds_max",
+            },
+            "Settlement Cycle reserve_return contract is invalid",
+        )
+        _need(
+            _is_int(reserve_return["delay_seconds_min"])
+            and reserve_return["delay_seconds_min"] >= 0
+            and _is_int(reserve_return["delay_seconds_max"])
+            and reserve_return["delay_seconds_max"]
+            >= reserve_return["delay_seconds_min"],
+            "Settlement Cycle reserve-return delay bounds are invalid",
+        )
+        _need(
+            _is_int(cycle["max_total_transactions"])
+            and cycle["max_total_transactions"] > 0,
+            "Settlement Cycle max_total_transactions "
+            "must be positive",
+        )
+
+        # Settlement Cycle owns its phase-specific workload contract.
+        # It does not use the legacy top-level workload/finalization pair.
+        _need(
+            cfg.get("workload") is None,
+            "Settlement Cycle must not define legacy workload",
+        )
+        _need(
+            cfg.get("finalization") is None,
+            "Settlement Cycle must not define legacy finalization",
+        )
+
+        return cfg
+
     if rnd["enabled"]:
         _need(rnd.get("model") in RANDOM_MODELS,
               f"randomization.model must be one of {RANDOM_MODELS}")

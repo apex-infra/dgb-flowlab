@@ -1,6 +1,6 @@
 import unittest
 
-from flowlab.config_schema import validate
+from flowlab.config_schema import destination_identity, validate
 from flowlab.plays import PlayError, compile_play, get_play_spec, list_plays
 
 
@@ -30,6 +30,7 @@ class PlayCatalogTests(unittest.TestCase):
                 "ring",
                 "hub_and_spoke",
                 "fan_out_fan_in",
+                "settlement_cycle",
             ],
         )
 
@@ -393,6 +394,474 @@ class PlayCompilerTests(unittest.TestCase):
             "does not support multi-destination",
         ):
             compile_play("fan_out_fan_in", params)
+
+    def test_settlement_cycle_compiles_v1_contract(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b", "flab_c"],
+            "hubs": ["flab_hub_a"],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 12,
+            "return_decisions": 8,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 30,
+            "settlement_delay_seconds_max": 180,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 60,
+            "confirmations_required": 2,
+            "seed": 104,
+            "max_total_transactions": 100,
+            "settlement": {
+                "mode": "fixed",
+                "items": [
+                    {
+                        "type": "address",
+                        "address": "DExternalSettlementAddress",
+                        "amount_sats": 100_000_000,
+                    },
+                    {
+                        "type": "wallet",
+                        "wallet": "flab_dest",
+                        "amount_sats": 10_000_000,
+                    },
+                ],
+            },
+        }
+
+        cfg = compile_play("settlement_cycle", params)
+
+        self.assertEqual(
+            cfg["play"],
+            {
+                "name": "settlement_cycle",
+                "version": 1,
+            },
+        )
+
+        self.assertEqual(validate(cfg), cfg)
+
+        flow = cfg["flows"][0]
+
+        self.assertEqual(flow["source_wallet"], "flab_source")
+        self.assertEqual(flow["allocation_wallet"], "flab_stage")
+        self.assertEqual(flow["allocation_sats"], 500_000_000)
+
+        # Settlement Cycle returns to its Reserve and therefore does not
+        # masquerade as an ordinary terminal-destination flow.
+        self.assertNotIn("destination_wallet", flow)
+        self.assertNotIn("destination_address", flow)
+        self.assertNotIn("destinations", flow)
+
+        cycle = cfg["settlement_cycle"]
+
+        self.assertEqual(
+            cycle["workers"],
+            ["flab_a", "flab_b", "flab_c"],
+        )
+        self.assertEqual(cycle["hubs"], ["flab_hub_a"])
+
+        self.assertEqual(cycle["outbound"]["decisions"], 12)
+        self.assertEqual(cycle["return"]["decisions"], 8)
+
+        self.assertTrue(cycle["outbound"]["multi_output"])
+        self.assertTrue(cycle["return"]["multi_output"])
+
+        self.assertEqual(
+            cycle["settlement"]["source_wallet"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            cycle["settlement"]["mode"],
+            "fixed",
+        )
+        self.assertEqual(
+            cycle["settlement"]["items"],
+            params["settlement"]["items"],
+        )
+        self.assertTrue(
+            cycle["settlement"]["retain_remainder"]
+        )
+
+        self.assertEqual(
+            cycle["reserve_return"]["from_wallet"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            cycle["reserve_return"]["to_wallet"],
+            "flab_source",
+        )
+
+        self.assertEqual(
+            cycle["max_total_transactions"],
+            100,
+        )
+
+        self.assertEqual(
+            cfg["randomization"],
+            {
+                "enabled": True,
+                "model": "seeded_deterministic",
+                "seed": 104,
+            },
+        )
+
+    def test_settlement_cycle_compiles_explicit_outbound_and_return_routes(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 5,
+            "return_decisions": 5,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 250,
+            "max_total_transactions": 50,
+            "settlement": {
+                "mode": "fixed",
+                "items": [{
+                    "type": "address",
+                    "address": "DExternalA",
+                    "amount_sats": 50_000_000,
+                }],
+            },
+        }
+
+        cfg = compile_play("settlement_cycle", params)
+        cycle = cfg["settlement_cycle"]
+
+        self.assertEqual(
+            cycle["outbound"]["transitions"],
+            [
+                {"from": "flab_stage", "to": "flab_hub_a"},
+                {"from": "flab_stage", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_b"},
+                {"from": "flab_hub_a", "to": "flab_a"},
+                {"from": "flab_hub_a", "to": "flab_b"},
+            ],
+        )
+
+        self.assertEqual(
+            cycle["return"]["transitions"],
+            [
+                {"from": "flab_stage", "to": "flab_hub_a"},
+                {"from": "flab_stage", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_b"},
+                {"from": "flab_hub_a", "to": "flab_a"},
+                {"from": "flab_hub_a", "to": "flab_b"},
+            ],
+        )
+
+    def test_settlement_cycle_without_hubs_routes_stage_to_workers_and_back(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 5,
+            "return_decisions": 5,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 251,
+            "max_total_transactions": 50,
+            "settlement": {
+                "mode": "fixed",
+                "items": [{
+                    "type": "address",
+                    "address": "DExternalA",
+                    "amount_sats": 50_000_000,
+                }],
+            },
+        }
+
+        cfg = compile_play("settlement_cycle", params)
+        cycle = cfg["settlement_cycle"]
+
+        self.assertEqual(
+            cycle["outbound"]["transitions"],
+            [
+                {"from": "flab_stage", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_b"},
+            ],
+        )
+
+        self.assertEqual(
+            cycle["return"]["transitions"],
+            [
+                {"from": "flab_stage", "to": "flab_a"},
+                {"from": "flab_stage", "to": "flab_b"},
+            ],
+        )
+
+    def test_settlement_cycle_has_stable_synthetic_flow_identity(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 10,
+            "return_decisions": 6,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 30,
+            "settlement_delay_seconds_max": 180,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 60,
+            "confirmations_required": 2,
+            "seed": 300,
+            "max_total_transactions": 100,
+            "settlement": {
+                "mode": "fixed",
+                "items": [{
+                    "type": "address",
+                    "address": "DExternalA",
+                    "amount_sats": 50_000_000,
+                }],
+            },
+        }
+
+        a = compile_play("settlement_cycle", params)
+        b = compile_play("settlement_cycle", dict(params))
+
+        flow_a = a["flows"][0]
+        flow_b = b["flows"][0]
+
+        self.assertIn("flow_identity", flow_a)
+        self.assertTrue(
+            flow_a["flow_identity"].startswith("settlement_cycle:")
+        )
+        self.assertEqual(
+            flow_a["flow_identity"],
+            flow_b["flow_identity"],
+        )
+        self.assertEqual(
+            destination_identity(flow_a),
+            flow_a["flow_identity"],
+        )
+
+    def test_settlement_cycle_identity_changes_with_contract(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 10,
+            "return_decisions": 6,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 30,
+            "settlement_delay_seconds_max": 180,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 60,
+            "confirmations_required": 2,
+            "seed": 301,
+            "max_total_transactions": 100,
+            "settlement": {
+                "mode": "fixed",
+                "items": [{
+                    "type": "address",
+                    "address": "DExternalA",
+                    "amount_sats": 50_000_000,
+                }],
+            },
+        }
+
+        a = compile_play("settlement_cycle", params)
+
+        changed = dict(params)
+        changed["outbound_decisions"] = 11
+
+        b = compile_play("settlement_cycle", changed)
+
+        self.assertNotEqual(
+            a["flows"][0]["flow_identity"],
+            b["flows"][0]["flow_identity"],
+        )
+
+    def test_settlement_cycle_supports_percentage_payout_splits(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 5,
+            "return_decisions": 5,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 200,
+            "max_total_transactions": 50,
+            "settlement": {
+                "mode": "percentage",
+                "items": [
+                    {
+                        "type": "address",
+                        "address": "DExternalA",
+                        "percent_bps": 2000,
+                    },
+                    {
+                        "type": "wallet",
+                        "wallet": "flab_dest",
+                        "percent_bps": 500,
+                    },
+                ],
+            },
+        }
+
+        cfg = compile_play("settlement_cycle", params)
+        settlement = cfg["settlement_cycle"]["settlement"]
+
+        # Settlement percentages intentionally need not total 100%.
+        # The unassigned percentage is retained inside the experiment.
+        self.assertEqual(
+            sum(
+                item["percent_bps"]
+                for item in settlement["items"]
+            ),
+            2500,
+        )
+        self.assertTrue(settlement["retain_remainder"])
+
+    def test_settlement_cycle_decision_counts_are_independent(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 30,
+            "return_decisions": 7,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 201,
+            "max_total_transactions": 100,
+            "settlement": {
+                "mode": "fixed",
+                "items": [{
+                    "type": "address",
+                    "address": "DExternalA",
+                    "amount_sats": 50_000_000,
+                }],
+            },
+        }
+
+        cfg = compile_play("settlement_cycle", params)
+
+        self.assertEqual(
+            cfg["settlement_cycle"]["outbound"]["decisions"],
+            30,
+        )
+        self.assertEqual(
+            cfg["settlement_cycle"]["return"]["decisions"],
+            7,
+        )
+
+    def test_settlement_cycle_requires_positive_decision_counts(self):
+        base = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 5,
+            "return_decisions": 5,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 202,
+            "max_total_transactions": 50,
+            "settlement": {
+                "mode": "fixed",
+                "items": [{
+                    "type": "address",
+                    "address": "DExternalA",
+                    "amount_sats": 50_000_000,
+                }],
+            },
+        }
+
+        for key in ("outbound_decisions", "return_decisions"):
+            bad = dict(base)
+            bad[key] = 0
+
+            with self.subTest(key=key):
+                with self.assertRaises(PlayError):
+                    compile_play("settlement_cycle", bad)
+
+    def test_settlement_cycle_requires_at_least_one_payout(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 5,
+            "return_decisions": 5,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 203,
+            "max_total_transactions": 50,
+            "settlement": {
+                "mode": "fixed",
+                "items": [],
+            },
+        }
+
+        with self.assertRaises(PlayError):
+            compile_play("settlement_cycle", params)
 
     def test_same_play_parameters_compile_identically(self):
         a = compile_play("random_walk", BASE)

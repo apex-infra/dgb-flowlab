@@ -10,7 +10,7 @@ from copy import deepcopy
 import hashlib
 import random
 
-from .config_schema import validate
+from .config_schema import settlement_cycle_identity, validate
 
 
 class PlayError(ValueError):
@@ -56,6 +56,16 @@ PLAY_SPECS = {
         ),
         "min_workers": 2,
     },
+    "settlement_cycle": {
+        "name": "settlement_cycle",
+        "title": "Settlement Cycle",
+        "description": (
+            "Run a seeded outbound workload, consolidate for an intermediate "
+            "multi-output settlement, retain part of the experiment principal, "
+            "run a seeded return workload, and return the remainder to Reserve."
+        ),
+        "min_workers": 2,
+    },
 }
 
 
@@ -92,6 +102,7 @@ def list_plays():
             "ring",
             "hub_and_spoke",
             "fan_out_fan_in",
+            "settlement_cycle",
         )
     ]
 
@@ -148,9 +159,238 @@ def _destination_spec(params):
     }
 
 
+def _validate_settlement_cycle_params(params):
+    required = {
+        "source_wallet",
+        "allocation_wallet",
+        "workers",
+        "hubs",
+        "allocation_sats",
+        "outbound_decisions",
+        "return_decisions",
+        "amount_sats_min",
+        "amount_sats_max",
+        "delay_seconds_min",
+        "delay_seconds_max",
+        "settlement_delay_seconds_min",
+        "settlement_delay_seconds_max",
+        "reserve_return_delay_seconds_min",
+        "reserve_return_delay_seconds_max",
+        "confirmations_required",
+        "seed",
+        "max_total_transactions",
+        "settlement",
+    }
+
+    missing = sorted(required - set(params))
+    _need(
+        not missing,
+        "missing play parameters: " + ", ".join(missing),
+    )
+
+    source = params["source_wallet"]
+    stage = params["allocation_wallet"]
+    workers = params["workers"]
+    hubs = params["hubs"]
+
+    _need(
+        isinstance(source, str) and source,
+        "source_wallet is required",
+    )
+    _need(
+        isinstance(stage, str) and stage,
+        "allocation_wallet is required",
+    )
+    _need(
+        isinstance(workers, list)
+        and all(isinstance(w, str) and w for w in workers),
+        "workers must be a list of wallet names",
+    )
+    _need(
+        len(workers) >= 2,
+        "settlement_cycle requires at least 2 workers",
+    )
+    _need(
+        isinstance(hubs, list)
+        and all(isinstance(w, str) and w for w in hubs),
+        "hubs must be a list of wallet names",
+    )
+
+    names = [source, stage, *workers, *hubs]
+    _need(
+        len(set(names)) == len(names),
+        "Reserve, Stage, workers, and hubs must all be distinct",
+    )
+
+    allocation = params["allocation_sats"]
+    minimum = params["amount_sats_min"]
+    maximum = params["amount_sats_max"]
+
+    _need(
+        _is_int(allocation) and allocation > 0,
+        "allocation_sats must be a positive integer",
+    )
+    _need(
+        _is_int(minimum) and minimum > 0,
+        "amount_sats_min must be a positive integer",
+    )
+    _need(
+        _is_int(maximum) and maximum >= minimum,
+        "amount_sats_max must be >= amount_sats_min",
+    )
+    _need(
+        maximum <= allocation,
+        "amount_sats_max cannot exceed allocation_sats",
+    )
+
+    for key in ("outbound_decisions", "return_decisions"):
+        _need(
+            _is_int(params[key]) and params[key] > 0,
+            f"{key} must be a positive integer",
+        )
+
+    for lo, hi in (
+        ("delay_seconds_min", "delay_seconds_max"),
+        (
+            "settlement_delay_seconds_min",
+            "settlement_delay_seconds_max",
+        ),
+        (
+            "reserve_return_delay_seconds_min",
+            "reserve_return_delay_seconds_max",
+        ),
+    ):
+        _need(
+            _is_int(params[lo]) and params[lo] >= 0,
+            f"{lo} must be a non-negative integer",
+        )
+        _need(
+            _is_int(params[hi]) and params[hi] >= params[lo],
+            f"{hi} must be >= {lo}",
+        )
+
+    _need(
+        _is_int(params["confirmations_required"])
+        and params["confirmations_required"] >= 1,
+        "confirmations_required must be an integer >= 1",
+    )
+    _need(
+        _is_int(params["seed"]) and params["seed"] >= 0,
+        "seed must be a non-negative integer",
+    )
+    _need(
+        _is_int(params["max_total_transactions"])
+        and params["max_total_transactions"] > 0,
+        "max_total_transactions must be a positive integer",
+    )
+
+    settlement = params["settlement"]
+
+    _need(
+        isinstance(settlement, dict),
+        "settlement must be an object",
+    )
+    _need(
+        set(settlement) == {"mode", "items"},
+        "settlement must contain exactly: mode, items",
+    )
+    _need(
+        settlement["mode"] in ("fixed", "percentage"),
+        "settlement.mode must be fixed or percentage",
+    )
+
+    items = settlement["items"]
+
+    _need(
+        isinstance(items, list) and 1 <= len(items) <= 10,
+        "settlement.items must contain 1..10 payouts",
+    )
+
+    targets = []
+    fixed_total = 0
+    percent_total = 0
+
+    for i, item in enumerate(items):
+        where = f"settlement.items[{i}]"
+
+        _need(
+            isinstance(item, dict),
+            f"{where} must be an object",
+        )
+
+        kind = item.get("type")
+        _need(
+            kind in ("wallet", "address"),
+            f"{where}.type must be wallet or address",
+        )
+
+        target_key = "wallet" if kind == "wallet" else "address"
+        target = item.get(target_key)
+
+        _need(
+            isinstance(target, str) and target,
+            f"{where}.{target_key} must be a non-empty string",
+        )
+
+        targets.append((kind, target))
+
+        if settlement["mode"] == "fixed":
+            _need(
+                set(item) == {"type", target_key, "amount_sats"},
+                f"{where} must contain exactly: "
+                f"type, {target_key}, amount_sats",
+            )
+
+            amount = item["amount_sats"]
+
+            _need(
+                _is_int(amount) and amount > 0,
+                f"{where}.amount_sats must be a positive integer",
+            )
+
+            fixed_total += amount
+
+        else:
+            _need(
+                set(item) == {"type", target_key, "percent_bps"},
+                f"{where} must contain exactly: "
+                f"type, {target_key}, percent_bps",
+            )
+
+            bps = item["percent_bps"]
+
+            _need(
+                _is_int(bps) and 1 <= bps <= 10_000,
+                f"{where}.percent_bps must be an integer in 1..10000",
+            )
+
+            percent_total += bps
+
+    _need(
+        len(set(targets)) == len(targets),
+        "settlement contains duplicate payout targets",
+    )
+
+    if settlement["mode"] == "fixed":
+        _need(
+            fixed_total < allocation,
+            "fixed settlement payouts must leave retained experiment value",
+        )
+    else:
+        _need(
+            percent_total < 10_000,
+            "percentage settlement payouts must total less than 100% "
+            "so experiment value is retained",
+        )
+
+
 def _validate_params(name, params):
     _need(name in PLAY_SPECS, f"unknown play: {name}")
     _need(isinstance(params, dict), "play parameters must be an object")
+
+    if name == "settlement_cycle":
+        _validate_settlement_cycle_params(params)
+        return
 
     required = set(_REQUIRED_PARAMS)
 
@@ -364,6 +604,128 @@ def _fan_out_fan_in_transfers(params):
     ]
 
 
+def _compile_settlement_cycle(params):
+    source = params["source_wallet"]
+    stage = params["allocation_wallet"]
+    workers = list(params["workers"])
+    hubs = list(params["hubs"])
+
+    outbound_transitions = [
+        *(
+            {"from": stage, "to": hub}
+            for hub in hubs
+        ),
+        *(
+            {"from": stage, "to": worker}
+            for worker in workers
+        ),
+        *(
+            {"from": hub, "to": worker}
+            for hub in hubs
+            for worker in workers
+        ),
+    ]
+
+    return_transitions = [
+        *(
+            {"from": stage, "to": hub}
+            for hub in hubs
+        ),
+        *(
+            {"from": stage, "to": worker}
+            for worker in workers
+        ),
+        *(
+            {"from": hub, "to": worker}
+            for hub in hubs
+            for worker in workers
+        ),
+    ]
+
+    cycle = {
+        "workers": workers,
+        "hubs": hubs,
+        "outbound": {
+            "decisions": params["outbound_decisions"],
+            "amount_sats_min": params["amount_sats_min"],
+            "amount_sats_max": params["amount_sats_max"],
+            "delay_seconds_min": params["delay_seconds_min"],
+            "delay_seconds_max": params["delay_seconds_max"],
+            "multi_output": True,
+            "transitions": outbound_transitions,
+        },
+        "settlement": {
+            "source_wallet": stage,
+            "mode": params["settlement"]["mode"],
+            "items": deepcopy(params["settlement"]["items"]),
+            "retain_remainder": True,
+            "delay_seconds_min":
+                params["settlement_delay_seconds_min"],
+            "delay_seconds_max":
+                params["settlement_delay_seconds_max"],
+        },
+        "return": {
+            "decisions": params["return_decisions"],
+            "amount_sats_min": params["amount_sats_min"],
+            "amount_sats_max": params["amount_sats_max"],
+            "delay_seconds_min": params["delay_seconds_min"],
+            "delay_seconds_max": params["delay_seconds_max"],
+            "multi_output": True,
+            "transitions": return_transitions,
+        },
+        "reserve_return": {
+            "from_wallet": stage,
+            "to_wallet": source,
+            "delay_seconds_min":
+                params["reserve_return_delay_seconds_min"],
+            "delay_seconds_max":
+                params["reserve_return_delay_seconds_max"],
+        },
+        "max_total_transactions":
+            params["max_total_transactions"],
+    }
+
+    flow = {
+        "description": PLAY_SPECS["settlement_cycle"]["title"],
+        "source_wallet": source,
+        "allocation_wallet": stage,
+        "flow_wallets": [stage, *hubs, *workers],
+        "allocation_sats": params["allocation_sats"],
+    }
+
+    flow["flow_identity"] = settlement_cycle_identity(
+        flow,
+        cycle,
+    )
+
+    cfg = {
+        "play": {
+            "name": "settlement_cycle",
+            "version": 1,
+        },
+        "flows": [flow],
+        "settlement_cycle": cycle,
+        "confirmations_required":
+            params["confirmations_required"],
+        "fee_policy": {
+            "type": "minimum",
+        },
+        "address_policy": "new",
+        "randomization": {
+            "enabled": True,
+            "model": "seeded_deterministic",
+            "seed": params["seed"],
+        },
+    }
+
+    try:
+        return validate(cfg)
+    except Exception as exc:
+        raise PlayError(
+            f"compiled play is invalid: {exc}"
+        ) from exc
+
+
 def compile_play(name, params):
     """
     Compile a named play into the existing experimental FlowLab config schema.
@@ -371,6 +733,9 @@ def compile_play(name, params):
     The returned object contains no play-specific execution semantics.
     """
     _validate_params(name, params)
+
+    if name == "settlement_cycle":
+        return _compile_settlement_cycle(params)
 
     src = params["source_wallet"]
     stage = params["allocation_wallet"]

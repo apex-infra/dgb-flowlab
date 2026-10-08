@@ -3,6 +3,7 @@ from decimal import Decimal
 from flowlab.rpc import (RpcClient, RpcError, MethodNotAllowed, WalletNotAllowed,
                          to_sats, to_dgb)
 from flowlab.node_verifier import NodeVerifier
+from flowlab.plays import compile_play
 from flowlab.verify import evaluate
 from tests.fake_node import FakeNode
 
@@ -223,6 +224,241 @@ class VerifierTests(unittest.TestCase):
     def test_non_allowlisted_extra_wallet_loaded_fails(self):
         self.n.handlers["listwallets"] = lambda: ["flab_source", "flab_a", "pool"]
         self.assertTrue(any("wallet" in f for f in evaluate(self.v, {}, FLOW, "start")))
+
+    def test_settlement_cycle_wallet_selection_uses_real_wallets_not_identity_marker(self):
+        cfg = compile_play(
+            "settlement_cycle",
+            {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "hubs": ["flab_hub_a"],
+                "allocation_sats": 500_000_000,
+                "outbound_decisions": 10,
+                "return_decisions": 6,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "settlement_delay_seconds_min": 30,
+                "settlement_delay_seconds_max": 180,
+                "reserve_return_delay_seconds_min": 0,
+                "reserve_return_delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 401,
+                "max_total_transactions": 100,
+                "settlement": {
+                    "mode": "fixed",
+                    "items": [{
+                        "type": "address",
+                        "address": "DExternalSettlement",
+                        "amount_sats": 50_000_000,
+                    }],
+                },
+            },
+        )
+
+        approved_flow = cfg["flows"][0]
+
+        experiment = {
+            "config_json": json.dumps(cfg),
+        }
+
+        flow = {
+            "source_wallet": approved_flow["source_wallet"],
+            "flow_wallets_json": json.dumps(
+                approved_flow["flow_wallets"]
+            ),
+            "destination_wallet":
+                approved_flow["flow_identity"],
+            "state": "START",
+            "error_state": "NONE",
+            "initial_alloc_sats":
+                approved_flow["allocation_sats"],
+        }
+
+        wallets = self.v._wallets(experiment, flow)
+
+        self.assertEqual(
+            wallets,
+            [
+                "flab_source",
+                "flab_stage",
+                "flab_hub_a",
+                "flab_a",
+                "flab_b",
+            ],
+        )
+
+        self.assertNotIn(
+            approved_flow["flow_identity"],
+            wallets,
+        )
+
+    def test_settlement_cycle_includes_internal_payout_wallet(self):
+        cfg = compile_play(
+            "settlement_cycle",
+            {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "hubs": [],
+                "allocation_sats": 500_000_000,
+                "outbound_decisions": 4,
+                "return_decisions": 3,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 0,
+                "delay_seconds_max": 5,
+                "settlement_delay_seconds_min": 0,
+                "settlement_delay_seconds_max": 5,
+                "reserve_return_delay_seconds_min": 0,
+                "reserve_return_delay_seconds_max": 5,
+                "confirmations_required": 2,
+                "seed": 402,
+                "max_total_transactions": 50,
+                "settlement": {
+                    "mode": "fixed",
+                    "items": [
+                        {
+                            "type": "wallet",
+                            "wallet": "flab_dest",
+                            "amount_sats": 25_000_000,
+                        },
+                        {
+                            "type": "address",
+                            "address": "DExternalSettlement",
+                            "amount_sats": 10_000_000,
+                        },
+                    ],
+                },
+            },
+        )
+
+        approved_flow = cfg["flows"][0]
+
+        experiment = {
+            "config_json": json.dumps(cfg),
+        }
+
+        flow = {
+            "source_wallet": approved_flow["source_wallet"],
+            "flow_wallets_json": json.dumps(
+                approved_flow["flow_wallets"]
+            ),
+            "destination_wallet":
+                approved_flow["flow_identity"],
+            "state": "START",
+            "error_state": "NONE",
+            "initial_alloc_sats":
+                approved_flow["allocation_sats"],
+        }
+
+        wallets = self.v._wallets(
+            experiment,
+            flow,
+        )
+
+        self.assertEqual(
+            wallets,
+            [
+                "flab_source",
+                "flab_stage",
+                "flab_a",
+                "flab_b",
+                "flab_dest",
+            ],
+        )
+
+        self.assertNotIn(
+            approved_flow["flow_identity"],
+            wallets,
+        )
+
+    def test_settlement_cycle_missing_internal_payout_wallet_fails(self):
+        cfg = compile_play(
+            "settlement_cycle",
+            {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "hubs": [],
+                "allocation_sats": 500_000_000,
+                "outbound_decisions": 4,
+                "return_decisions": 3,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 0,
+                "delay_seconds_max": 5,
+                "settlement_delay_seconds_min": 0,
+                "settlement_delay_seconds_max": 5,
+                "reserve_return_delay_seconds_min": 0,
+                "reserve_return_delay_seconds_max": 5,
+                "confirmations_required": 2,
+                "seed": 403,
+                "max_total_transactions": 50,
+                "settlement": {
+                    "mode": "fixed",
+                    "items": [{
+                        "type": "wallet",
+                        "wallet": "flab_dest",
+                        "amount_sats": 25_000_000,
+                    }],
+                },
+            },
+        )
+
+        approved_flow = cfg["flows"][0]
+
+        experiment = {
+            "config_json": json.dumps(cfg),
+        }
+
+        flow = {
+            "source_wallet": approved_flow["source_wallet"],
+            "flow_wallets_json": json.dumps(
+                approved_flow["flow_wallets"]
+            ),
+            "destination_wallet":
+                approved_flow["flow_identity"],
+            "state": "START",
+            "error_state": "NONE",
+            "initial_alloc_sats":
+                approved_flow["allocation_sats"],
+        }
+
+        self.n.handlers["listwallets"] = lambda: [
+            "flab_source",
+            "flab_stage",
+            "flab_a",
+            "flab_b",
+        ]
+
+        self.c = RpcClient(
+            "u",
+            "p",
+            self.n.port,
+            allowed_wallets=[
+                "flab_source",
+                "flab_stage",
+                "flab_a",
+                "flab_b",
+                "flab_dest",
+            ],
+        )
+        self.v = NodeVerifier(self.c)
+
+        ok, detail = self.v._wallet(
+            experiment,
+            flow,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn(
+            "flab_dest",
+            detail,
+        )
+
 
     def test_missing_wallet_fails(self):
         self.n.handlers["listwallets"] = lambda: ["flab_source"]

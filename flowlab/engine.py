@@ -351,8 +351,104 @@ class Engine:
             "",
             "INITIAL PARAMETERS (fixed once approved)",
         ]
+        settlement_cycle_play = (
+            isinstance(cfg.get("play"), dict)
+            and cfg["play"].get("name") == "settlement_cycle"
+            and cfg["play"].get("version") == 1
+        )
+
         for i, fl in enumerate(cfg["flows"], 1):
-            if config_schema.has_multi_destinations(fl):
+            if settlement_cycle_play:
+                cycle = cfg["settlement_cycle"]
+
+                lines.append(
+                    f"  flow {i}: {fl['source_wallet']} -> "
+                    f"{fl['allocation_wallet']} -> settlement cycle -> "
+                    f"{fl['source_wallet']}   allocation "
+                    f"{fl['allocation_sats']} sats"
+                )
+                lines.append(
+                    f"    flow identity: {fl['flow_identity']}"
+                )
+                lines.append(
+                    f"    workers: "
+                    + ", ".join(cycle["workers"])
+                )
+                lines.append(
+                    f"    hubs: "
+                    + (", ".join(cycle["hubs"]) or "-")
+                )
+                lines.append(
+                    f"    outbound workload: "
+                    f"{cycle['outbound']['decisions']} decisions, "
+                    f"{cycle['outbound']['amount_sats_min']}.."
+                    f"{cycle['outbound']['amount_sats_max']} sats, "
+                    f"delay {cycle['outbound']['delay_seconds_min']}.."
+                    f"{cycle['outbound']['delay_seconds_max']} s, "
+                    f"multi-output={cycle['outbound']['multi_output']}"
+                )
+                lines.append(
+                    f"    settlement source: "
+                    f"{cycle['settlement']['source_wallet']}"
+                )
+                lines.append(
+                    f"    settlement mode: "
+                    f"{cycle['settlement']['mode']}"
+                )
+
+                for k, item in enumerate(
+                        cycle["settlement"]["items"], 1):
+                    target = (
+                        item["wallet"]
+                        if item["type"] == "wallet"
+                        else item["address"]
+                    )
+
+                    if cycle["settlement"]["mode"] == "percentage":
+                        amount = (
+                            f"{item['percent_bps'] / 100:.2f}%"
+                        )
+                    else:
+                        amount = f"{item['amount_sats']} sats"
+
+                    lines.append(
+                        f"      {k:>3}. {amount} -> "
+                        f"{item['type']}:{target}"
+                    )
+
+                lines.append(
+                    "      retained remainder -> continues inside experiment"
+                )
+                lines.append(
+                    f"    settlement delay: "
+                    f"{cycle['settlement']['delay_seconds_min']}.."
+                    f"{cycle['settlement']['delay_seconds_max']} s"
+                )
+                lines.append(
+                    f"    return workload: "
+                    f"{cycle['return']['decisions']} decisions, "
+                    f"{cycle['return']['amount_sats_min']}.."
+                    f"{cycle['return']['amount_sats_max']} sats, "
+                    f"delay {cycle['return']['delay_seconds_min']}.."
+                    f"{cycle['return']['delay_seconds_max']} s, "
+                    f"multi-output={cycle['return']['multi_output']}"
+                )
+                lines.append(
+                    f"    reserve return: "
+                    f"{cycle['reserve_return']['from_wallet']} -> "
+                    f"{cycle['reserve_return']['to_wallet']} "
+                    f"delay "
+                    f"{cycle['reserve_return']['delay_seconds_min']}.."
+                    f"{cycle['reserve_return']['delay_seconds_max']} s"
+                )
+                lines.append(
+                    f"    maximum total transactions: "
+                    f"{cycle['max_total_transactions']}"
+                )
+
+                destination = None
+
+            elif config_schema.has_multi_destinations(fl):
                 path = " -> ".join([
                     fl["source_wallet"],
                     *fl["flow_wallets"],
@@ -393,6 +489,7 @@ class Engine:
                     )
 
                 destination = None
+
             else:
                 destination = config_schema.destination_endpoint(fl)
                 path = " -> ".join([

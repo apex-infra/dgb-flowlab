@@ -1,6 +1,8 @@
 import copy
+import hashlib
 import json
 import os
+import random
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -14,7 +16,12 @@ from flowlab.planner import (
     generate_experimental_job,
     generate_jobs,
     next_due,
+    generate_settlement_cycle_phase_job,
+    settlement_cycle_decision,
+    settlement_cycle_next_phase,
+    settlement_cycle_progress,
 )
+from flowlab.plays import compile_play
 from tests.test_engine import CFG, FakeVerifier
 
 T = [
@@ -1090,6 +1097,1225 @@ class MultiDestinationFinalizationPlannerTests(PlannerBase):
                 fee_reserve_sats=10_000_000,
             )
         )
+
+
+class SettlementCyclePlannerTests(PlannerBase):
+    def settlement_flow(self, max_total_transactions=100):
+        cfg = compile_play(
+            "settlement_cycle",
+            {
+                "source_wallet": "w1_source",
+                "allocation_wallet": "w2_flowA",
+                "workers": ["w3_flowB", "w4_dest"],
+                "hubs": [],
+                "allocation_sats": 500_000_000,
+                "outbound_decisions": 2,
+                "return_decisions": 3,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "settlement_delay_seconds_min": 30,
+                "settlement_delay_seconds_max": 180,
+                "reserve_return_delay_seconds_min": 0,
+                "reserve_return_delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 7001,
+                "max_total_transactions": max_total_transactions,
+                "settlement": {
+                    "mode": "fixed",
+                    "items": [{
+                        "type": "address",
+                        "address": "D_EXTERNAL_TEST_ADDRESS",
+                        "amount_sats": 50_000_000,
+                    }],
+                },
+            },
+        )
+
+        exp = self.e.create_experiment("settlement planner")
+        h = self.e.configure_experiment(exp, cfg)
+        self.e.approve(exp, h)
+        self.e.start(exp)
+
+        flow = self.e.list_flows(exp)[0]["id"]
+        self.e.advance_flow(flow, "PLAN")
+
+        return exp, flow, cfg
+
+    def add_confirmed_phase_job(
+            self,
+            flow,
+            *,
+            phase,
+            source,
+            decision_index=None,
+            n=1,
+    ):
+        jobs = self.e.list_jobs(flow)
+
+        generated = {
+            "source": source,
+            "phase": phase,
+        }
+
+        if decision_index is not None:
+            generated["decision_index"] = decision_index
+
+        jid = self.e.add_job(
+            flow,
+            {
+                "from": "w2_flowA",
+                "to": "w3_flowB",
+                "amount_sats": 10_000_000,
+                "step": len(jobs),
+            },
+            planned_delay_s=0,
+            generated_from=generated,
+            depends_on=[jobs[-1]["id"]] if jobs else (),
+        )
+
+        self.confirm(flow, jid, n)
+        return jid
+
+    def test_progress_counts_outbound_and_return_decisions_independently(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="workload",
+            source="settlement cycle outbound",
+            decision_index=0,
+            n=1,
+        )
+        self.add_confirmed_phase_job(
+            flow,
+            phase="workload",
+            source="settlement cycle outbound",
+            decision_index=1,
+            n=2,
+        )
+        self.add_confirmed_phase_job(
+            flow,
+            phase="return_workload",
+            source="settlement cycle return",
+            decision_index=0,
+            n=3,
+        )
+
+        progress = settlement_cycle_progress(self.e, flow)
+
+        self.assertEqual(progress["outbound_decisions"], 2)
+        self.assertEqual(progress["return_decisions"], 1)
+        self.assertEqual(progress["total_transactions"], 3)
+
+    def test_non_workload_phases_do_not_increment_decision_counts(self):
+        _, flow, _ = self.settlement_flow()
+
+        for n, phase in enumerate(
+            (
+                "allocation",
+                "consolidation",
+                "settlement",
+                "consolidation",
+                "reserve_return",
+            ),
+            1,
+        ):
+            self.add_confirmed_phase_job(
+                flow,
+                phase=phase,
+                source=f"settlement cycle {phase}",
+                n=n,
+            )
+
+        progress = settlement_cycle_progress(self.e, flow)
+
+        self.assertEqual(progress["outbound_decisions"], 0)
+        self.assertEqual(progress["return_decisions"], 0)
+        self.assertEqual(progress["total_transactions"], 5)
+
+    def test_unconfirmed_job_blocks_phase_progress(self):
+        _, flow, _ = self.settlement_flow()
+
+        jid = self.e.add_job(
+            flow,
+            {
+                "from": "w2_flowA",
+                "to": "w3_flowB",
+                "amount_sats": 10_000_000,
+                "step": 0,
+            },
+            planned_delay_s=0,
+            generated_from={
+                "source": "settlement cycle outbound",
+                "phase": "workload",
+                "decision_index": 0,
+            },
+        )
+
+        progress = settlement_cycle_progress(self.e, flow)
+
+        self.assertFalse(progress["all_jobs_confirmed"])
+        self.assertEqual(progress["outbound_decisions"], 1)
+        self.assertEqual(progress["total_transactions"], 1)
+        self.assertEqual(self.e.get_job(jid)["state"], "PLANNED")
+
+    def test_settlement_decision_is_seed_reproducible(self):
+        _, flow, _ = self.settlement_flow()
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 500_000_000,
+            "w3_flowB": 0,
+            "w4_dest": 0,
+        }
+
+        a = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            0,
+            balances_sats=balances,
+            fee_reserve_sats=1_000,
+        )
+        b = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            0,
+            balances_sats=balances,
+            fee_reserve_sats=1_000,
+        )
+
+        self.assertEqual(a, b)
+
+    def test_settlement_decision_uses_only_approved_phase_routes(self):
+        _, flow, cfg = self.settlement_flow()
+
+        decision = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            0,
+            balances_sats={
+                "w1_source": 500_000_000,
+                "w2_flowA": 500_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        route = {
+            "from": decision["from"],
+            "to": decision["to"],
+        }
+
+        self.assertIn(
+            route,
+            cfg["settlement_cycle"]["outbound"]["transitions"],
+        )
+
+    def test_settlement_decision_respects_amount_and_delay_bounds(self):
+        _, flow, cfg = self.settlement_flow()
+
+        decision = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            0,
+            balances_sats={
+                "w1_source": 500_000_000,
+                "w2_flowA": 500_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        spec = cfg["settlement_cycle"]["outbound"]
+
+        self.assertGreaterEqual(
+            decision["amount_sats"],
+            spec["amount_sats_min"],
+        )
+        self.assertLessEqual(
+            decision["amount_sats"],
+            spec["amount_sats_max"],
+        )
+        self.assertGreaterEqual(
+            decision["delay_seconds"],
+            spec["delay_seconds_min"],
+        )
+        self.assertLessEqual(
+            decision["delay_seconds"],
+            spec["delay_seconds_max"],
+        )
+
+    def test_settlement_decision_filters_unfunded_routes(self):
+        _, flow, _ = self.settlement_flow()
+
+        decision = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            0,
+            balances_sats={
+                "w1_source": 500_000_000,
+                "w2_flowA": 50_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        self.assertEqual(decision["from"], "w2_flowA")
+
+    def test_return_workload_can_start_from_stage_after_settlement(self):
+        _, flow, cfg = self.settlement_flow()
+
+        decision = settlement_cycle_decision(
+            self.e,
+            flow,
+            "return_workload",
+            0,
+            balances_sats={
+                "w1_source": 500_000_000,
+                "w2_flowA": 300_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        route = {
+            "from": decision["from"],
+            "to": decision["to"],
+        }
+
+        self.assertEqual(decision["from"], "w2_flowA")
+        self.assertIn(
+            route,
+            cfg["settlement_cycle"]["return"]["transitions"],
+        )
+        self.assertEqual(
+            decision["generated_from"]["phase"],
+            "return_workload",
+        )
+        self.assertEqual(
+            decision["generated_from"]["decision_index"],
+            0,
+        )
+
+    def test_settlement_decision_refuses_when_no_route_is_fundable(self):
+        _, flow, _ = self.settlement_flow()
+
+        with self.assertRaisesRegex(
+            PlanError,
+            "no approved Settlement Cycle transition",
+        ):
+            settlement_cycle_decision(
+                self.e,
+                flow,
+                "workload",
+                0,
+                balances_sats={
+                    "w1_source": 500_000_000,
+                    "w2_flowA": 1_000,
+                    "w3_flowB": 0,
+                    "w4_dest": 0,
+                },
+                fee_reserve_sats=1_000,
+            )
+
+    def test_phase_generator_persists_outbound_workload_decision(self):
+        _, flow, cfg = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=110,
+        )
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 500_000_000,
+            "w3_flowB": 0,
+            "w4_dest": 0,
+        }
+
+        expected = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            0,
+            balances_sats=balances,
+            fee_reserve_sats=1_000,
+        )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        plan = json.loads(job["planned_json"])
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(plan["from"], expected["from"])
+        self.assertEqual(plan["to"], expected["to"])
+        self.assertEqual(
+            plan["amount_sats"],
+            expected["amount_sats"],
+        )
+        self.assertEqual(
+            job["planned_delay_s"],
+            expected["delay_seconds"],
+        )
+        self.assertEqual(meta["phase"], "workload")
+        self.assertEqual(
+            meta["source"],
+            "settlement cycle outbound",
+        )
+        self.assertEqual(meta["decision_index"], 0)
+        self.assertEqual(
+            {
+                "from": plan["from"],
+                "to": plan["to"],
+            },
+            {
+                "from": expected["from"],
+                "to": expected["to"],
+            },
+        )
+        self.assertIn(
+            {
+                "from": plan["from"],
+                "to": plan["to"],
+            },
+            cfg["settlement_cycle"]["outbound"]["transitions"],
+        )
+
+    def test_phase_generator_advances_outbound_decision_index(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=120,
+        )
+        self.add_confirmed_phase_job(
+            flow,
+            phase="workload",
+            source="settlement cycle outbound",
+            decision_index=0,
+            n=121,
+        )
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 450_000_000,
+            "w3_flowB": 50_000_000,
+            "w4_dest": 0,
+        }
+
+        expected = settlement_cycle_decision(
+            self.e,
+            flow,
+            "workload",
+            1,
+            balances_sats=balances,
+            fee_reserve_sats=1_000,
+        )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(meta["decision_index"], 1)
+        self.assertEqual(
+            json.loads(job["planned_json"])["amount_sats"],
+            expected["amount_sats"],
+        )
+
+    def test_return_workload_has_independent_decision_index(self):
+        _, flow, cfg = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=130,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=131 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=133,
+        )
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 300_000_000,
+            "w3_flowB": 0,
+            "w4_dest": 0,
+        }
+
+        expected = settlement_cycle_decision(
+            self.e,
+            flow,
+            "return_workload",
+            0,
+            balances_sats=balances,
+            fee_reserve_sats=1_000,
+        )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        plan = json.loads(job["planned_json"])
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(meta["phase"], "return_workload")
+        self.assertEqual(
+            meta["source"],
+            "settlement cycle return",
+        )
+        self.assertEqual(meta["decision_index"], 0)
+        self.assertEqual(plan["from"], expected["from"])
+        self.assertEqual(plan["to"], expected["to"])
+        self.assertEqual(
+            plan["amount_sats"],
+            expected["amount_sats"],
+        )
+        self.assertIn(
+            {
+                "from": plan["from"],
+                "to": plan["to"],
+            },
+            cfg["settlement_cycle"]["return"]["transitions"],
+        )
+
+    def test_phase_generator_persists_intermediate_settlement_job(self):
+        _, flow, cfg = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=140,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=141 + i,
+            )
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 450_000_000,
+            "w3_flowB": 0,
+            "w4_dest": 0,
+        }
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        plan = json.loads(job["planned_json"])
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(plan["from"], "w2_flowA")
+        self.assertEqual(plan["amount_sats"], "all")
+        self.assertEqual(
+            plan["settlement"],
+            cfg["settlement_cycle"]["settlement"],
+        )
+
+        self.assertEqual(meta["phase"], "settlement")
+        self.assertEqual(
+            meta["source"],
+            "settlement cycle settlement",
+        )
+        self.assertEqual(
+            meta["balance_snapshot_sats"],
+            balances,
+        )
+
+        spec = cfg["settlement_cycle"]["settlement"]
+
+        self.assertGreaterEqual(
+            job["planned_delay_s"],
+            spec["delay_seconds_min"],
+        )
+        self.assertLessEqual(
+            job["planned_delay_s"],
+            spec["delay_seconds_max"],
+        )
+
+    def test_settlement_job_is_generated_only_once(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=150,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=151 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=153,
+        )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 300_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(
+            meta["phase"],
+            "return_workload",
+        )
+
+    def test_generate_pre_settlement_consolidation_sweeps_to_stage(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=70,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=71 + i,
+            )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 300_000_000,
+                "w3_flowB": 100_000_000,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        plan = json.loads(job["planned_json"])
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(plan["from"], "w3_flowB")
+        self.assertEqual(plan["to"], "w2_flowA")
+        self.assertEqual(plan["amount_sats"], "all")
+        self.assertEqual(meta["phase"], "consolidation")
+        self.assertEqual(
+            meta["source"],
+            "settlement cycle consolidation",
+        )
+
+    def test_consolidation_skips_zero_balance_internal_wallets(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=80,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=81 + i,
+            )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 400_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 50_000_000,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        plan = json.loads(
+            self.e.get_job(jid)["planned_json"]
+        )
+
+        self.assertEqual(plan["from"], "w4_dest")
+        self.assertEqual(plan["to"], "w2_flowA")
+
+    def test_consolidation_refuses_balance_below_fee_reserve(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=90,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=91 + i,
+            )
+
+        with self.assertRaisesRegex(
+            PlanError,
+            "consolidation fee reserve",
+        ):
+            generate_settlement_cycle_phase_job(
+                self.e,
+                flow,
+                {
+                    "w1_source": 500_000_000,
+                    "w2_flowA": 400_000_000,
+                    "w3_flowB": 999,
+                    "w4_dest": 0,
+                },
+                fee_reserve_sats=1_000,
+            )
+
+    def test_generate_reserve_return_sweeps_stage_to_reserve(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=100,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=101 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=103,
+        )
+
+        for i in range(3):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="return_workload",
+                source="settlement cycle return",
+                decision_index=i,
+                n=104 + i,
+            )
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 300_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        plan = json.loads(job["planned_json"])
+        meta = json.loads(job["generated_from_json"])
+
+        self.assertEqual(plan["from"], "w2_flowA")
+        self.assertEqual(plan["to"], "w1_source")
+        self.assertEqual(plan["amount_sats"], "all")
+        self.assertEqual(meta["phase"], "reserve_return")
+        self.assertEqual(
+            meta["source"],
+            "settlement cycle reserve return",
+        )
+
+    def test_reserve_return_delay_is_seeded_and_within_approved_bounds(self):
+        _, flow, cfg = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=160,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=161 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=163,
+        )
+
+        for i in range(3):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="return_workload",
+                source="settlement cycle return",
+                decision_index=i,
+                n=164 + i,
+            )
+
+        balances = {
+            "w1_source": 500_000_000,
+            "w2_flowA": 300_000_000,
+            "w3_flowB": 0,
+            "w4_dest": 0,
+        }
+
+        jid = generate_settlement_cycle_phase_job(
+            self.e,
+            flow,
+            balances,
+            fee_reserve_sats=1_000,
+        )
+
+        job = self.e.get_job(jid)
+        spec = cfg["settlement_cycle"]["reserve_return"]
+
+        self.assertGreaterEqual(
+            job["planned_delay_s"],
+            spec["delay_seconds_min"],
+        )
+        self.assertLessEqual(
+            job["planned_delay_s"],
+            spec["delay_seconds_max"],
+        )
+
+        material = (
+            "flowlab-settlement-delay-v1:"
+            f"{cfg['randomization']['seed']}:"
+            f"{flow}:reserve_return"
+        ).encode()
+
+        derived_seed = int.from_bytes(
+            hashlib.sha256(material).digest(),
+            "big",
+        )
+        expected = random.Random(
+            derived_seed
+        ).randint(
+            spec["delay_seconds_min"],
+            spec["delay_seconds_max"],
+        )
+
+        self.assertEqual(
+            job["planned_delay_s"],
+            expected,
+        )
+
+        # This fixture deterministically selects a non-minimum delay,
+        # proving reserve return is not simply hardcoded to the floor.
+        self.assertNotEqual(
+            job["planned_delay_s"],
+            spec["delay_seconds_min"],
+        )
+
+    def test_phase_generator_refuses_when_previous_job_is_unconfirmed(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.e.add_job(
+            flow,
+            {
+                "from": "w1_source",
+                "to": "w2_flowA",
+                "amount_sats": 500_000_000,
+                "step": 0,
+            },
+            planned_delay_s=0,
+            generated_from={
+                "source": "experimental allocation commit",
+                "phase": "allocation",
+            },
+        )
+
+        with self.assertRaisesRegex(
+            PlanError,
+            "previous Settlement Cycle job must be confirmed",
+        ):
+            generate_settlement_cycle_phase_job(
+                self.e,
+                flow,
+                {
+                    "w1_source": 500_000_000,
+                    "w2_flowA": 0,
+                    "w3_flowB": 0,
+                    "w4_dest": 0,
+                },
+                fee_reserve_sats=1_000,
+            )
+
+    def test_next_phase_starts_with_allocation(self):
+        _, flow, _ = self.settlement_flow()
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 1_000_000_000,
+                "w2_flowA": 0,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "allocation")
+
+    def test_next_phase_moves_to_workload_after_allocation(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=10,
+        )
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 500_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "workload")
+
+    def test_outbound_completion_requires_consolidation_when_workers_hold_value(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=20,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=21 + i,
+            )
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 300_000_000,
+                "w3_flowB": 100_000_000,
+                "w4_dest": 100_000_000,
+            },
+        )
+
+        self.assertEqual(phase, "consolidation")
+
+    def test_outbound_consolidated_stage_advances_to_settlement(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=30,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=31 + i,
+            )
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 490_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "settlement")
+
+    def test_confirmed_settlement_advances_to_return_workload(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=40,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=41 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=43,
+        )
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 400_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "return_workload")
+
+    def test_return_completion_consolidates_then_returns_to_reserve(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=50,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=51 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=53,
+        )
+
+        for i in range(3):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="return_workload",
+                source="settlement cycle return",
+                decision_index=i,
+                n=54 + i,
+            )
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 300_000_000,
+                "w3_flowB": 25_000_000,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "consolidation")
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 500_000_000,
+                "w2_flowA": 325_000_000,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "reserve_return")
+
+    def test_confirmed_reserve_return_completes_cycle(self):
+        _, flow, _ = self.settlement_flow()
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="experimental allocation commit",
+            n=60,
+        )
+
+        for i in range(2):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="workload",
+                source="settlement cycle outbound",
+                decision_index=i,
+                n=61 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="settlement",
+            source="settlement cycle settlement",
+            n=63,
+        )
+
+        for i in range(3):
+            self.add_confirmed_phase_job(
+                flow,
+                phase="return_workload",
+                source="settlement cycle return",
+                decision_index=i,
+                n=64 + i,
+            )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="reserve_return",
+            source="settlement cycle reserve return",
+            n=67,
+        )
+
+        phase = settlement_cycle_next_phase(
+            self.e,
+            flow,
+            {
+                "w1_source": 800_000_000,
+                "w2_flowA": 0,
+                "w3_flowB": 0,
+                "w4_dest": 0,
+            },
+        )
+
+        self.assertEqual(phase, "complete")
+
+    def test_max_total_transactions_is_checked_against_actual_jobs(self):
+        _, flow, _ = self.settlement_flow(
+            max_total_transactions=2,
+        )
+
+        self.add_confirmed_phase_job(
+            flow,
+            phase="allocation",
+            source="settlement cycle allocation",
+            n=1,
+        )
+        self.add_confirmed_phase_job(
+            flow,
+            phase="workload",
+            source="settlement cycle outbound",
+            decision_index=0,
+            n=2,
+        )
+
+        progress = settlement_cycle_progress(self.e, flow)
+
+        self.assertEqual(progress["total_transactions"], 2)
+        self.assertEqual(progress["max_total_transactions"], 2)
+        self.assertTrue(progress["transaction_limit_reached"])
 
 
 class PlanTests(PlannerBase):

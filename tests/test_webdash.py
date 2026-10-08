@@ -1146,6 +1146,7 @@ class WebControlTests(WebBase):
                 "ring",
                 "hub_and_spoke",
                 "fan_out_fan_in",
+                "settlement_cycle",
             ],
         )
 
@@ -1254,6 +1255,414 @@ class WebControlTests(WebBase):
         self.assertIn("exp", created)
         self.assertIn("hash", created)
         self.assertIn("randomization: disabled", created["text"])
+
+    def _settlement_cycle_params(self):
+        return {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 10,
+            "return_decisions": 6,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 30,
+            "settlement_delay_seconds_max": 180,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 60,
+            "confirmations_required": 2,
+            "seed": 501,
+            "max_total_transactions": 100,
+            "settlement": {
+                "mode": "percentage",
+                "items": [
+                    {
+                        "type": "wallet",
+                        "wallet": "flab_dest",
+                        "percent_bps": 500,
+                    },
+                    {
+                        "type": "address",
+                        "address": "dgb1qexternaldestination",
+                        "percent_bps": 2000,
+                    },
+                ],
+            },
+        }
+
+    def test_compile_settlement_cycle_accepts_mixed_settlement_targets(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        s, out = self.do("compile_play", {
+            "play": "settlement_cycle",
+            "params": self._settlement_cycle_params(),
+        })
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(
+            out["play"]["name"],
+            "settlement_cycle",
+        )
+
+        cfg = out["config"]
+        flow = cfg["flows"][0]
+
+        self.assertNotIn("destination_wallet", flow)
+        self.assertNotIn("destination_address", flow)
+        self.assertNotIn("destinations", flow)
+
+        self.assertEqual(
+            cfg["settlement_cycle"]["settlement"]["items"],
+            self._settlement_cycle_params()["settlement"]["items"],
+        )
+
+    def test_new_accepts_compiled_settlement_cycle_config(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        status, compiled = self.do("compile_play", {
+            "play": "settlement_cycle",
+            "params": self._settlement_cycle_params(),
+        })
+
+        self.assertEqual(status, 200, compiled)
+
+        cfg = compiled["config"]
+
+        status, created = self.do("new", {
+            "config": cfg,
+            "description": "settlement cycle dashboard run",
+        })
+
+        self.assertEqual(status, 200, created)
+        self.assertIn("exp", created)
+        self.assertIn("hash", created)
+
+        exp = created["exp"]
+        snap = self.snap(exp)["snapshot"]
+
+        self.assertEqual(
+            snap["exp"]["description"],
+            "settlement cycle dashboard run",
+        )
+        self.assertEqual(
+            snap["exp"]["state"],
+            "CONFIGURED",
+        )
+        self.assertEqual(
+            snap["flows"],
+            [],
+        )
+
+        # Flow rows are created only after operator approval.
+        status, approved = self.do("approve", {
+            "exp": exp,
+            "hash": created["hash"],
+            "note": "Settlement Cycle dashboard test",
+        })
+
+        self.assertEqual(status, 200, approved)
+
+        snap = self.snap(exp)["snapshot"]
+
+        self.assertEqual(
+            snap["exp"]["state"],
+            "APPROVED",
+        )
+        self.assertEqual(
+            snap["flows"][0]["dest"],
+            cfg["flows"][0]["flow_identity"],
+        )
+
+    def test_new_settlement_cycle_rejects_wallet_outside_dashboard_allowlist(self):
+        from flowlab.plays import compile_play
+
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        # Deliberately omit the internal settlement payout wallet.
+        wallets = (
+            "flab_source",
+            "flab_stage",
+            "flab_a",
+            "flab_b",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        cfg = compile_play(
+            "settlement_cycle",
+            self._settlement_cycle_params(),
+        )
+
+        status, out = self.do("new", {
+            "config": cfg,
+            "description": "direct settlement allowlist refusal",
+        })
+
+        self.assertEqual(status, 400)
+        self.assertIn(
+            "outside the dashboard allowlist",
+            out["error"],
+        )
+        self.assertIn(
+            "flab_dest",
+            out["error"],
+        )
+
+    def test_new_settlement_cycle_enforces_worker_and_hub_roles(self):
+        from flowlab.plays import compile_play
+
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            # flab_b is deliberately missing from worker role.
+            "workers": ["flab_a"],
+            "hubs": ["flab_hub_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        cfg = compile_play(
+            "settlement_cycle",
+            self._settlement_cycle_params(),
+        )
+
+        status, out = self.do("new", {
+            "config": cfg,
+            "description": "direct settlement worker-role refusal",
+        })
+
+        self.assertEqual(status, 400)
+        self.assertIn(
+            "worker role",
+            out["error"],
+        )
+        self.assertIn(
+            "flab_b",
+            out["error"],
+        )
+
+    def test_new_settlement_cycle_enforces_settlement_destination_role(self):
+        from flowlab.plays import compile_play
+
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            # Internal payout exists, but has no destination role.
+            "destinations": [],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        cfg = compile_play(
+            "settlement_cycle",
+            self._settlement_cycle_params(),
+        )
+
+        status, out = self.do("new", {
+            "config": cfg,
+            "description": "direct settlement destination-role refusal",
+        })
+
+        self.assertEqual(status, 400)
+        self.assertIn(
+            "destination role",
+            out["error"],
+        )
+        self.assertIn(
+            "flab_dest",
+            out["error"],
+        )
+
+
+    def test_compile_settlement_cycle_enforces_settlement_wallet_destination_role(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "destinations": [],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        s, out = self.do("compile_play", {
+            "play": "settlement_cycle",
+            "params": self._settlement_cycle_params(),
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn(
+            "destination role",
+            out["error"],
+        )
+
+    def test_compile_settlement_cycle_enforces_worker_and_hub_roles(self):
+        base_roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        # Hub wallet cannot silently occupy a worker role.
+        roles = {
+            **base_roles,
+            "hubs": [],
+        }
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        s, out = self.do("compile_play", {
+            "play": "settlement_cycle",
+            "params": self._settlement_cycle_params(),
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn("hub role", out["error"])
+
+        self.srv.shutdown()
+        self.srv.server_close()
+        self.srv.controller.close()
+
+        # Worker wallet cannot silently occupy a hub role.
+        roles = {
+            **base_roles,
+            "workers": ["flab_a"],
+        }
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        s, out = self.do("compile_play", {
+            "play": "settlement_cycle",
+            "params": self._settlement_cycle_params(),
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn("worker role", out["error"])
+
+    def test_compile_settlement_cycle_validates_external_settlement_address(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": ["flab_hub_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        wallets = tuple(self.chain.wallets) + (
+            "flab_stage",
+            "flab_hub_a",
+        )
+
+        self.up(
+            wallet_roles=roles,
+            wallets=wallets,
+        )
+
+        params = self._settlement_cycle_params()
+        params["settlement"] = {
+            "mode": "fixed",
+            "items": [{
+                "type": "address",
+                "address": "not-valid",
+                "amount_sats": 50_000_000,
+            }],
+        }
+
+        s, out = self.do("compile_play", {
+            "play": "settlement_cycle",
+            "params": params,
+        })
+
+        self.assertEqual(s, 400)
+        self.assertIn(
+            "valid DigiByte address",
+            out["error"],
+        )
 
     def test_compile_play_accepts_valid_external_destination(self):
         self.up()

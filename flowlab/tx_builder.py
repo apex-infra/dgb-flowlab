@@ -314,6 +314,283 @@ class TxBuilder:
             for i in range(len(items))
         ]
 
+    def build_partial_distribution(
+            self,
+            source_wallet,
+            budget_sats,
+            mode,
+            items,
+            minconf=1,
+            fee_rate=None,
+            allowed_external_addresses=(),
+            utxo_policy=None,
+            phase=None,
+            cohort_outpoints=None,
+            seed_material="",
+    ):
+        """Build one partial multi-output distribution with retained value.
+
+        Explicit payouts consume only part of the gross budget. The
+        unassigned value remains controlled by source_wallet and absorbs
+        the network fee.
+
+        Percentage payouts are calculated from the gross budget and must
+        total less than 10000 basis points.
+
+        Fixed payouts are exact and must total less than the gross budget.
+        """
+        if source_wallet not in self.wallets:
+            raise BuildError(
+                "source wallet is not an experiment wallet"
+            )
+
+        if not isinstance(items, list) or not 1 <= len(items) <= 10:
+            raise BuildError(
+                "partial distribution requires between 1 and 10 destinations"
+            )
+
+        addresses = []
+
+        for i, item in enumerate(items):
+            if not isinstance(item, dict):
+                raise BuildError(
+                    f"partial distribution item {i + 1} must be an object"
+                )
+
+            address = item.get("address")
+
+            if not isinstance(address, str) or not address:
+                raise BuildError(
+                    f"partial distribution item {i + 1} requires an address"
+                )
+
+            addresses.append(address)
+
+            if mode == "percentage":
+                if set(item) != {"address", "percent_bps"}:
+                    raise BuildError(
+                        "percentage partial distribution items require "
+                        "exactly address and percent_bps"
+                    )
+
+                bps = item["percent_bps"]
+
+                if (
+                    not isinstance(bps, int)
+                    or isinstance(bps, bool)
+                    or bps <= 0
+                    or bps > 10_000
+                ):
+                    raise BuildError(
+                        "percent_bps must be an integer in 1..10000"
+                    )
+
+            elif mode == "fixed":
+                if set(item) != {"address", "amount_sats"}:
+                    raise BuildError(
+                        "fixed partial distribution items require "
+                        "exactly address and amount_sats"
+                    )
+
+                amount = item["amount_sats"]
+
+                if (
+                    not isinstance(amount, int)
+                    or isinstance(amount, bool)
+                    or amount <= 0
+                ):
+                    raise BuildError(
+                        "fixed amount_sats must be a positive integer"
+                    )
+
+            else:
+                raise BuildError(
+                    "partial distribution mode must be percentage or fixed"
+                )
+
+        if len(set(addresses)) != len(addresses):
+            raise BuildError(
+                "partial distribution destination addresses must be unique"
+            )
+
+        self._authorize_distribution_addresses(
+            addresses,
+            allowed_external_addresses,
+        )
+
+        if budget_sats != "all":
+            if (
+                not isinstance(budget_sats, int)
+                or isinstance(budget_sats, bool)
+                or budget_sats <= 0
+            ):
+                raise BuildError(
+                    "partial distribution budget must be a positive integer "
+                    "number of satoshis or \"all\""
+                )
+
+            budget = budget_sats
+
+        elif utxo_policy is None:
+            coins = [
+                u
+                for u in self.rpc.list_unspent(source_wallet, minconf)
+                if u.get("spendable", True) and u.get("safe", True)
+            ]
+
+            if not coins:
+                raise BuildError(
+                    "nothing to distribute: the wallet has no confirmed "
+                    "spendable coins"
+                )
+
+            budget = sum(
+                to_sats(u["amount"])
+                for u in coins
+            )
+
+        else:
+            chosen, _ = self._policy_select_inputs(
+                source_wallet,
+                None,
+                sweep=True,
+                utxo_policy=utxo_policy,
+                phase=phase,
+                cohort_outpoints=cohort_outpoints,
+                seed_material=seed_material,
+                reserve_fee=False,
+            )
+
+            if not chosen:
+                raise BuildError(
+                    "nothing to distribute: UTXO policy produced "
+                    "no eligible inputs"
+                )
+
+            budget = sum(
+                u["amount_sats"]
+                if "amount_sats" in u
+                else to_sats(u["amount"])
+                for u in chosen
+            )
+
+        if mode == "percentage":
+            total_bps = sum(
+                item["percent_bps"]
+                for item in items
+            )
+
+            if total_bps >= 10_000:
+                raise BuildError(
+                    "partial percentage distribution must total "
+                    "less than 10000 basis points"
+                )
+
+            payout_items = []
+
+            for item in items:
+                amount = (
+                    budget * item["percent_bps"]
+                ) // 10_000
+
+                if amount <= 0:
+                    raise BuildError(
+                        "every partial distribution output must "
+                        "receive at least one satoshi"
+                    )
+
+                payout_items.append({
+                    "address": item["address"],
+                    "amount_sats": amount,
+                })
+
+        else:
+            fixed_total = sum(
+                item["amount_sats"]
+                for item in items
+            )
+
+            if fixed_total >= budget:
+                raise BuildError(
+                    "fixed partial distribution payouts must leave "
+                    "retained value for the network fee"
+                )
+
+            payout_items = [
+                dict(item)
+                for item in items
+            ]
+
+        payout_total = sum(
+            item["amount_sats"]
+            for item in payout_items
+        )
+
+        if payout_total >= budget:
+            raise BuildError(
+                "partial distribution payouts must leave retained value "
+                "for the network fee"
+            )
+
+        retained_address = self.rpc.get_new_address(
+            source_wallet,
+            "flowlab-retained",
+        )
+
+        if retained_address in addresses:
+            raise BuildError(
+                "generated retained-value address collides with a "
+                "partial distribution destination"
+            )
+
+        terminal_items = [
+            *payout_items,
+            {
+                "address": retained_address,
+                "remainder": True,
+            },
+        ]
+
+        prepared = self.build_distribution(
+            source_wallet,
+            budget,
+            "fixed",
+            terminal_items,
+            minconf=minconf,
+            fee_rate=fee_rate,
+            allowed_external_addresses=allowed_external_addresses,
+            utxo_policy=utxo_policy,
+            phase=phase,
+            cohort_outpoints=cohort_outpoints,
+            seed_material=seed_material,
+        )
+
+        payout_destinations = tuple(
+            (
+                item["address"],
+                item["amount_sats"],
+            )
+            for item in payout_items
+        )
+
+        return PreparedDistribution(
+            source_wallet=prepared.source_wallet,
+            budget_sats=prepared.budget_sats,
+            distributed_sats=sum(
+                amount
+                for _, amount in payout_destinations
+            ),
+            change_address=retained_address,
+            hex=prepared.hex,
+            txid=prepared.txid,
+            fee_sats=prepared.fee_sats,
+            inputs=prepared.inputs,
+            outputs=prepared.outputs,
+            destinations=payout_destinations,
+            utxo_selection=prepared.utxo_selection,
+        )
+
+
     def build_distribution(
             self,
             source_wallet,

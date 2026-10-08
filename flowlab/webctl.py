@@ -43,6 +43,7 @@ TOP_KEYS = {
     "utxo_policy",
     "randomization",
     "finalization",
+    "settlement_cycle",
 }
 FLOW_KEYS = {
     "description",
@@ -57,7 +58,50 @@ FLOW_KEYS = {
     "repeat",
     "transfers",
     "experimental_topology",
+    "flow_identity",
 }
+
+
+def _settlement_cycle_items(cfg):
+    play = cfg.get("play") or {}
+
+    if (
+        play.get("name") != "settlement_cycle"
+        or play.get("version") != 1
+    ):
+        return []
+
+    cycle = cfg.get("settlement_cycle") or {}
+    settlement = cycle.get("settlement") or {}
+    items = settlement.get("items")
+
+    return items if isinstance(items, list) else []
+
+
+def _settlement_cycle_wallets(cfg):
+    return [
+        item["wallet"]
+        for item in _settlement_cycle_items(cfg)
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "wallet"
+            and isinstance(item.get("wallet"), str)
+            and item["wallet"]
+        )
+    ]
+
+
+def _settlement_cycle_addresses(cfg):
+    return [
+        item["address"]
+        for item in _settlement_cycle_items(cfg)
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "address"
+            and isinstance(item.get("address"), str)
+            and item["address"]
+        )
+    ]
 
 
 class ControlError(Exception):
@@ -133,11 +177,125 @@ class Controller:
         if self.active():
             raise ControlError("a run is active; stop it first")
 
+    def _validate_settlement_cycle_wallet_policy(self, cfg):
+        play = cfg.get("play") or {}
+
+        if not (
+            play.get("name") == "settlement_cycle"
+            and play.get("version") == 1
+        ):
+            return
+
+        cycle = cfg.get("settlement_cycle") or {}
+
+        used = set()
+
+        for fl in cfg.get("flows", []):
+            used.add(fl["source_wallet"])
+            used.update(fl["flow_wallets"])
+
+        used.update(
+            _settlement_cycle_wallets(cfg)
+        )
+
+        outside = sorted(
+            used - set(self.wallets)
+        )
+
+        if outside:
+            raise ControlError(
+                "Settlement Cycle references wallet(s) outside "
+                "the dashboard allowlist: "
+                + ", ".join(outside)
+            )
+
+        if not self.wallet_roles:
+            return
+
+        reserve = set(
+            self.wallet_roles.get("reserve", [])
+        )
+        stage_role = set(
+            self.wallet_roles.get("stage", [])
+        )
+        worker_role = set(
+            self.wallet_roles.get("workers", [])
+        )
+        hub_role = set(
+            self.wallet_roles.get("hubs", [])
+        )
+        destinations = set(
+            self.wallet_roles.get("destinations", [])
+        )
+
+        workers = set(
+            cycle.get("workers", [])
+        )
+        hubs = set(
+            cycle.get("hubs", [])
+        )
+
+        wrong_workers = sorted(
+            workers - worker_role
+        )
+
+        if wrong_workers:
+            raise ControlError(
+                "Settlement Cycle worker wallet(s) must have "
+                "worker role: "
+                + ", ".join(wrong_workers)
+            )
+
+        wrong_hubs = sorted(
+            hubs - hub_role
+        )
+
+        if wrong_hubs:
+            raise ControlError(
+                "Settlement Cycle hub wallet(s) must have "
+                "hub role: "
+                + ", ".join(wrong_hubs)
+            )
+
+        for destination in _settlement_cycle_wallets(cfg):
+            if destination not in destinations:
+                raise ControlError(
+                    f"play settlement wallet {destination} "
+                    "must have destination role"
+                )
+
+        for fl in cfg.get("flows", []):
+            source = fl["source_wallet"]
+            stage = fl.get("allocation_wallet")
+
+            if source not in reserve:
+                raise ControlError(
+                    f"play source wallet {source} "
+                    "must have reserve role"
+                )
+
+            if stage not in stage_role:
+                raise ControlError(
+                    f"play allocation wallet {stage} "
+                    "must have stage role"
+                )
+
     def _validate_external_destinations(self, cfg):
         external = []
 
-        for fl in cfg.get("flows", []):
-            external.extend(destination_addresses(fl))
+        settlement_cycle = bool(
+            isinstance(cfg.get("play"), dict)
+            and cfg["play"].get("name") == "settlement_cycle"
+            and cfg["play"].get("version") == 1
+        )
+
+        if settlement_cycle:
+            external.extend(
+                _settlement_cycle_addresses(cfg)
+            )
+        else:
+            for fl in cfg.get("flows", []):
+                external.extend(destination_addresses(fl))
 
         if not external:
             return
@@ -343,80 +501,118 @@ class Controller:
 
         cfg = compile_play(name, params)
         self._validate_external_destinations(cfg)
+        self._validate_settlement_cycle_wallet_policy(cfg)
 
-        # A dashboard play may only reference wallets configured for this
-        # FlowLab instance. The play compiler itself stays environment-agnostic.
-        used = set()
-        for fl in cfg["flows"]:
-            used.add(fl["source_wallet"])
-            used.update(fl["flow_wallets"])
-            used.update(destination_wallets(fl))
+        # Settlement Cycle policy is config-derived and shared with direct
+        # new(), so it is enforced only by
+        # _validate_settlement_cycle_wallet_policy().
+        settlement_cycle = (
+            name == "settlement_cycle"
+        )
 
-        outside = sorted(used - set(self.wallets))
-        if outside:
-            raise ControlError(
-                "play references wallet(s) outside the dashboard allowlist: "
-                + ", ".join(outside)
-            )
-
-        # When wallet-role metadata is configured, it is authoritative for
-        # dashboard Plays. The generic play compiler intentionally remains
-        # environment-agnostic.
-        if self.wallet_roles:
-            reserve = set(self.wallet_roles.get("reserve", []))
-            stage_role = set(self.wallet_roles.get("stage", []))
-            worker_role = set(self.wallet_roles.get("workers", []))
-            hub_role = set(self.wallet_roles.get("hubs", []))
-            workload = worker_role | hub_role
-            destinations = set(self.wallet_roles.get("destinations", []))
-
-            if name == "hub_and_spoke":
-                hub = params.get("hub_wallet")
-                if hub not in hub_role:
-                    raise ControlError(
-                        f"play hub wallet {hub} must have hub role"
-                    )
-
-                wrong_spokes = sorted(
-                    set(params.get("workers", [])) - worker_role
-                )
-                if wrong_spokes:
-                    raise ControlError(
-                        "Hub-and-Spoke spoke wallet(s) must have worker role: "
-                        + ", ".join(wrong_spokes)
-                    )
+        if not settlement_cycle:
+            # A dashboard play may only reference wallets configured for this
+            # FlowLab instance. The play compiler itself stays
+            # environment-agnostic.
+            used = set()
 
             for fl in cfg["flows"]:
-                source = fl["source_wallet"]
-                stage = fl.get("allocation_wallet")
+                used.add(fl["source_wallet"])
+                used.update(fl["flow_wallets"])
+                used.update(destination_wallets(fl))
 
-                if source not in reserve:
-                    raise ControlError(
-                        f"play source wallet {source} must have reserve role"
-                    )
+            outside = sorted(
+                used - set(self.wallets)
+            )
 
-                if stage not in stage_role:
-                    raise ControlError(
-                        f"play allocation wallet {stage} must have stage role"
-                    )
+            if outside:
+                raise ControlError(
+                    "play references wallet(s) outside the dashboard "
+                    "allowlist: "
+                    + ", ".join(outside)
+                )
 
-                for destination in destination_wallets(fl):
-                    if destination not in destinations:
+            # When wallet-role metadata is configured, it is authoritative
+            # for dashboard Plays. The generic play compiler intentionally
+            # remains environment-agnostic.
+            if self.wallet_roles:
+                reserve = set(
+                    self.wallet_roles.get("reserve", [])
+                )
+                stage_role = set(
+                    self.wallet_roles.get("stage", [])
+                )
+                worker_role = set(
+                    self.wallet_roles.get("workers", [])
+                )
+                hub_role = set(
+                    self.wallet_roles.get("hubs", [])
+                )
+                workload = worker_role | hub_role
+                destinations = set(
+                    self.wallet_roles.get("destinations", [])
+                )
+
+                if name == "hub_and_spoke":
+                    hub = params.get("hub_wallet")
+
+                    if hub not in hub_role:
                         raise ControlError(
-                            f"play destination wallet {destination} "
-                            "must have destination role"
+                            f"play hub wallet {hub} must have hub role"
                         )
 
-                workers = set(fl["flow_wallets"])
-                if stage is not None:
-                    workers.discard(stage)
-
-                wrong_workers = sorted(workers - workload)
-                if wrong_workers:
-                    raise ControlError(
-                        "play workload wallet(s) must have worker or hub role: "
-                        + ", ".join(wrong_workers)
+                    wrong_spokes = sorted(
+                        set(params.get("workers", []))
+                        - worker_role
                     )
+
+                    if wrong_spokes:
+                        raise ControlError(
+                            "Hub-and-Spoke spoke wallet(s) must have "
+                            "worker role: "
+                            + ", ".join(wrong_spokes)
+                        )
+
+                for fl in cfg["flows"]:
+                    source = fl["source_wallet"]
+                    stage = fl.get("allocation_wallet")
+
+                    if source not in reserve:
+                        raise ControlError(
+                            f"play source wallet {source} "
+                            "must have reserve role"
+                        )
+
+                    if stage not in stage_role:
+                        raise ControlError(
+                            f"play allocation wallet {stage} "
+                            "must have stage role"
+                        )
+
+                    for destination in destination_wallets(fl):
+                        if destination not in destinations:
+                            raise ControlError(
+                                f"play destination wallet {destination} "
+                                "must have destination role"
+                            )
+
+                    workers = set(
+                        fl["flow_wallets"]
+                    )
+
+                    if stage is not None:
+                        workers.discard(stage)
+
+                    wrong_workers = sorted(
+                        workers - workload
+                    )
+
+                    if wrong_workers:
+                        raise ControlError(
+                            "play workload wallet(s) must have worker "
+                            "or hub role: "
+                            + ", ".join(wrong_workers)
+                        )
 
         return {
             "play": get_play_spec(name),
@@ -435,6 +631,7 @@ class Controller:
             raise ControlError("not supported here: " + ", ".join(sorted(extra)))
         cfg = validate(cfg)
         self._validate_external_destinations(cfg)
+        self._validate_settlement_cycle_wallet_policy(cfg)
 
         experimental = bool(cfg.get("randomization", {}).get("enabled"))
         if not experimental:

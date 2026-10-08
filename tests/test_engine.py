@@ -18,6 +18,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flowlab import (ApprovalError, ConfigError, EmergencyStopActive, Engine,  # noqa: E402
                      EngineError, GuardFailed, IllegalTransition, Verifier)
 from flowlab.states import REQUIRED_CHECKS  # noqa: E402
+from flowlab.plays import compile_play  # noqa: E402
 
 
 class FakeVerifier(Verifier):
@@ -245,6 +246,69 @@ class ApprovalTests(Base):
             self.e.approve(exp, h2)                        # second approval
         with self.assertRaises(IllegalTransition):
             self.e.configure_experiment(exp, CFG)          # no edits after approval
+
+    def test_settlement_cycle_approval_persists_synthetic_flow_identity(self):
+        cfg = compile_play(
+            "settlement_cycle",
+            {
+                "source_wallet": "w1_source",
+                "allocation_wallet": "w2_stage",
+                "workers": ["w3_worker", "w4_worker"],
+                "hubs": ["w5_hub"],
+                "allocation_sats": 500_000_000,
+                "outbound_decisions": 10,
+                "return_decisions": 6,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "settlement_delay_seconds_min": 30,
+                "settlement_delay_seconds_max": 180,
+                "reserve_return_delay_seconds_min": 0,
+                "reserve_return_delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 400,
+                "max_total_transactions": 100,
+                "settlement": {
+                    "mode": "fixed",
+                    "items": [{
+                        "type": "address",
+                        "address": "DExternalSettlement",
+                        "amount_sats": 50_000_000,
+                    }],
+                },
+            },
+        )
+
+        exp = self.e.create_experiment("settlement cycle")
+        h = self.e.configure_experiment(exp, cfg)
+        self.e.approve(exp, h)
+
+        flow = self.e.list_flows(exp)[0]
+        approved_flow = cfg["flows"][0]
+
+        self.assertTrue(
+            flow["destination_wallet"].startswith(
+                "settlement_cycle:"
+            )
+        )
+        self.assertEqual(
+            flow["destination_wallet"],
+            approved_flow["flow_identity"],
+        )
+        self.assertEqual(
+            flow["source_wallet"],
+            "w1_source",
+        )
+        self.assertEqual(
+            json.loads(flow["flow_wallets_json"]),
+            [
+                "w2_stage",
+                "w5_hub",
+                "w3_worker",
+                "w4_worker",
+            ],
+        )
 
     def test_config_immutable_at_database_level(self):
         exp = self.approved()

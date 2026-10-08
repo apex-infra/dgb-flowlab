@@ -69,12 +69,41 @@ class NodeVerifier(Verifier):
 
         cfg_flow = self._config_flow(experiment, flow)
 
+        settlement_cycle = False
+
+        if cfg_flow is not None and experiment:
+            raw = experiment.get("config_json")
+
+            if raw:
+                cfg = json.loads(raw)
+                play = cfg.get("play") or {}
+
+                settlement_cycle = (
+                    play.get("name") == "settlement_cycle"
+                    and play.get("version") == 1
+                )
+
         # Fail closed if the DB flow cannot be matched to its immutable
-        # approved config. For a matched multi-destination flow, require
-        # every internal terminal wallet but never treat the DB's
-        # destinations:<hash> identity marker as a wallet.
+        # approved config. Synthetic identities are never treated as wallet
+        # names once their config has been positively matched.
         if cfg_flow is None:
             wallets.append(flow["destination_wallet"])
+        elif settlement_cycle:
+            # Reserve, Stage, hubs, and workers are already represented by
+            # source_wallet + flow_wallets_json. Settlement Cycle has no
+            # terminal destination wallet, but internal settlement payout
+            # wallets are still real Core wallets and must be verified.
+            cfg = json.loads(
+                experiment["config_json"]
+            )
+            settlement = (
+                cfg.get("settlement_cycle", {})
+                .get("settlement", {})
+            )
+
+            for item in settlement.get("items", []):
+                if item.get("type") == "wallet":
+                    wallets.append(item["wallet"])
         elif has_multi_destinations(cfg_flow):
             wallets.extend(destination_wallets(cfg_flow))
         elif not destination_is_external(cfg_flow):

@@ -358,6 +358,156 @@ class DistributionBuildTests(unittest.TestCase):
             )
 
 
+class PartialDistributionBuildTests(unittest.TestCase):
+    def setUp(self):
+        self.chain = FakeChain(WALLETS)
+        self.chain.fund("flab_source", 1_000_000_000)
+        self.chain.mine(3)
+        self.b = TxBuilder(
+            self.chain,
+            WALLETS,
+            max_fee_sats=10_000_000,
+        )
+        self.internal = self.chain.get_new_address(
+            "flab_dest",
+            "partial-distribution-test",
+        )
+        self.external_a = "dgb1qexternalone"
+        self.external_b = "dgb1qexternaltwo"
+
+    def test_fixed_partial_distribution_retains_unassigned_value_as_change(self):
+        prepared = self.b.build_partial_distribution(
+            "flab_source",
+            "all",
+            "fixed",
+            [{
+                "address": self.external_a,
+                "amount_sats": 300_000_000,
+            }],
+            allowed_external_addresses={self.external_a},
+        )
+
+        self.assertEqual(prepared.budget_sats, 1_000_000_000)
+        self.assertEqual(prepared.fee_sats, FEE)
+        self.assertEqual(prepared.distributed_sats, 300_000_000)
+        self.assertEqual(
+            prepared.destinations,
+            ((self.external_a, 300_000_000),),
+        )
+        self.assertIn(
+            (
+                prepared.change_address,
+                700_000_000 - FEE,
+            ),
+            prepared.outputs,
+        )
+
+    def test_percentage_partial_distribution_uses_gross_budget(self):
+        prepared = self.b.build_partial_distribution(
+            "flab_source",
+            "all",
+            "percentage",
+            [
+                {
+                    "address": self.internal,
+                    "percent_bps": 2000,
+                },
+                {
+                    "address": self.external_a,
+                    "percent_bps": 500,
+                },
+            ],
+            allowed_external_addresses={self.external_a},
+        )
+
+        self.assertEqual(prepared.budget_sats, 1_000_000_000)
+        self.assertEqual(prepared.fee_sats, FEE)
+        self.assertEqual(
+            prepared.destinations,
+            (
+                (self.internal, 200_000_000),
+                (self.external_a, 50_000_000),
+            ),
+        )
+        self.assertEqual(
+            prepared.distributed_sats,
+            250_000_000,
+        )
+        self.assertIn(
+            (
+                prepared.change_address,
+                750_000_000 - FEE,
+            ),
+            prepared.outputs,
+        )
+
+    def test_partial_percentage_must_total_less_than_100_percent(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "less than 10000 basis points",
+        ):
+            self.b.build_partial_distribution(
+                "flab_source",
+                "all",
+                "percentage",
+                [{
+                    "address": self.internal,
+                    "percent_bps": 10_000,
+                }],
+            )
+
+    def test_partial_fixed_payouts_must_leave_retained_value_for_fee(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "must leave retained value",
+        ):
+            self.b.build_partial_distribution(
+                "flab_source",
+                "all",
+                "fixed",
+                [{
+                    "address": self.internal,
+                    "amount_sats": 1_000_000_000,
+                }],
+            )
+
+    def test_partial_distribution_external_address_requires_approval(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "explicitly approved external address",
+        ):
+            self.b.build_partial_distribution(
+                "flab_source",
+                "all",
+                "fixed",
+                [{
+                    "address": self.external_a,
+                    "amount_sats": 100_000_000,
+                }],
+            )
+
+    def test_partial_distribution_refuses_duplicate_addresses(self):
+        with self.assertRaisesRegex(
+            BuildError,
+            "must be unique",
+        ):
+            self.b.build_partial_distribution(
+                "flab_source",
+                "all",
+                "fixed",
+                [
+                    {
+                        "address": self.internal,
+                        "amount_sats": 100_000_000,
+                    },
+                    {
+                        "address": self.internal,
+                        "amount_sats": 50_000_000,
+                    },
+                ],
+            )
+
+
 class BroadcastTests(NodeCase, test_engine.Base):
     def setUp(self):
         super().setUp()

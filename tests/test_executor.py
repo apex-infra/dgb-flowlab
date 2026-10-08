@@ -10,7 +10,7 @@ from flowlab import Engine
 from flowlab.executor import Executor
 from flowlab.node_verifier import NodeVerifier
 from flowlab.plays import compile_play
-from flowlab.rpc import RpcError
+from flowlab.rpc import RpcError, to_sats
 from flowlab.tx_builder import BuildError, TxBuilder
 from tests.fake_chain import FEE, FakeChain
 from tests.test_engine import FakeVerifier
@@ -116,6 +116,87 @@ MULTI_EXP_CFG["finalization"] = {
 }
 
 
+SETTLEMENT_CYCLE_MIXED_CFG = compile_play(
+    "settlement_cycle",
+    {
+        "source_wallet": "flab_source",
+        "allocation_wallet": "flab_stage",
+        "workers": ["flab_a", "flab_b"],
+        "hubs": [],
+        "allocation_sats": 500_000_000,
+        "outbound_decisions": 2,
+        "return_decisions": 2,
+        "amount_sats_min": 25_000_000,
+        "amount_sats_max": 75_000_000,
+        "delay_seconds_min": 0,
+        "delay_seconds_max": 0,
+        "settlement_delay_seconds_min": 0,
+        "settlement_delay_seconds_max": 0,
+        "reserve_return_delay_seconds_min": 0,
+        "reserve_return_delay_seconds_max": 0,
+        "confirmations_required": 2,
+        "seed": 105,
+        "max_total_transactions": 30,
+        "settlement": {
+            "mode": "fixed",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": "flab_dest",
+                    "amount_sats": 25_000_000,
+                },
+                {
+                    "type": "address",
+                    "address": EXTERNAL,
+                    "amount_sats": 20_000_000,
+                },
+            ],
+        },
+    },
+)
+
+
+SETTLEMENT_CYCLE_CFG = compile_play(
+    "settlement_cycle",
+    {
+        "source_wallet": "flab_source",
+        "allocation_wallet": "flab_stage",
+        "workers": ["flab_a", "flab_b"],
+        "hubs": [],
+        "allocation_sats": 500_000_000,
+        "outbound_decisions": 2,
+        "return_decisions": 2,
+        "amount_sats_min": 25_000_000,
+        "amount_sats_max": 75_000_000,
+        "delay_seconds_min": 0,
+        "delay_seconds_max": 0,
+        "settlement_delay_seconds_min": 0,
+        "settlement_delay_seconds_max": 0,
+        "reserve_return_delay_seconds_min": 0,
+        "reserve_return_delay_seconds_max": 0,
+        "confirmations_required": 2,
+        "seed": 104,
+        "max_total_transactions": 30,
+        "settlement": {
+            "mode": "fixed",
+            "items": [{
+                "type": "wallet",
+                "wallet": "flab_dest",
+                "amount_sats": 50_000_000,
+            }],
+        },
+    },
+)
+
+
+SETTLEMENT_CYCLE_SNAPSHOT_CFG = copy.deepcopy(
+    SETTLEMENT_CYCLE_CFG
+)
+SETTLEMENT_CYCLE_SNAPSHOT_CFG[
+    "utxo_policy"
+]["default"]["scope"] = "snapshot_at_start"
+
+
 FAN_OUT_FAN_IN_CFG = compile_play(
     "fan_out_fan_in",
     {
@@ -171,6 +252,873 @@ class ExecBase(unittest.TestCase):
 
     def sent(self):
         return [t for t in self.chain.txs.values() if t["inputs"]]
+
+
+class SettlementCycleSnapshotIsolationTests(ExecBase):
+    config = SETTLEMENT_CYCLE_SNAPSHOT_CFG
+
+    def test_dirty_worker_refuses_before_start_cohort_capture(self):
+        self.chain.fund(
+            "flab_a",
+            12_345_678,
+        )
+        self.chain.mine(3)
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        self.assertIsNone(
+            self.e.get_utxo_cohort(
+                flow["id"],
+                "snapshot_at_start",
+            )
+        )
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn(
+            "Settlement Cycle requires empty worker and hub wallets",
+            r["blocked"],
+        )
+        self.assertIn(
+            "flab_a",
+            r["blocked"],
+        )
+
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "PAUSED",
+        )
+
+        self.assertEqual(
+            self.e.list_jobs(flow["id"]),
+            [],
+        )
+
+        self.assertEqual(
+            self.sent(),
+            [],
+        )
+
+        self.assertIsNone(
+            self.e.get_utxo_cohort(
+                flow["id"],
+                "snapshot_at_start",
+            ),
+            "dirty Settlement Cycle must not persist an immutable "
+            "experiment-start cohort",
+        )
+
+
+class SettlementCycleLifecycleDispatchTests(ExecBase):
+    config = SETTLEMENT_CYCLE_CFG
+
+    def test_start_enters_settlement_progressive_planning(self):
+        r = self.x.tick(self.exp)
+
+        self.assertIsNone(r["blocked"], r)
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        self.assertEqual(
+            self.e.get_flow(flow["id"])["state"],
+            "PLAN",
+        )
+
+        self.assertEqual(
+            self.e.list_jobs(flow["id"]),
+            [],
+        )
+
+    def test_dirty_worker_refuses_before_settlement_allocation(self):
+        self.chain.fund(
+            "flab_a",
+            12_345_678,
+        )
+        self.chain.mine(3)
+
+        # START -> PLAN is still harmless; no transaction or job exists yet.
+        r = self.x.tick(self.exp)
+        self.assertIsNone(r["blocked"], r)
+
+        # The first PLAN tick must refuse before creating the allocation job.
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn(
+            "Settlement Cycle requires empty worker and hub wallets",
+            r["blocked"],
+        )
+        self.assertIn(
+            "flab_a",
+            r["blocked"],
+        )
+
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "PAUSED",
+        )
+        self.assertEqual(
+            self.sent(),
+            [],
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        self.assertEqual(
+            self.e.list_jobs(flow["id"]),
+            [],
+        )
+
+    def test_dirty_hub_refuses_before_settlement_allocation(self):
+        cfg = compile_play(
+            "settlement_cycle",
+            {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "hubs": ["flab_hub_a"],
+                "allocation_sats": 500_000_000,
+                "outbound_decisions": 2,
+                "return_decisions": 2,
+                "amount_sats_min": 25_000_000,
+                "amount_sats_max": 75_000_000,
+                "delay_seconds_min": 0,
+                "delay_seconds_max": 0,
+                "settlement_delay_seconds_min": 0,
+                "settlement_delay_seconds_max": 0,
+                "reserve_return_delay_seconds_min": 0,
+                "reserve_return_delay_seconds_max": 0,
+                "confirmations_required": 2,
+                "seed": 106,
+                "max_total_transactions": 30,
+                "settlement": {
+                    "mode": "fixed",
+                    "items": [{
+                        "type": "wallet",
+                        "wallet": "flab_dest",
+                        "amount_sats": 50_000_000,
+                    }],
+                },
+            },
+        )
+
+        self.e.conn.close()
+        self.dir.cleanup()
+
+        self.dir = tempfile.TemporaryDirectory()
+        self.t = datetime(
+            2026, 10, 5, 12, 0, 0,
+            tzinfo=timezone.utc,
+        )
+        self.chain = FakeChain(W)
+        self.chain.fund(
+            "flab_source",
+            3_500_000_000,
+        )
+        self.chain.fund(
+            "flab_hub_a",
+            12_345_678,
+        )
+        self.chain.mine(3)
+
+        self.v = FakeVerifier()
+        self.e = Engine(
+            os.path.join(
+                self.dir.name,
+                "x.db",
+            ),
+            verifier=self.v,
+            clock=lambda: self.t,
+        )
+        self.b = TxBuilder(
+            self.chain,
+            W,
+            max_fee_sats=10_000_000,
+        )
+        self.x = Executor(
+            self.e,
+            self.chain,
+            self.b,
+        )
+
+        exp = self.e.create_experiment("exec")
+
+        self.e.approve(
+            exp,
+            self.e.configure_experiment(
+                exp,
+                cfg,
+            ),
+        )
+        self.e.start(exp)
+        self.exp = exp
+
+        # START -> PLAN.
+        r = self.x.tick(self.exp)
+        self.assertIsNone(r["blocked"], r)
+
+        # First PLAN tick must refuse before allocation.
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn(
+            "Settlement Cycle requires empty worker and hub wallets",
+            r["blocked"],
+        )
+        self.assertIn(
+            "flab_hub_a",
+            r["blocked"],
+        )
+
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "PAUSED",
+        )
+        self.assertEqual(
+            self.sent(),
+            [],
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        self.assertEqual(
+            self.e.list_jobs(flow["id"]),
+            [],
+        )
+
+    def test_pending_worker_refuses_before_settlement_allocation(self):
+        original = self.chain.get_balances
+
+        def contaminated(wallet):
+            result = original(wallet)
+
+            if wallet == "flab_a":
+                result = copy.deepcopy(result)
+                result["mine"]["untrusted_pending"] = Decimal(
+                    "0.12345678"
+                )
+
+            return result
+
+        self.chain.get_balances = contaminated
+
+        self.x.tick(self.exp)
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn(
+            "Settlement Cycle requires empty worker and hub wallets",
+            r["blocked"],
+        )
+        self.assertIn(
+            "untrusted_pending=12345678 sats",
+            r["blocked"],
+        )
+        self.assertEqual(
+            self.sent(),
+            [],
+        )
+
+    def test_immature_worker_refuses_before_settlement_allocation(self):
+        original = self.chain.get_balances
+
+        def contaminated(wallet):
+            result = original(wallet)
+
+            if wallet == "flab_a":
+                result = copy.deepcopy(result)
+                result["mine"]["immature"] = Decimal(
+                    "0.12345678"
+                )
+
+            return result
+
+        self.chain.get_balances = contaminated
+
+        self.x.tick(self.exp)
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn(
+            "Settlement Cycle requires empty worker and hub wallets",
+            r["blocked"],
+        )
+        self.assertIn(
+            "immature=12345678 sats",
+            r["blocked"],
+        )
+        self.assertEqual(
+            self.sent(),
+            [],
+        )
+
+    def test_plan_generates_allocation_then_settlement_workload(self):
+        flow = self.e.list_flows(self.exp)[0]
+
+        # START -> PLAN
+        r = self.x.tick(self.exp)
+        self.assertIsNone(r["blocked"], r)
+
+        # PLAN -> allocation job / EXECUTE
+        r = self.x.tick(self.exp)
+        self.assertIsNone(r["blocked"], r)
+
+        jobs = self.e.list_jobs(flow["id"])
+        self.assertEqual(len(jobs), 1)
+
+        allocation = jobs[0]
+        allocation_meta = json.loads(
+            allocation["generated_from_json"] or "{}"
+        )
+
+        self.assertEqual(
+            allocation_meta.get("phase"),
+            "allocation",
+        )
+        self.assertEqual(
+            json.loads(allocation["planned_json"])["to"],
+            "flab_stage",
+        )
+
+        # Execute + confirm allocation.
+        self.x.tick(self.exp)
+        self.chain.mine(2)
+        self.x.tick(self.exp)
+
+        # NEXT_STATE must return to PLAN, not COMPLETE.
+        r = self.x.tick(self.exp)
+        self.assertIsNone(r["blocked"], r)
+
+        self.assertEqual(
+            self.e.get_flow(flow["id"])["state"],
+            "PLAN",
+        )
+
+        # PLAN generates first outbound Settlement Cycle decision.
+        r = self.x.tick(self.exp)
+        self.assertIsNone(r["blocked"], r)
+
+        jobs = self.e.list_jobs(flow["id"])
+        self.assertEqual(len(jobs), 2)
+
+        workload = jobs[1]
+        workload_meta = json.loads(
+            workload["generated_from_json"] or "{}"
+        )
+
+        self.assertEqual(
+            workload_meta.get("phase"),
+            "workload",
+        )
+        self.assertEqual(
+            workload_meta.get("source"),
+            "settlement cycle outbound",
+        )
+
+
+class SettlementCycleMixedExecutionTests(ExecBase):
+    config = SETTLEMENT_CYCLE_MIXED_CFG
+
+    def test_mixed_wallet_and_external_settlement_executes(self):
+        settlement = None
+
+        for _ in range(200):
+            r = self.x.tick(self.exp)
+
+            self.assertIsNone(
+                r["blocked"],
+                r,
+            )
+
+            flow = self.e.list_flows(self.exp)[0]
+            matches = [
+                job
+                for job in self.e.list_jobs(flow["id"])
+                if json.loads(
+                    job["generated_from_json"] or "{}"
+                ).get("phase") == "settlement"
+            ]
+
+            if matches:
+                settlement = matches[0]
+
+                if (
+                    settlement["state"] == "PLANNED"
+                    and self.e.get_flow(flow["id"])["state"]
+                    == "EXECUTE"
+                ):
+                    break
+
+            self.t += timedelta(
+                seconds=r["wait_s"] or 1
+            )
+            self.chain.mine(2)
+        else:
+            self.fail(
+                "mixed Settlement Cycle did not reach settlement EXECUTE"
+            )
+
+        stage_before = to_sats(
+            self.chain.get_balances(
+                "flab_stage"
+            )["mine"]["trusted"]
+        )
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNone(r["blocked"], r)
+
+        settlement = self.e.get_job(settlement["id"])
+        self.assertEqual(
+            settlement["state"],
+            "BROADCAST",
+        )
+
+        result = json.loads(
+            settlement["result_json"]
+        )
+
+        self.assertEqual(
+            len(result["destinations"]),
+            2,
+        )
+
+        internal = next(
+            item
+            for item in result["destinations"]
+            if item["type"] == "wallet"
+        )
+        external = next(
+            item
+            for item in result["destinations"]
+            if item["type"] == "address"
+        )
+
+        self.assertEqual(
+            internal["wallet"],
+            "flab_dest",
+        )
+        self.assertEqual(
+            internal["amount_sats"],
+            25_000_000,
+        )
+        self.assertTrue(
+            self.chain.get_address_info(
+                "flab_dest",
+                internal["resolved_address"],
+            ).get("ismine")
+        )
+
+        self.assertEqual(
+            external["address"],
+            EXTERNAL,
+        )
+        self.assertEqual(
+            external["resolved_address"],
+            EXTERNAL,
+        )
+        self.assertEqual(
+            external["amount_sats"],
+            20_000_000,
+        )
+
+        tx = self.chain.txs[
+            settlement["txid"]
+        ]
+        outputs = dict(tx["outputs"])
+
+        self.assertEqual(
+            outputs[internal["resolved_address"]],
+            25_000_000,
+        )
+        self.assertEqual(
+            outputs[EXTERNAL],
+            20_000_000,
+        )
+
+        retained = [
+            sats
+            for address, sats in tx["outputs"]
+            if self.chain.get_address_info(
+                "flab_stage",
+                address,
+            ).get("ismine")
+        ]
+
+        self.assertEqual(len(retained), 1)
+        self.assertEqual(
+            retained[0],
+            stage_before
+            - 45_000_000
+            - FEE,
+        )
+
+
+class SettlementCycleExecutionTests(ExecBase):
+    config = SETTLEMENT_CYCLE_CFG
+
+    def _drive_to_settlement_execute(self):
+        settlement = None
+
+        for _ in range(200):
+            r = self.x.tick(self.exp)
+
+            self.assertIsNone(
+                r["blocked"],
+                r,
+            )
+
+            flow = self.e.list_flows(self.exp)[0]
+            jobs = self.e.list_jobs(flow["id"])
+
+            matches = [
+                job
+                for job in jobs
+                if json.loads(
+                    job["generated_from_json"] or "{}"
+                ).get("phase") == "settlement"
+            ]
+
+            if matches:
+                settlement = matches[0]
+
+                if (
+                    settlement["state"] == "PLANNED"
+                    and self.e.get_flow(flow["id"])["state"]
+                    == "EXECUTE"
+                ):
+                    return flow, settlement
+
+            self.t += timedelta(
+                seconds=r["wait_s"] or 1
+            )
+            self.chain.mine(2)
+
+        self.fail(
+            "Settlement Cycle did not reach settlement EXECUTE"
+        )
+
+    def test_intermediate_settlement_builds_partial_distribution(self):
+        flow, settlement = self._drive_to_settlement_execute()
+
+        plan = json.loads(settlement["planned_json"])
+
+        self.assertEqual(
+            plan["settlement"],
+            SETTLEMENT_CYCLE_CFG["settlement_cycle"]["settlement"],
+        )
+        self.assertEqual(plan["from"], "flab_stage")
+        self.assertEqual(plan["amount_sats"], "all")
+        self.assertNotIn("to", plan)
+
+        stage_before = to_sats(
+            self.chain.get_balances(
+                "flab_stage"
+            )["mine"]["trusted"]
+        )
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNone(r["blocked"], r)
+
+        settlement = self.e.get_job(settlement["id"])
+
+        self.assertEqual(
+            settlement["state"],
+            "BROADCAST",
+        )
+
+        result = json.loads(
+            settlement["result_json"]
+        )
+
+        self.assertEqual(
+            len(result["destinations"]),
+            1,
+        )
+
+        payout = result["destinations"][0]
+
+        self.assertEqual(
+            payout["type"],
+            "wallet",
+        )
+        self.assertEqual(
+            payout["wallet"],
+            "flab_dest",
+        )
+        self.assertTrue(
+            payout["resolved_address"],
+        )
+        self.assertEqual(
+            payout["amount_sats"],
+            50_000_000,
+        )
+
+        self.assertTrue(
+            self.chain.get_address_info(
+                "flab_dest",
+                payout["resolved_address"],
+            ).get("ismine")
+        )
+
+        tx = self.chain.txs[settlement["txid"]]
+        outputs = dict(tx["outputs"])
+
+        self.assertEqual(
+            outputs[payout["resolved_address"]],
+            50_000_000,
+        )
+
+        retained = [
+            sats
+            for address, sats in tx["outputs"]
+            if self.chain.get_address_info(
+                "flab_stage",
+                address,
+            ).get("ismine")
+        ]
+
+        self.assertEqual(len(retained), 1)
+
+        self.assertEqual(
+            retained[0],
+            stage_before
+            - 50_000_000
+            - FEE,
+        )
+
+    def test_full_settlement_cycle_completes_and_reconciles(self):
+        r = self.run_all(limit=400)
+
+        self.assertTrue(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+
+        exp = self.e.get_experiment(self.exp)
+
+        self.assertEqual(
+            exp["state"],
+            "COMPLETE",
+        )
+
+        flow = self.e.list_flows(self.exp)[0]
+        jobs = self.e.list_jobs(flow["id"])
+
+        self.assertTrue(jobs)
+        self.assertTrue(
+            all(job["state"] == "CONFIRMED" for job in jobs),
+            jobs,
+        )
+
+        phases = [
+            json.loads(
+                job["generated_from_json"] or "{}"
+            ).get("phase")
+            for job in jobs
+        ]
+
+        self.assertEqual(phases[0], "allocation")
+        self.assertEqual(phases[-1], "reserve_return")
+
+        self.assertEqual(
+            phases.count("workload"),
+            SETTLEMENT_CYCLE_CFG[
+                "settlement_cycle"
+            ]["outbound"]["decisions"],
+        )
+        self.assertEqual(
+            phases.count("settlement"),
+            1,
+        )
+        self.assertEqual(
+            phases.count("return_workload"),
+            SETTLEMENT_CYCLE_CFG[
+                "settlement_cycle"
+            ]["return"]["decisions"],
+        )
+        self.assertEqual(
+            phases.count("reserve_return"),
+            1,
+        )
+
+        stats = json.loads(exp["stats_json"])
+
+        self.assertEqual(
+            stats["issues"],
+            [],
+        )
+
+        final = json.loads(
+            exp["final_state_json"]
+        )["balances_sats"]
+
+        self.assertEqual(
+            final["flab_stage"],
+            0,
+        )
+        self.assertEqual(
+            final["flab_a"],
+            0,
+        )
+        self.assertEqual(
+            final["flab_b"],
+            0,
+        )
+
+        # Fixed intermediate settlement payout.
+        self.assertEqual(
+            final["flab_dest"],
+            50_000_000,
+        )
+
+    def test_settlement_reconciliation_catches_wrong_payout_output(self):
+        r = self.run_all(limit=400)
+
+        self.assertTrue(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        settlement = next(
+            job
+            for job in self.e.list_jobs(flow["id"])
+            if json.loads(
+                job["generated_from_json"] or "{}"
+            ).get("phase") == "settlement"
+        )
+
+        recorded = json.loads(
+            settlement["result_json"]
+        )
+
+        payout_address = recorded[
+            "destinations"
+        ][0]["resolved_address"]
+
+        real = self.chain.decode_raw_transaction
+
+        def liar(txhex):
+            result = copy.deepcopy(real(txhex))
+
+            for output in result["vout"]:
+                if (
+                    output["scriptPubKey"].get("address")
+                    == payout_address
+                ):
+                    output["value"] -= Decimal(
+                        "0.00000001"
+                    )
+                    break
+
+            return result
+
+        self.chain.decode_raw_transaction = liar
+
+        ok, _, stats = self.x.reconcile(
+            self.exp
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(
+                "settlement payout" in issue
+                for issue in stats["issues"]
+            ),
+            stats,
+        )
+
+    def test_settlement_reconciliation_catches_wrong_retained_output(self):
+        r = self.run_all(limit=400)
+
+        self.assertTrue(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+
+        flow = self.e.list_flows(self.exp)[0]
+
+        settlement = next(
+            job
+            for job in self.e.list_jobs(flow["id"])
+            if json.loads(
+                job["generated_from_json"] or "{}"
+            ).get("phase") == "settlement"
+        )
+
+        recorded = json.loads(
+            settlement["result_json"]
+        )
+
+        payout_addresses = {
+            item["resolved_address"]
+            for item in recorded["destinations"]
+        }
+
+        real = self.chain.decode_raw_transaction
+
+        def liar(txhex):
+            result = copy.deepcopy(real(txhex))
+
+            for output in result["vout"]:
+                address = output[
+                    "scriptPubKey"
+                ].get("address")
+
+                if address not in payout_addresses:
+                    output["value"] -= Decimal(
+                        "0.00000001"
+                    )
+                    break
+
+            return result
+
+        self.chain.decode_raw_transaction = liar
+
+        ok, _, stats = self.x.reconcile(
+            self.exp
+        )
+
+        self.assertFalse(ok)
+        self.assertTrue(
+            any(
+                "retained Stage output" in issue
+                for issue in stats["issues"]
+            ),
+            stats,
+        )
+
+    def test_settlement_execution_refuses_mutated_persisted_contract(self):
+        flow, settlement = self._drive_to_settlement_execute()
+
+        plan = json.loads(settlement["planned_json"])
+        plan["settlement"]["items"][0]["amount_sats"] += 1
+
+        self.e.conn.execute(
+            "UPDATE jobs SET planned_json=? WHERE id=?",
+            (
+                json.dumps(
+                    plan,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                settlement["id"],
+            ),
+        )
+        self.e.conn.commit()
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(
+            r["blocked"],
+            r,
+        )
+        self.assertIn(
+            "settlement",
+            r["blocked"].lower(),
+        )
+        self.assertIn(
+            "approved",
+            r["blocked"].lower(),
+        )
 
 
 class FanOutFanInRunTests(ExecBase):

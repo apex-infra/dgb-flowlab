@@ -25,7 +25,9 @@ from .planner import (
     generate_experimental_finalization_job,
     generate_experimental_job,
     generate_jobs,
+    generate_settlement_cycle_phase_job,
     next_due,
+    settlement_cycle_next_phase,
 )
 from .rpc import RpcError, to_sats
 from .tx_builder import (
@@ -89,6 +91,15 @@ class Executor:
     def _is_experimental(self, flow):
         cfg = self._config_for_flow(flow)
         return bool(cfg.get("randomization", {}).get("enabled"))
+
+    def _is_settlement_cycle(self, flow):
+        cfg = self._config_for_flow(flow)
+        play = cfg.get("play") or {}
+
+        return (
+            play.get("name") == "settlement_cycle"
+            and play.get("version") == 1
+        )
 
     def _policy_uses_scope(self, flow, scope):
         cfg = self._config_for_flow(flow)
@@ -182,6 +193,13 @@ class Executor:
                     "snapshot_at_start",
             ):
                 continue
+
+            # Settlement Cycle requires isolated worker/hub wallets.
+            # Validate that isolation before persisting the immutable
+            # experiment-start UTXO cohort so a refused dirty start
+            # cannot poison a later resume with stale cohort state.
+            if self._is_settlement_cycle(flow):
+                self._settlement_cycle_preflight(flow)
 
             self._capture_utxo_cohort(
                 flow,
@@ -536,6 +554,74 @@ class Executor:
             fee_reserve_sats=fee_reserve,
         )
 
+    def _settlement_cycle_preflight(self, flow):
+        """Require isolated worker and hub wallets before Settlement Cycle V1."""
+        cfg = self._config_for_flow(flow)
+        play = cfg.get("play") or {}
+
+        if not (
+            play.get("name") == "settlement_cycle"
+            and play.get("version") == 1
+        ):
+            return
+
+        cycle = cfg.get("settlement_cycle") or {}
+
+        wallets = list(dict.fromkeys([
+            *cycle.get("workers", []),
+            *cycle.get("hubs", []),
+        ]))
+
+        contaminated = []
+
+        for wallet in wallets:
+            mine = self.rpc.get_balances(wallet).get("mine", {})
+
+            balances = {
+                "trusted": to_sats(
+                    mine.get("trusted", 0)
+                ),
+                "untrusted_pending": to_sats(
+                    mine.get("untrusted_pending", 0)
+                ),
+                "immature": to_sats(
+                    mine.get("immature", 0)
+                ),
+            }
+
+            nonzero = {
+                name: sats
+                for name, sats in balances.items()
+                if sats != 0
+            }
+
+            if nonzero:
+                detail = ", ".join(
+                    f"{name}={sats} sats"
+                    for name, sats in nonzero.items()
+                )
+                contaminated.append(
+                    f"{wallet} ({detail})"
+                )
+
+        if contaminated:
+            raise PlanError(
+                "Settlement Cycle requires empty worker and hub wallets "
+                "before allocation: "
+                + "; ".join(contaminated)
+            )
+
+    def _generate_next_settlement_cycle_job(self, flow):
+        balances = self._confirmed_balances(flow)
+        fee_reserve = self.builder.planning_fee_reserve_sats()
+
+        return generate_settlement_cycle_phase_job(
+            self.engine,
+            flow["id"],
+            balances,
+            fee_reserve_sats=fee_reserve,
+        )
+
     # ------------------------------------------------------------ flow steps
     def _tick_flow(self, exp_id, flow_id, actions, waits):
         e = self.engine
@@ -558,7 +644,46 @@ class Executor:
                 )
                 actions.append(f"planned {n} jobs from the approved config")
         elif st == "PLAN":
-            if self._is_experimental(flow):
+            if self._is_settlement_cycle(flow):
+                jobs = e.list_jobs(flow_id)
+
+                if not jobs or all(
+                    j["state"] == "CONFIRMED"
+                    for j in jobs
+                ):
+                    balances = self._confirmed_balances(flow)
+                    phase = settlement_cycle_next_phase(
+                        e,
+                        flow_id,
+                        balances,
+                    )
+
+                    if phase == "complete":
+                        raise EngineError(
+                            "Settlement Cycle entered PLAN after completion"
+                        )
+
+                    if phase == "allocation":
+                        self._settlement_cycle_preflight(flow)
+                        jid = self._generate_allocation_job(flow)
+
+                        if jid is None:
+                            raise EngineError(
+                                "Settlement Cycle allocation is incomplete "
+                                "but no commitment job was generated"
+                            )
+                    else:
+                        jid = self._generate_next_settlement_cycle_job(
+                            flow
+                        )
+
+                    actions.append(
+                        "generated Settlement Cycle "
+                        f"{phase} step "
+                        f"{self._step(e.get_job(jid))}"
+                    )
+
+            elif self._is_experimental(flow):
                 jobs = e.list_jobs(flow_id)
                 if not jobs or all(j["state"] == "CONFIRMED" for j in jobs):
                     if not self._experimental_allocation_complete(flow):
@@ -598,7 +723,22 @@ class Executor:
             self._confirm(flow, actions, waits)
         elif st == "NEXT_STATE":
             jobs = e.list_jobs(flow_id)
-            if self._is_experimental(flow):
+
+            if self._is_settlement_cycle(flow):
+                balances = self._confirmed_balances(flow)
+                phase = settlement_cycle_next_phase(
+                    e,
+                    flow_id,
+                    balances,
+                )
+
+                target = (
+                    "COMPLETE"
+                    if phase == "complete"
+                    else "PLAN"
+                )
+
+            elif self._is_experimental(flow):
                 if not self._experimental_allocation_complete(flow):
                     target = "PLAN"
                 elif not self._experimental_workload_complete(flow):
@@ -609,6 +749,7 @@ class Executor:
                     target = "PLAN"
             else:
                 target = "COMPLETE" if all(j["state"] == "CONFIRMED" for j in jobs) else "PLAN"
+
             e.advance_flow(flow_id, target)
 
     @staticmethod
@@ -684,6 +825,142 @@ class Executor:
             job,
             plan["from"],
         )
+
+        # --------------------------------------------------
+        # Settlement Cycle intermediate partial distribution.
+
+        if "settlement" in plan:
+            cfg = self._config_for_flow(flow)
+            play = cfg.get("play") or {}
+
+            if not (
+                play.get("name") == "settlement_cycle"
+                and play.get("version") == 1
+            ):
+                raise PlanError(
+                    "settlement job is not authorized by a "
+                    "Settlement Cycle V1 config"
+                )
+
+            cycle = cfg.get("settlement_cycle") or {}
+            approved = cycle.get("settlement")
+
+            if plan.get("settlement") != approved:
+                raise PlanError(
+                    "planned settlement differs from the approved "
+                    "immutable settlement config"
+                )
+
+            if (
+                not isinstance(approved, dict)
+                or plan.get("from") != approved.get("source_wallet")
+            ):
+                raise PlanError(
+                    "settlement must spend from the approved Stage wallet"
+                )
+
+            if plan.get("amount_sats") != "all":
+                raise PlanError(
+                    "settlement must consume the full selected "
+                    "Stage settlement budget"
+                )
+
+            generated = json.loads(
+                job["generated_from_json"] or "{}"
+            )
+
+            if (
+                generated.get("phase") != "settlement"
+                or generated.get("source")
+                != "settlement cycle settlement"
+            ):
+                raise PlanError(
+                    "settlement job has invalid persisted lifecycle metadata"
+                )
+
+            builder_items = []
+            resolved = []
+            external_addresses = set()
+
+            for item in approved["items"]:
+                kind = item["type"]
+
+                if kind == "wallet":
+                    wallet = item["wallet"]
+                    address = self.rpc.get_new_address(
+                        wallet,
+                        "flowlab-settlement",
+                    )
+
+                    resolved_item = {
+                        "type": "wallet",
+                        "wallet": wallet,
+                        "resolved_address": address,
+                    }
+
+                elif kind == "address":
+                    address = item["address"]
+                    external_addresses.add(address)
+
+                    resolved_item = {
+                        "type": "address",
+                        "address": address,
+                        "resolved_address": address,
+                    }
+
+                else:
+                    raise PlanError(
+                        "approved settlement destination has an "
+                        "unsupported type"
+                    )
+
+                builder_item = {
+                    "address": address,
+                }
+
+                if approved["mode"] == "percentage":
+                    builder_item["percent_bps"] = (
+                        item["percent_bps"]
+                    )
+                else:
+                    builder_item["amount_sats"] = (
+                        item["amount_sats"]
+                    )
+
+                builder_items.append(builder_item)
+                resolved.append(resolved_item)
+
+            prepared = self.builder.build_partial_distribution(
+                plan["from"],
+                "all",
+                approved["mode"],
+                builder_items,
+                allowed_external_addresses=external_addresses,
+                **utxo_context,
+            )
+
+            self.log(
+                "PREVIEW\n" + prepared.summary()
+            )
+
+            txid = broadcast_distribution(
+                e,
+                self.rpc,
+                job["id"],
+                prepared,
+                resolved,
+            )
+
+            e.advance_flow(
+                flow_id,
+                "CONFIRMATION",
+            )
+
+            actions.append(
+                f"step {self._step(job)} "
+                f"settlement broadcast {txid}"
+            )
+            return
 
         # --------------------------------------------------
         # Multi-destination terminal transaction.
@@ -957,6 +1234,18 @@ class Executor:
         for flow in e.list_flows(exp_id):
             approved_flow = self._approved_flow_config(flow)
 
+            cfg = self._config_for_flow(flow)
+            play = cfg.get("play") or {}
+            settlement_cycle_v1 = (
+                play.get("name") == "settlement_cycle"
+                and play.get("version") == 1
+            )
+            settlement_cycle = (
+                cfg.get("settlement_cycle") or {}
+                if settlement_cycle_v1
+                else {}
+            )
+
             multi_destination = has_multi_destinations(
                 approved_flow
             )
@@ -992,6 +1281,419 @@ class Executor:
                     continue
 
                 fee = -to_sats(sent.get("fee", 0))
+
+                # ------------------------------------------
+                # Settlement Cycle intermediate partial distribution.
+
+                if "settlement" in plan:
+                    approved_spec = settlement_cycle.get(
+                        "settlement"
+                    )
+
+                    if not settlement_cycle_v1:
+                        issues.append(
+                            f"{tag}: settlement job is not "
+                            "authorized by Settlement Cycle V1"
+                        )
+                        continue
+
+                    if plan.get("settlement") != approved_spec:
+                        issues.append(
+                            f"{tag}: planned settlement differs "
+                            "from approved config"
+                        )
+
+                    if (
+                        not isinstance(approved_spec, dict)
+                        or plan.get("from")
+                        != approved_spec.get("source_wallet")
+                    ):
+                        issues.append(
+                            f"{tag}: settlement sender differs "
+                            "from approved Stage wallet"
+                        )
+
+                    if plan.get("amount_sats") != "all":
+                        issues.append(
+                            f"{tag}: settlement is not a "
+                            "full selected-budget send"
+                        )
+
+                    recorded_items = recorded.get(
+                        "destinations"
+                    )
+
+                    if not isinstance(recorded_items, list):
+                        issues.append(
+                            f"{tag}: settlement has no recorded "
+                            "destination list"
+                        )
+                        recorded_items = []
+
+                    approved_items = (
+                        approved_spec.get("items", [])
+                        if isinstance(approved_spec, dict)
+                        else []
+                    )
+
+                    if len(recorded_items) != len(
+                        approved_items
+                    ):
+                        issues.append(
+                            f"{tag}: recorded settlement destination "
+                            "count differs from approved config"
+                        )
+
+                    budget = recorded.get("budget_sats")
+                    distributed = recorded.get(
+                        "distributed_sats"
+                    )
+
+                    if (
+                        not isinstance(budget, int)
+                        or isinstance(budget, bool)
+                        or budget <= 0
+                    ):
+                        issues.append(
+                            f"{tag}: settlement has invalid "
+                            "recorded budget"
+                        )
+                        budget = None
+
+                    if (
+                        not isinstance(distributed, int)
+                        or isinstance(distributed, bool)
+                        or distributed <= 0
+                    ):
+                        issues.append(
+                            f"{tag}: settlement has invalid "
+                            "recorded distributed amount"
+                        )
+                        distributed = None
+
+                    expected_pairs = []
+                    logical_ok = (
+                        len(recorded_items)
+                        == len(approved_items)
+                        and budget is not None
+                    )
+
+                    if logical_ok:
+                        for index, (
+                            approved_item,
+                            recorded_item,
+                        ) in enumerate(
+                            zip(
+                                approved_items,
+                                recorded_items,
+                            ),
+                            1,
+                        ):
+                            if not isinstance(
+                                recorded_item,
+                                dict,
+                            ):
+                                issues.append(
+                                    f"{tag}: settlement destination "
+                                    f"{index} record is not an object"
+                                )
+                                logical_ok = False
+                                continue
+
+                            kind = approved_item["type"]
+
+                            if (
+                                recorded_item.get("type")
+                                != kind
+                            ):
+                                issues.append(
+                                    f"{tag}: settlement destination "
+                                    f"{index} type differs from "
+                                    "approved config"
+                                )
+                                logical_ok = False
+                                continue
+
+                            address = recorded_item.get(
+                                "resolved_address"
+                            )
+
+                            if (
+                                not isinstance(address, str)
+                                or not address
+                            ):
+                                issues.append(
+                                    f"{tag}: settlement destination "
+                                    f"{index} has no resolved address"
+                                )
+                                logical_ok = False
+                                continue
+
+                            if kind == "wallet":
+                                wallet = approved_item["wallet"]
+
+                                if (
+                                    recorded_item.get("wallet")
+                                    != wallet
+                                ):
+                                    issues.append(
+                                        f"{tag}: settlement destination "
+                                        f"{index} wallet differs from "
+                                        "approved config"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                                try:
+                                    owned = (
+                                        self.rpc.get_address_info(
+                                            wallet,
+                                            address,
+                                        ).get("ismine")
+                                        is True
+                                    )
+                                except RpcError as err:
+                                    issues.append(
+                                        f"{tag}: cannot verify "
+                                        f"settlement destination "
+                                        f"{index} wallet address "
+                                        f"({err})"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                                if not owned:
+                                    issues.append(
+                                        f"{tag}: settlement destination "
+                                        f"{index} resolved address "
+                                        f"is not owned by {wallet}"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                            elif kind == "address":
+                                approved_address = (
+                                    approved_item["address"]
+                                )
+
+                                if (
+                                    recorded_item.get("address")
+                                    != approved_address
+                                    or address
+                                    != approved_address
+                                ):
+                                    issues.append(
+                                        f"{tag}: settlement destination "
+                                        f"{index} external address "
+                                        "differs from approved config"
+                                    )
+                                    logical_ok = False
+                                    continue
+
+                            else:
+                                issues.append(
+                                    f"{tag}: settlement destination "
+                                    f"{index} has unsupported type"
+                                )
+                                logical_ok = False
+                                continue
+
+                            if (
+                                approved_spec["mode"]
+                                == "percentage"
+                            ):
+                                expected_amount = (
+                                    budget
+                                    * approved_item["percent_bps"]
+                                ) // 10_000
+                            else:
+                                expected_amount = (
+                                    approved_item["amount_sats"]
+                                )
+
+                            if (
+                                recorded_item.get("amount_sats")
+                                != expected_amount
+                            ):
+                                issues.append(
+                                    f"{tag}: settlement destination "
+                                    f"{index} recorded amount differs "
+                                    "from approved settlement"
+                                )
+                                logical_ok = False
+
+                            expected_pairs.append(
+                                (
+                                    address,
+                                    expected_amount,
+                                )
+                            )
+
+                    payout_total = (
+                        sum(
+                            amount
+                            for _, amount
+                            in expected_pairs
+                        )
+                        if logical_ok
+                        else None
+                    )
+
+                    if (
+                        distributed is not None
+                        and payout_total is not None
+                        and distributed != payout_total
+                    ):
+                        issues.append(
+                            f"{tag}: settlement distributed amount "
+                            f"{distributed} sats differs from "
+                            f"approved payouts {payout_total} sats"
+                        )
+
+                    try:
+                        txhex = sent.get("hex")
+
+                        if not txhex:
+                            raise RpcError(
+                                "wallet transaction has no raw hex"
+                            )
+
+                        raw = self.rpc.decode_raw_transaction(
+                            txhex
+                        )
+
+                        actual_outputs = [
+                            (
+                                output.get(
+                                    "scriptPubKey",
+                                    {},
+                                ).get("address"),
+                                to_sats(output["value"]),
+                            )
+                            for output in raw.get(
+                                "vout",
+                                [],
+                            )
+                        ]
+
+                    except RpcError as err:
+                        issues.append(
+                            f"{tag}: cannot decode settlement "
+                            f"outputs ({err})"
+                        )
+                        actual_outputs = None
+
+                    if (
+                        actual_outputs is not None
+                        and logical_ok
+                        and budget is not None
+                        and payout_total is not None
+                    ):
+                        actual_map = {}
+                        duplicate = False
+
+                        for address, sats in actual_outputs:
+                            if address in actual_map:
+                                duplicate = True
+                            actual_map[address] = sats
+
+                        if duplicate:
+                            issues.append(
+                                f"{tag}: settlement transaction "
+                                "contains duplicate output addresses"
+                            )
+
+                        expected_map = dict(expected_pairs)
+
+                        for address, amount in expected_pairs:
+                            if actual_map.get(address) != amount:
+                                issues.append(
+                                    f"{tag}: settlement payout "
+                                    f"to {address} differs from "
+                                    "approved amount"
+                                )
+
+                        retained = [
+                            (address, sats)
+                            for address, sats
+                            in actual_outputs
+                            if address not in expected_map
+                        ]
+
+                        if len(retained) != 1:
+                            issues.append(
+                                f"{tag}: settlement transaction "
+                                "must contain exactly one retained "
+                                "Stage output"
+                            )
+                        else:
+                            (
+                                retained_address,
+                                retained_sats,
+                            ) = retained[0]
+
+                            try:
+                                retained_owned = (
+                                    self.rpc.get_address_info(
+                                        plan["from"],
+                                        retained_address,
+                                    ).get("ismine")
+                                    is True
+                                )
+                            except RpcError as err:
+                                issues.append(
+                                    f"{tag}: cannot verify retained "
+                                    f"Stage address ({err})"
+                                )
+                                retained_owned = False
+
+                            if not retained_owned:
+                                issues.append(
+                                    f"{tag}: retained settlement "
+                                    "output is not owned by Stage"
+                                )
+
+                            expected_retained = (
+                                budget
+                                - payout_total
+                                - fee
+                            )
+
+                            if (
+                                retained_sats
+                                != expected_retained
+                            ):
+                                issues.append(
+                                    f"{tag}: retained Stage output "
+                                    f"was {retained_sats} sats, "
+                                    f"expected "
+                                    f"{expected_retained}"
+                                )
+
+                    confirmations = sent.get(
+                        "confirmations",
+                        0,
+                    )
+
+                    if fee != recorded.get("fee_sats"):
+                        issues.append(
+                            f"{tag}: fee {fee} sats differs "
+                            "from the recorded "
+                            f"{recorded.get('fee_sats')}"
+                        )
+
+                    if (
+                        confirmations
+                        < flow["confirmations_required"]
+                    ):
+                        issues.append(
+                            f"{tag}: below the required "
+                            "confirmations"
+                        )
+
+                    fees += fee
+                    moved += distributed or 0
+                    continue
 
                 # ------------------------------------------
                 # Multi-output terminal distribution.
@@ -1506,10 +2208,25 @@ class Executor:
                 *json.loads(flow["flow_wallets_json"]),
             ]
 
-            if multi_destination:
+            if settlement_cycle_v1:
+                settlement = settlement_cycle.get(
+                    "settlement"
+                ) or {}
+
+                managed_wallets.extend(
+                    item["wallet"]
+                    for item in settlement.get(
+                        "items",
+                        [],
+                    )
+                    if item.get("type") == "wallet"
+                )
+
+            elif multi_destination:
                 managed_wallets.extend(
                     destination_wallets(approved_flow)
                 )
+
             elif not destination_is_external(
                 approved_flow
             ):
