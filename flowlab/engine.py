@@ -385,7 +385,7 @@ class Engine:
                     f"{cycle['outbound']['amount_sats_max']} sats, "
                     f"delay {cycle['outbound']['delay_seconds_min']}.."
                     f"{cycle['outbound']['delay_seconds_max']} s, "
-                    f"multi-output={cycle['outbound']['multi_output']}"
+                    "single-recipient decisions"
                 )
                 lines.append(
                     f"    settlement source: "
@@ -431,7 +431,7 @@ class Engine:
                     f"{cycle['return']['amount_sats_max']} sats, "
                     f"delay {cycle['return']['delay_seconds_min']}.."
                     f"{cycle['return']['delay_seconds_max']} s, "
-                    f"multi-output={cycle['return']['multi_output']}"
+                    "single-recipient decisions"
                 )
                 lines.append(
                     f"    reserve return: "

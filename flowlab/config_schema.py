@@ -767,9 +767,9 @@ def validate(cfg):
                 "must be positive",
             )
             _need(
-                phase["multi_output"] is True,
-                f"Settlement Cycle {phase_name} must enable "
-                "multi-output",
+                phase["multi_output"] is False,
+                f"Settlement Cycle {phase_name} V1 must use "
+                "single-recipient workload decisions",
             )
             _need(
                 _is_int(phase["amount_sats_min"])

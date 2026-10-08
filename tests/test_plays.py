@@ -467,8 +467,8 @@ class PlayCompilerTests(unittest.TestCase):
         self.assertEqual(cycle["outbound"]["decisions"], 12)
         self.assertEqual(cycle["return"]["decisions"], 8)
 
-        self.assertTrue(cycle["outbound"]["multi_output"])
-        self.assertTrue(cycle["return"]["multi_output"])
+        self.assertFalse(cycle["outbound"]["multi_output"])
+        self.assertFalse(cycle["return"]["multi_output"])
 
         self.assertEqual(
             cycle["settlement"]["source_wallet"],
@@ -754,6 +754,50 @@ class PlayCompilerTests(unittest.TestCase):
             2500,
         )
         self.assertTrue(settlement["retain_remainder"])
+
+    def test_settlement_cycle_v1_declares_single_output_workload_decisions(self):
+        params = {
+            "source_wallet": "flab_source",
+            "allocation_wallet": "flab_stage",
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "allocation_sats": 500_000_000,
+            "outbound_decisions": 5,
+            "return_decisions": 5,
+            "amount_sats_min": 10_000_000,
+            "amount_sats_max": 50_000_000,
+            "delay_seconds_min": 5,
+            "delay_seconds_max": 60,
+            "settlement_delay_seconds_min": 10,
+            "settlement_delay_seconds_max": 120,
+            "reserve_return_delay_seconds_min": 0,
+            "reserve_return_delay_seconds_max": 30,
+            "confirmations_required": 2,
+            "seed": 200,
+            "max_total_transactions": 50,
+            "settlement": {
+                "mode": "percentage",
+                "items": [{
+                    "type": "wallet",
+                    "wallet": "flab_dest",
+                    "percent_bps": 500,
+                }],
+            },
+        }
+
+        cfg = compile_play("settlement_cycle", params)
+        cycle = cfg["settlement_cycle"]
+
+        self.assertFalse(
+            cycle["outbound"]["multi_output"],
+            "Settlement Cycle V1 currently generates one recipient per "
+            "workload decision and must not advertise true multi-output",
+        )
+        self.assertFalse(
+            cycle["return"]["multi_output"],
+            "Settlement Cycle V1 currently generates one recipient per "
+            "return-workload decision and must not advertise true multi-output",
+        )
 
     def test_settlement_cycle_decision_counts_are_independent(self):
         params = {

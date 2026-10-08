@@ -1136,7 +1136,443 @@ const whole = (text, what, min) => {
     });
   }
 
+  function checkedWallets(id) {
+    const box = $(id);
+    if (!box) return [];
+
+    return [...box.querySelectorAll('input[type="checkbox"]')]
+      .filter(input => input.checked)
+      .map(input => input.value);
+  }
+
+  function settlementWalletPicker(id, walletNames, selectedCount) {
+    const box = h("div", "row");
+    box.id = id;
+
+    walletNames.forEach((name, index) => {
+      const label = h("label");
+      const check = h("input");
+
+      check.type = "checkbox";
+      check.value = name;
+      check.checked = index < selectedCount;
+      check.onchange = refreshPreview;
+
+      label.append(check, document.createTextNode(name));
+      box.append(label);
+    });
+
+    return box;
+  }
+
+  function settlementPayoutRows() {
+    const box = $("f-settlement-rows");
+    return box ? [...box.children] : [];
+  }
+
+  function settlementPayoutConfig() {
+    const modeControl = $("f-settlement-mode");
+    if (!modeControl)
+      throw new Error("Settlement payout editor is not available");
+
+    const mode = modeControl.value;
+    const rows = settlementPayoutRows();
+
+    if (!rows.length || rows.length > 10)
+      throw new Error("Choose between 1 and 10 settlement payouts");
+
+    const items = [];
+    const targets = new Set();
+    let percentTotal = 0;
+    let fixedTotal = 0;
+
+    rows.forEach((row, index) => {
+      const n = index + 1;
+      const kind = row._kind.value;
+      let targetKey;
+      let item;
+
+      if (kind === "internal") {
+        const wallet = row._wallet.value;
+
+        if (!wallet)
+          throw new Error(
+            "Settlement payout " + n
+            + ": choose a FlowLab destination wallet"
+          );
+
+        targetKey = "wallet:" + wallet;
+        item = {
+          type: "wallet",
+          wallet
+        };
+      } else {
+        const address = row._address.value.trim();
+
+        if (!address)
+          throw new Error(
+            "Settlement payout " + n
+            + ": enter a DigiByte address"
+          );
+
+        targetKey = "address:" + address;
+        item = {
+          type: "address",
+          address
+        };
+      }
+
+      if (targets.has(targetKey))
+        throw new Error(
+          "Settlement payout " + n + ": duplicate payout target"
+        );
+
+      targets.add(targetKey);
+
+      if (mode === "percentage") {
+        const bps = percentToBps(
+          row._percent.value,
+          "Settlement payout " + n
+        );
+
+        item.percent_bps = bps;
+        percentTotal += bps;
+      } else {
+        const amount = toSats(
+          row._fixed.value,
+          "Settlement payout " + n + " fixed amount"
+        );
+
+        item.amount_sats = amount;
+        fixedTotal += amount;
+      }
+
+      items.push(item);
+    });
+
+    if (mode === "percentage" && percentTotal >= 10000)
+      throw new Error(
+        "Percentage payouts must total less than 100.00%."
+      );
+
+    if (mode === "fixed") {
+      const allocation = toSats(
+        $("f-allocation").value,
+        "Experiment allocation"
+      );
+
+      if (fixedTotal >= allocation)
+        throw new Error(
+          "Fixed settlement payouts must leave retained experiment value"
+        );
+    }
+
+    return {
+      mode,
+      items
+    };
+  }
+
+  function settlementPayoutControls(destinations, changed) {
+    const editor = h("div", "destination-editor");
+    const toolbar = h("div", "destination-toolbar");
+
+    const mode = h("select");
+    mode.id = "f-settlement-mode";
+    mode.append(
+      new Option("Percentage payouts", "percentage"),
+      new Option("Fixed DGB payouts", "fixed")
+    );
+
+    const add = h("button", null, "+ Add payout");
+    add.type = "button";
+
+    toolbar.append(
+      h("span", "mute", "Settlement"),
+      mode,
+      add
+    );
+
+    const rows = h("div", "destination-rows");
+    rows.id = "f-settlement-rows";
+
+    const percentHelp = note(
+      "Percentage payouts must total less than 100.00%."
+    );
+    const retainedHelp = note(
+      "Unassigned value remains in the experiment after settlement."
+    );
+
+    function notify() {
+      if (changed) changed();
+    }
+
+    function updateButtons() {
+      const current = settlementPayoutRows();
+      add.disabled = current.length >= 10;
+
+      current.forEach(row => {
+        row._remove.disabled = current.length <= 1;
+      });
+    }
+
+    function syncRow(row) {
+      const external = row._kind.value === "external";
+      const percentage = mode.value === "percentage";
+
+      row._wallet.hidden = external;
+      row._address.hidden = !external;
+      row._percent.hidden = !percentage;
+      row._fixed.hidden = percentage;
+    }
+
+    function syncAll() {
+      settlementPayoutRows().forEach(syncRow);
+      updateButtons();
+    }
+
+    function addRow(initial = {}) {
+      if (settlementPayoutRows().length >= 10)
+        return;
+
+      const row = h("div", "destination-row");
+
+      const kind = h("select");
+      kind.append(
+        new Option("FlowLab wallet", "internal"),
+        new Option("Custom DigiByte address", "external")
+      );
+      kind.value = initial.type === "address"
+        ? "external"
+        : "internal";
+
+      const wallet = sel(
+        "",
+        destinations,
+        initial.wallet || destinations[0]
+      );
+      wallet.removeAttribute("id");
+
+      const address = h("input");
+      address.placeholder = "DigiByte address";
+      address.autocomplete = "off";
+      address.spellcheck = false;
+      address.value = initial.address || "";
+
+      const percent = h("input");
+      percent.inputMode = "decimal";
+      percent.placeholder = "e.g. 10.00";
+      percent.value = initial.percent || "";
+
+      const fixed = h("input");
+      fixed.inputMode = "decimal";
+      fixed.placeholder = "e.g. 0.10";
+      fixed.value = initial.fixed || "";
+
+      const remove = h("button", null, "Remove");
+      remove.type = "button";
+
+      row._kind = kind;
+      row._wallet = wallet;
+      row._address = address;
+      row._percent = percent;
+      row._fixed = fixed;
+      row._remove = remove;
+
+      kind.onchange = () => {
+        syncRow(row);
+        notify();
+      };
+
+      wallet.onchange = notify;
+      address.oninput = notify;
+      percent.oninput = notify;
+      fixed.oninput = notify;
+
+      remove.onclick = () => {
+        row.remove();
+        syncAll();
+        notify();
+      };
+
+      row.append(
+        kind,
+        wallet,
+        address,
+        percent,
+        fixed,
+        remove
+      );
+
+      rows.append(row);
+      syncAll();
+    }
+
+    add.onclick = () => {
+      addRow({
+        type: "wallet"
+      });
+      notify();
+    };
+
+    mode.onchange = () => {
+      syncAll();
+      notify();
+    };
+
+    addRow({
+      type: "wallet",
+      wallet: destinations[0]
+    });
+
+    editor.append(
+      toolbar,
+      rows,
+      percentHelp,
+      retainedHelp
+    );
+
+    return {
+      field: field("Settlement payouts", editor),
+      sync: syncAll
+    };
+  }
+
+  function settlementCycleParams() {
+    const src = $("f-src").value;
+    const stage = $("f-stage").value;
+
+    const workers = checkedWallets("f-settlement-workers");
+    const hubs = checkedWallets("f-settlement-hubs");
+
+    if (workers.length < 2)
+      throw new Error("Settlement Cycle needs at least two workers");
+
+    const names = [src, stage, ...workers, ...hubs];
+    if (new Set(names).size !== names.length)
+      throw new Error(
+        "Reserve, allocation wallet, workers, and hubs must all be distinct"
+      );
+
+    const allocation = toSats(
+      $("f-allocation").value,
+      "Experiment allocation"
+    );
+
+    const minAmount = toSats(
+      $("f-minamt").value,
+      "Minimum amount"
+    );
+    const maxAmount = toSats(
+      $("f-maxamt").value,
+      "Maximum amount"
+    );
+
+    if (maxAmount < minAmount)
+      throw new Error(
+        "Maximum amount must be at least the minimum amount"
+      );
+
+    if (maxAmount > allocation)
+      throw new Error(
+        "Maximum amount cannot exceed the experiment allocation"
+      );
+
+    const minDelay = whole(
+      $("f-mindelay").value,
+      "Minimum delay",
+      0
+    );
+    const maxDelay = whole(
+      $("f-maxdelay").value,
+      "Maximum delay",
+      0
+    );
+
+    if (maxDelay < minDelay)
+      throw new Error(
+        "Maximum delay must be at least the minimum delay"
+      );
+
+    const settlementMin = whole(
+      $("f-settlement-mindelay").value,
+      "Settlement minimum delay",
+      0
+    );
+    const settlementMax = whole(
+      $("f-settlement-maxdelay").value,
+      "Settlement maximum delay",
+      0
+    );
+
+    if (settlementMax < settlementMin)
+      throw new Error(
+        "Settlement maximum delay must be at least the minimum"
+      );
+
+    const reserveMin = whole(
+      $("f-reserve-return-mindelay").value,
+      "Reserve return minimum delay",
+      0
+    );
+    const reserveMax = whole(
+      $("f-reserve-return-maxdelay").value,
+      "Reserve return maximum delay",
+      0
+    );
+
+    if (reserveMax < reserveMin)
+      throw new Error(
+        "Reserve return maximum delay must be at least the minimum"
+      );
+
+    return {
+      source_wallet: src,
+      allocation_wallet: stage,
+      workers,
+      hubs,
+      allocation_sats: allocation,
+      outbound_decisions: whole(
+        $("f-outbound-decisions").value,
+        "Outbound decisions",
+        1
+      ),
+      return_decisions: whole(
+        $("f-return-decisions").value,
+        "Return decisions",
+        1
+      ),
+      amount_sats_min: minAmount,
+      amount_sats_max: maxAmount,
+      delay_seconds_min: minDelay,
+      delay_seconds_max: maxDelay,
+      settlement_delay_seconds_min: settlementMin,
+      settlement_delay_seconds_max: settlementMax,
+      reserve_return_delay_seconds_min: reserveMin,
+      reserve_return_delay_seconds_max: reserveMax,
+      confirmations_required: whole(
+        $("f-conf").value,
+        "Confirmations",
+        1
+      ),
+      seed: whole(
+        $("f-seed").value,
+        "Seed",
+        0
+      ),
+      max_total_transactions: whole(
+        $("f-max-total-transactions").value,
+        "Maximum total transactions",
+        1
+      ),
+      settlement: settlementPayoutConfig()
+    };
+  }
+
   function playParams() {
+    if ($("f-play").value === "settlement_cycle")
+      return settlementCycleParams();
+
     const workers = selectedPlayWorkers();
 
     if (!workers.length)
@@ -1252,6 +1688,30 @@ const whole = (text, what, min) => {
     const hubField = field("Hub wallet", hub);
     hubField.id = "f-hub-field";
 
+    const settlementWorkers = settlementWalletPicker(
+      "f-settlement-workers",
+      roleWallets("workers"),
+      Math.min(2, roleWallets("workers").length)
+    );
+    const settlementHubs = settlementWalletPicker(
+      "f-settlement-hubs",
+      roleWallets("hubs"),
+      0
+    );
+    const settlementPayout = settlementPayoutControls(
+      destinations,
+      refreshPreview
+    );
+
+    const settlementWorkerField = field(
+      "Workers",
+      settlementWorkers
+    );
+    const settlementHubField = field(
+      "Hubs",
+      settlementHubs
+    );
+
     const workerBox = h("div", "row");
     workerBox.id = "f-play-workers";
 
@@ -1278,6 +1738,15 @@ const whole = (text, what, min) => {
     const workerPicker = h("div");
     workerPicker.append(workerControls, workerBox);
 
+    const workerField = field("Working wallets", workerPicker);
+
+    const settlementNote = note(
+      "Settlement Cycle commits Reserve → Stage, runs outbound workload, "
+      + "consolidates to Stage, performs a partial settlement while retaining "
+      + "experiment value, runs return workload, consolidates again, then "
+      + "returns the remaining value to Reserve."
+    );
+
     const roles = h("fieldset");
     roles.append(
       h("legend", null, "Play"),
@@ -1285,10 +1754,18 @@ const whole = (text, what, min) => {
       field("Reserve / funding wallet", src),
       field("Allocation wallet", stage),
       hubField,
-      field("Working wallets", workerPicker),
+      workerField,
       ...singleDestination.fields,
       destination.field,
-      note("Play topology and terminal distribution are compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
+      settlementWorkerField,
+      settlementHubField,
+      settlementPayout.field,
+      settlementNote,
+      note(
+        "Play configuration is compiled by FlowLab on the server. "
+        + "The resulting config is reviewed, hashed, and approved "
+        + "before execution."
+      )
     );
 
     const workload = h("fieldset");
@@ -1306,6 +1783,44 @@ const whole = (text, what, min) => {
       field("Minimum delay (seconds)", num("f-mindelay", "5", "100px")),
       field("Maximum delay (seconds)", num("f-maxdelay", "60", "100px")),
       field("Confirmations required", num("f-conf", "2", "80px"))
+    );
+
+    const settlementParameters = h("fieldset");
+    settlementParameters.append(
+      h("legend", null, "Settlement Cycle parameters"),
+      field(
+        "Outbound decisions",
+        num("f-outbound-decisions", "10", "100px")
+      ),
+      field(
+        "Return decisions",
+        num("f-return-decisions", "6", "100px")
+      ),
+      field(
+        "Settlement minimum delay (seconds)",
+        num("f-settlement-mindelay", "30", "100px")
+      ),
+      field(
+        "Settlement maximum delay (seconds)",
+        num("f-settlement-maxdelay", "180", "100px")
+      ),
+      field(
+        "Reserve return minimum delay (seconds)",
+        num("f-reserve-return-mindelay", "0", "100px")
+      ),
+      field(
+        "Reserve return maximum delay (seconds)",
+        num("f-reserve-return-maxdelay", "60", "100px")
+      ),
+      field(
+        "Maximum total transactions",
+        num("f-max-total-transactions", "100", "100px")
+      ),
+      note(
+        "Outbound and return decisions are single-recipient transactions in "
+        + "Settlement Cycle V1. Amount and workload-delay bounds above apply "
+        + "to both workload phases."
+      )
     );
 
     const seed = num("f-seed", newSeed(), "180px");
@@ -1326,23 +1841,39 @@ const whole = (text, what, min) => {
       note("The seed becomes part of the compiled and approved config.")
     );
 
-    body.append(roles, workload, replay);
+    body.append(
+      roles,
+      workload,
+      settlementParameters,
+      replay
+    );
 
     function refreshPlayShape() {
       const hubMode = play.value === "hub_and_spoke";
       const fanMode = play.value === "fan_out_fan_in";
+      const settlementMode = play.value === "settlement_cycle";
 
       hubField.hidden = !hubMode;
       hub.disabled = !hubMode;
+
+      workerField.hidden = settlementMode;
 
       singleDestination.fields.forEach(f => {
         f.hidden = !fanMode;
       });
 
-      destination.field.hidden = fanMode;
-      decisionsField.hidden = fanMode;
+      destination.field.hidden = fanMode || settlementMode;
+
+      settlementWorkerField.hidden = !settlementMode;
+      settlementHubField.hidden = !settlementMode;
+      settlementPayout.field.hidden = !settlementMode;
+      settlementNote.hidden = !settlementMode;
+      settlementParameters.hidden = !settlementMode;
+
+      decisionsField.hidden = fanMode || settlementMode;
 
       refreshPlayWorkers();
+      settlementPayout.sync();
       refreshPreview();
     }
 

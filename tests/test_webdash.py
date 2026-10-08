@@ -530,6 +530,83 @@ class WebReadTests(WebBase):
         self.assertIn("Destination receipts", app)
         self.assertIn("reconciled ✓", app)
 
+    def test_form_script_contains_settlement_cycle_controls(self):
+        self.start()
+        form = self.get("/form.js")[2].decode()
+
+        # Settlement Cycle must have a dedicated UI shape rather than
+        # inheriting the generic terminal-distribution Play form.
+        self.assertIn('"settlement_cycle"', form)
+        self.assertIn('"Settlement payouts"', form)
+        self.assertIn('"Workers"', form)
+        self.assertIn('"Hubs"', form)
+
+        # Outbound and return workloads are independently counted.
+        self.assertIn('"Outbound decisions"', form)
+        self.assertIn('"Return decisions"', form)
+
+        # Settlement and reserve-return scheduling are first-class.
+        self.assertIn('"Settlement minimum delay (seconds)"', form)
+        self.assertIn('"Settlement maximum delay (seconds)"', form)
+        self.assertIn('"Reserve return minimum delay (seconds)"', form)
+        self.assertIn('"Reserve return maximum delay (seconds)"', form)
+
+        # The lifecycle has an explicit safety ceiling.
+        self.assertIn('"Maximum total transactions"', form)
+
+        # Settlement is partial: unassigned value stays in the experiment.
+        self.assertIn(
+            '"Percentage payouts must total less than 100.00%."',
+            form,
+        )
+        self.assertIn(
+            '"Unassigned value remains in the experiment after settlement."',
+            form,
+        )
+
+        # Settlement payout values are operator-entered. The UI must not
+        # silently recommend an arbitrary percentage or fixed amount.
+        self.assertIn(
+            'percent.placeholder = "e.g. 10.00";',
+            form,
+        )
+        self.assertIn(
+            'fixed.placeholder = "e.g. 0.10";',
+            form,
+        )
+        self.assertIn(
+            'percent.value = initial.percent || "";',
+            form,
+        )
+        self.assertIn(
+            'fixed.value = initial.fixed || "";',
+            form,
+        )
+
+        # Settlement Cycle must not inherit terminal-distribution wording.
+        self.assertIn(
+            '"Play configuration is compiled by FlowLab on the server. "',
+            form,
+        )
+        self.assertNotIn(
+            '"Play topology and terminal distribution are compiled by FlowLab on the server. "',
+            form,
+        )
+
+        # Dedicated request fields must match the backend compiler contract.
+        for key in (
+            "outbound_decisions",
+            "return_decisions",
+            "settlement_delay_seconds_min",
+            "settlement_delay_seconds_max",
+            "reserve_return_delay_seconds_min",
+            "reserve_return_delay_seconds_max",
+            "max_total_transactions",
+            "settlement",
+            "hubs",
+        ):
+            self.assertIn(key, form)
+
     def test_snapshot_exposes_live_infrastructure_data(self):
         from tests.fake_chain import FakeChain
 

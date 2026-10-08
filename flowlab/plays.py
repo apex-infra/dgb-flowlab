@@ -651,7 +651,7 @@ def _compile_settlement_cycle(params):
             "amount_sats_max": params["amount_sats_max"],
             "delay_seconds_min": params["delay_seconds_min"],
             "delay_seconds_max": params["delay_seconds_max"],
-            "multi_output": True,
+            "multi_output": False,
             "transitions": outbound_transitions,
         },
         "settlement": {
@@ -670,7 +670,7 @@ def _compile_settlement_cycle(params):
             "amount_sats_max": params["amount_sats_max"],
             "delay_seconds_min": params["delay_seconds_min"],
             "delay_seconds_max": params["delay_seconds_max"],
-            "multi_output": True,
+            "multi_output": False,
             "transitions": return_transitions,
         },
         "reserve_return": {
