@@ -30,6 +30,7 @@ from .planner import (
 from .rpc import RpcError, to_sats
 from .tx_builder import (
     BuildError,
+    Prepared,
     broadcast,
     broadcast_distribution,
 )
@@ -427,6 +428,94 @@ class Executor:
             flow["id"],
         )
 
+    def _fan_out_fan_in_preflight(self, flow):
+        """Require isolated worker wallets before Fan-Out/Fan-In V1."""
+        cfg = self._config_for_flow(flow)
+        play = cfg.get("play") or {}
+
+        if not (
+            play.get("name") == "fan_out_fan_in"
+            and play.get("version") == 1
+        ):
+            return None
+
+        approved_flow = self._approved_flow_config(flow)
+        stage = approved_flow.get("allocation_wallet")
+
+        if not isinstance(stage, str) or not stage:
+            raise PlanError(
+                "Fan-Out/Fan-In V1 requires an allocation wallet"
+            )
+
+        workers = [
+            wallet
+            for wallet in approved_flow["flow_wallets"]
+            if wallet != stage
+        ]
+
+        if len(workers) < 2:
+            raise PlanError(
+                "Fan-Out/Fan-In V1 requires at least two workers"
+            )
+
+        contaminated = []
+
+        for wallet in workers:
+            mine = self.rpc.get_balances(wallet).get("mine", {})
+            balances = {
+                "trusted": to_sats(mine.get("trusted", 0)),
+                "untrusted_pending": to_sats(
+                    mine.get("untrusted_pending", 0)
+                ),
+                "immature": to_sats(mine.get("immature", 0)),
+            }
+
+            nonzero = {
+                name: sats
+                for name, sats in balances.items()
+                if sats != 0
+            }
+
+            if nonzero:
+                detail = ", ".join(
+                    f"{name}={sats} sats"
+                    for name, sats in nonzero.items()
+                )
+                contaminated.append(f"{wallet} ({detail})")
+
+        if contaminated:
+            raise PlanError(
+                "Fan-Out/Fan-In requires empty worker wallets "
+                "before allocation: "
+                + "; ".join(contaminated)
+            )
+
+        stage_mine = self.rpc.get_balances(stage).get("mine", {})
+
+        stage_pending = to_sats(
+            stage_mine.get("untrusted_pending", 0)
+        )
+        stage_immature = to_sats(
+            stage_mine.get("immature", 0)
+        )
+
+        if stage_pending or stage_immature:
+            raise PlanError(
+                "Fan-Out/Fan-In requires the Stage starting balance "
+                "to be fully confirmed "
+                f"(untrusted_pending={stage_pending} sats, "
+                f"immature={stage_immature} sats)"
+            )
+
+        stage_baseline_sats = to_sats(
+            stage_mine.get("trusted", 0)
+        )
+
+        return {
+            "stage_wallet": stage,
+            "stage_baseline_sats": stage_baseline_sats,
+        }
+
     def _generate_next_experimental_job(self, flow):
         balances = self._confirmed_balances(flow)
         fee_reserve = self.builder.planning_fee_reserve_sats()
@@ -459,7 +548,14 @@ class Executor:
             if self._is_experimental(flow):
                 actions.append("experimental flow entered progressive planning")
             else:
-                n = len(generate_jobs(e, flow_id))
+                play_context = self._fan_out_fan_in_preflight(flow)
+                n = len(
+                    generate_jobs(
+                        e,
+                        flow_id,
+                        play_context=play_context,
+                    )
+                )
                 actions.append(f"planned {n} jobs from the approved config")
         elif st == "PLAN":
             if self._is_experimental(flow):
@@ -725,13 +821,94 @@ class Executor:
                 "flowlab-recv",
             )
 
-        prepared = self.builder.build(
-            plan["from"],
-            addr,
-            plan["amount_sats"],
-            allow_external=external,
-            **utxo_context,
+        generated = json.loads(
+            job["generated_from_json"] or "{}"
         )
+        play = self._config_for_flow(flow).get("play") or {}
+
+        fan_out_fan_in_terminal = (
+            play.get("name") == "fan_out_fan_in"
+            and play.get("version") == 1
+            and generated.get("phase") == "finalization"
+            and plan.get("amount_sats") == "all"
+        )
+
+        if fan_out_fan_in_terminal:
+            baseline = generated.get("stage_baseline_sats")
+            stage_wallet = generated.get("stage_wallet")
+
+            if (
+                not isinstance(baseline, int)
+                or isinstance(baseline, bool)
+                or baseline < 0
+            ):
+                raise PlanError(
+                    "Fan-Out/Fan-In finalization has an invalid "
+                    "Stage baseline"
+                )
+
+            if stage_wallet != plan["from"]:
+                raise PlanError(
+                    "Fan-Out/Fan-In finalization Stage wallet "
+                    "differs from the persisted Play context"
+                )
+
+            mine = self.rpc.get_balances(
+                plan["from"]
+            ).get("mine", {})
+
+            current = to_sats(
+                mine.get("trusted", 0)
+            )
+
+            if current < baseline:
+                raise PlanError(
+                    "Fan-Out/Fan-In Stage balance fell below its "
+                    "starting baseline"
+                )
+
+            gross_budget = current - baseline
+
+            if gross_budget <= 0:
+                raise PlanError(
+                    "Fan-Out/Fan-In has no experiment balance "
+                    "available for finalization"
+                )
+
+            distribution = self.builder.build_distribution(
+                plan["from"],
+                gross_budget,
+                "fixed",
+                [{
+                    "address": addr,
+                    "remainder": True,
+                }],
+                allowed_external_addresses=(
+                    {addr} if external else ()
+                ),
+                **utxo_context,
+            )
+
+            prepared = Prepared(
+                source_wallet=distribution.source_wallet,
+                address=addr,
+                amount_sats=distribution.distributed_sats,
+                change_address=distribution.change_address,
+                hex=distribution.hex,
+                txid=distribution.txid,
+                fee_sats=distribution.fee_sats,
+                inputs=distribution.inputs,
+                outputs=distribution.outputs,
+                utxo_selection=distribution.utxo_selection,
+            )
+        else:
+            prepared = self.builder.build(
+                plan["from"],
+                addr,
+                plan["amount_sats"],
+                allow_external=external,
+                **utxo_context,
+            )
 
         self.log(
             "PREVIEW\n" + prepared.summary()

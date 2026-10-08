@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from flowlab import Engine
 from flowlab.executor import Executor
 from flowlab.node_verifier import NodeVerifier
+from flowlab.plays import compile_play
 from flowlab.rpc import RpcError
 from flowlab.tx_builder import BuildError, TxBuilder
 from tests.fake_chain import FEE, FakeChain
@@ -115,6 +116,24 @@ MULTI_EXP_CFG["finalization"] = {
 }
 
 
+FAN_OUT_FAN_IN_CFG = compile_play(
+    "fan_out_fan_in",
+    {
+        "source_wallet": "flab_source",
+        "allocation_wallet": "flab_stage",
+        "workers": ["flab_a", "flab_b"],
+        "destination_wallet": "flab_dest",
+        "allocation_sats": 500_000_000,
+        "amount_sats_min": 50_000_000,
+        "amount_sats_max": 100_000_000,
+        "delay_seconds_min": 0,
+        "delay_seconds_max": 5,
+        "confirmations_required": 2,
+        "seed": 104,
+    },
+)
+
+
 class ExecBase(unittest.TestCase):
     use_node_verifier = False
     config = CFG
@@ -152,6 +171,142 @@ class ExecBase(unittest.TestCase):
 
     def sent(self):
         return [t for t in self.chain.txs.values() if t["inputs"]]
+
+
+class FanOutFanInRunTests(ExecBase):
+    config = FAN_OUT_FAN_IN_CFG
+
+    def test_nonempty_stage_is_preserved_and_only_experiment_value_settles(self):
+        stage_baseline = 275_000_000
+
+        self.chain.fund(
+            "flab_stage",
+            stage_baseline,
+        )
+        self.chain.mine(3)
+
+        r = self.run_all(limit=300)
+
+        self.assertTrue(r["done"], r)
+        self.assertIsNone(r["blocked"], r)
+
+        exp = self.e.get_experiment(self.exp)
+        self.assertEqual(exp["state"], "COMPLETE")
+
+        flow = self.e.list_flows(self.exp)[0]
+        jobs = self.e.list_jobs(flow["id"])
+
+        # Two-worker lifecycle:
+        # allocation + 2 fan-out + 2 fan-in + finalization.
+        self.assertEqual(len(jobs), 6)
+        self.assertEqual(len(self.sent()), 6)
+
+        phases = [
+            json.loads(
+                job["generated_from_json"] or "{}"
+            ).get("phase")
+            for job in jobs
+        ]
+
+        self.assertEqual(
+            phases,
+            [
+                "allocation",
+                "workload",
+                "workload",
+                "consolidation",
+                "consolidation",
+                "finalization",
+            ],
+        )
+
+        final = json.loads(
+            exp["final_state_json"]
+        )["balances_sats"]
+
+        # Pre-existing Stage value is not part of the Play principal and must
+        # remain in Stage after terminal settlement.
+        self.assertEqual(
+            final["flab_stage"],
+            stage_baseline,
+        )
+
+        # Branch wallets are isolated at the beginning and swept back to Stage.
+        self.assertEqual(final["flab_a"], 0)
+        self.assertEqual(final["flab_b"], 0)
+
+        # The reserve pays the commitment fee outside experiment principal.
+        self.assertEqual(
+            final["flab_source"],
+            3_500_000_000
+            - FAN_OUT_FAN_IN_CFG["flows"][0]["allocation_sats"]
+            - FEE,
+        )
+
+        # Principal pays:
+        #   2 fan-out fees
+        #   2 fan-in fees
+        #   1 terminal finalization fee
+        allocation = FAN_OUT_FAN_IN_CFG["flows"][0][
+            "allocation_sats"
+        ]
+
+        self.assertEqual(
+            final["flab_dest"],
+            allocation - (5 * FEE),
+        )
+
+        terminal = jobs[-1]
+        terminal_meta = json.loads(
+            terminal["generated_from_json"] or "{}"
+        )
+        terminal_result = json.loads(
+            terminal["result_json"] or "{}"
+        )
+
+        self.assertEqual(
+            terminal_meta["stage_baseline_sats"],
+            stage_baseline,
+        )
+        self.assertEqual(
+            terminal_meta["stage_wallet"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            terminal_result["amount_sats"],
+            allocation - (5 * FEE),
+        )
+
+    def test_dirty_worker_refuses_before_first_transaction(self):
+        self.chain.fund(
+            "flab_a",
+            12_345_678,
+        )
+        self.chain.mine(3)
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNotNone(r["blocked"], r)
+        self.assertIn(
+            "Fan-Out/Fan-In requires empty worker wallets",
+            r["blocked"],
+        )
+        self.assertIn(
+            "flab_a",
+            r["blocked"],
+        )
+
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "PAUSED",
+        )
+        self.assertEqual(self.sent(), [])
+
+        flow = self.e.list_flows(self.exp)[0]
+        self.assertEqual(
+            self.e.list_jobs(flow["id"]),
+            [],
+        )
 
 
 class RunTests(ExecBase):

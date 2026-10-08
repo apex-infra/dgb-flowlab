@@ -34,6 +34,7 @@ FUND_ADDRESS_TYPES = frozenset({
 
 # The dashboard accepts only the config fields it knows how to present and review.
 TOP_KEYS = {
+    "play",
     "flows",
     "workload",
     "confirmations_required",

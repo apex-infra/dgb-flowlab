@@ -514,6 +514,9 @@ class WebReadTests(WebBase):
         self.assertIn("state.workers.forEach(w => { w.on = true; })", form)
         self.assertIn("state.workers.forEach(w => { w.on = false; })", form)
         self.assertIn('"hub_and_spoke"', form)
+        self.assertIn('"fan_out_fan_in"', form)
+        self.assertIn("const fanMode =", form)
+        self.assertIn("decisionsField.hidden = fanMode", form)
         self.assertIn('"f-hub"', form)
         self.assertIn('"Hub wallet"', form)
         self.assertIn('roleWallets("hubs")', form)
@@ -1138,7 +1141,12 @@ class WebControlTests(WebBase):
 
         self.assertEqual(
             [p["name"] for p in data["plays"]],
-            ["random_walk", "ring", "hub_and_spoke"],
+            [
+                "random_walk",
+                "ring",
+                "hub_and_spoke",
+                "fan_out_fan_in",
+            ],
         )
 
     def test_compile_play_returns_config_without_creating_experiment(self):
@@ -1186,6 +1194,66 @@ class WebControlTests(WebBase):
 
         after = len(self.snap()["extras"]["experiments"])
         self.assertEqual(after, before)
+
+    def test_compile_fan_out_fan_in_returns_deterministic_config(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "workers": ["flab_a", "flab_b"],
+            "hubs": [],
+            "destinations": ["flab_dest"],
+        }
+
+        self.up(
+            wallet_roles=roles,
+            wallets=tuple(self.chain.wallets) + ("flab_stage",),
+        )
+
+        s, out = self.do("compile_play", {
+            "play": "fan_out_fan_in",
+            "params": {
+                "source_wallet": "flab_source",
+                "allocation_wallet": "flab_stage",
+                "workers": ["flab_a", "flab_b"],
+                "destination_wallet": "flab_dest",
+                "allocation_sats": 500_000_000,
+                "amount_sats_min": 10_000_000,
+                "amount_sats_max": 50_000_000,
+                "delay_seconds_min": 5,
+                "delay_seconds_max": 60,
+                "confirmations_required": 2,
+                "seed": 104,
+            },
+        })
+
+        self.assertEqual(s, 200, out)
+        self.assertEqual(
+            out["play"]["name"],
+            "fan_out_fan_in",
+        )
+        self.assertEqual(
+            out["config"]["randomization"],
+            {"enabled": False},
+        )
+        self.assertNotIn("workload", out["config"])
+
+        flow = out["config"]["flows"][0]
+        transfers = flow["transfers"]
+
+        self.assertEqual(transfers[0]["from"], "flab_source")
+        self.assertEqual(transfers[0]["to"], "flab_stage")
+        self.assertEqual(transfers[-1]["from"], "flab_stage")
+        self.assertEqual(transfers[-1]["to"], "flab_dest")
+
+        status, created = self.do("new", {
+            "config": out["config"],
+            "description": "fan-out fan-in dashboard run",
+        })
+
+        self.assertEqual(status, 200, created)
+        self.assertIn("exp", created)
+        self.assertIn("hash", created)
+        self.assertIn("randomization: disabled", created["text"])
 
     def test_compile_play_accepts_valid_external_destination(self):
         self.up()

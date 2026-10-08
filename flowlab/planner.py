@@ -613,22 +613,90 @@ def generate_experimental_job(
     return job_id
 
 
-def generate_jobs(engine, flow_id):
+def generate_jobs(engine, flow_id, play_context=None):
     """Create one job per configured transfer, in order. Returns the job ids."""
     if engine.list_jobs(flow_id):
         raise PlanError("this flow already has jobs; refusing to plan it twice")
+
+    flow = engine.get_flow(flow_id)
+    cfg = json.loads(
+        engine.get_experiment(flow["experiment_id"])["config_json"]
+    )
+    play = cfg.get("play") or {}
+
+    transfers = transfers_for(engine, flow_id)
+
+    fan_out_fan_in = (
+        play.get("name") == "fan_out_fan_in"
+        and play.get("version") == 1
+    )
+
+    if fan_out_fan_in:
+        if len(transfers) < 6 or (len(transfers) - 2) % 2 != 0:
+            raise PlanError(
+                "Fan-Out/Fan-In V1 has an invalid transfer lifecycle"
+            )
+        branch_count = (len(transfers) - 2) // 2
+    else:
+        branch_count = 0
+
     ids = []
-    for i, t in enumerate(transfers_for(engine, flow_id)):
+    for i, t in enumerate(transfers):
+        phase = "workload"
+
+        if fan_out_fan_in:
+            if i == 0:
+                phase = "allocation"
+            elif i == len(transfers) - 1:
+                phase = "finalization"
+            elif i <= branch_count:
+                phase = "workload"
+            else:
+                phase = "consolidation"
+
+        generated_from = {
+            "step": i,
+            "source": "approved config",
+            "phase": phase,
+        }
+
+        if (
+            fan_out_fan_in
+            and phase == "finalization"
+        ):
+            if not isinstance(play_context, dict):
+                raise PlanError(
+                    "Fan-Out/Fan-In V1 requires persisted Play context"
+                )
+
+            baseline = play_context.get("stage_baseline_sats")
+
+            if (
+                not isinstance(baseline, int)
+                or isinstance(baseline, bool)
+                or baseline < 0
+            ):
+                raise PlanError(
+                    "Fan-Out/Fan-In V1 has an invalid Stage baseline"
+                )
+
+            generated_from["stage_baseline_sats"] = baseline
+            generated_from["stage_wallet"] = play_context.get(
+                "stage_wallet"
+            )
+
         ids.append(engine.add_job(
             flow_id,
-            {"from": t["from"], "to": t["to"], "amount_sats": t["amount_sats"], "step": i},
-            planned_delay_s=t["delay_seconds"],
-            generated_from={
+            {
+                "from": t["from"],
+                "to": t["to"],
+                "amount_sats": t["amount_sats"],
                 "step": i,
-                "source": "approved config",
-                "phase": "workload",
             },
-            depends_on=[ids[-1]] if ids else ()))
+            planned_delay_s=t["delay_seconds"],
+            generated_from=generated_from,
+            depends_on=[ids[-1]] if ids else (),
+        ))
     return ids
 
 

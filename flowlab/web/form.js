@@ -1088,7 +1088,16 @@ const whole = (text, what, min) => {
   function refreshPlayWorkers() {
     const src = $("f-src").value;
     const stage = $("f-stage").value;
-    const terminal = new Set(destinationSetInternalWallets());
+    const fanMode = $("f-play").value === "fan_out_fan_in";
+
+    const terminal = fanMode
+      ? new Set(
+          $("f-dst-kind") && $("f-dst-kind").value === "internal" && $("f-dst")
+            ? [$("f-dst").value]
+            : []
+        )
+      : new Set(destinationSetInternalWallets());
+
     const keep = new Map(state.workers.map(x => [x.name, x.on]));
 
     const pool = $("f-play").value === "hub_and_spoke"
@@ -1167,9 +1176,8 @@ const whole = (text, what, min) => {
       source_wallet: src,
       allocation_wallet: stage,
       workers,
-      destinations,
+      ...destinationParams,
       allocation_sats: allocation,
-      decisions: whole($("f-jobs").value, "Number of decisions", 1),
       amount_sats_min: minAmount,
       amount_sats_max: maxAmount,
       delay_seconds_min: minDelay,
@@ -1177,6 +1185,14 @@ const whole = (text, what, min) => {
       confirmations_required: whole($("f-conf").value, "Confirmations", 1),
       seed: whole($("f-seed").value, "Seed", 0)
     };
+
+    if (!fanMode) {
+      params.decisions = whole(
+        $("f-jobs").value,
+        "Number of decisions",
+        1
+      );
+    }
 
     if ($("f-play").value === "hub_and_spoke") {
       const hub = $("f-hub");
@@ -1225,6 +1241,14 @@ const whole = (text, what, min) => {
       }
     );
 
+    const singleDestination = destinationControls(
+      destinations,
+      () => {
+        refreshPlayWorkers();
+        refreshPreview();
+      }
+    );
+
     const hubField = field("Hub wallet", hub);
     hubField.id = "f-hub-field";
 
@@ -1262,15 +1286,21 @@ const whole = (text, what, min) => {
       field("Allocation wallet", stage),
       hubField,
       field("Working wallets", workerPicker),
+      ...singleDestination.fields,
       destination.field,
       note("Play topology and terminal distribution are compiled by FlowLab on the server. The resulting ordinary config is still reviewed, hashed, and approved before execution.")
     );
 
     const workload = h("fieldset");
+    const decisionsField = field(
+      "Number of decisions",
+      num("f-jobs", "20", "100px")
+    );
+
     workload.append(
       h("legend", null, "Play parameters"),
       field("Experiment allocation (DGB)", num("f-allocation", "2")),
-      field("Number of decisions", num("f-jobs", "20", "100px")),
+      decisionsField,
       field("Minimum amount (DGB)", num("f-minamt", "0.10")),
       field("Maximum amount (DGB)", num("f-maxamt", "1.00")),
       field("Minimum delay (seconds)", num("f-mindelay", "5", "100px")),
@@ -1300,8 +1330,18 @@ const whole = (text, what, min) => {
 
     function refreshPlayShape() {
       const hubMode = play.value === "hub_and_spoke";
+      const fanMode = play.value === "fan_out_fan_in";
+
       hubField.hidden = !hubMode;
       hub.disabled = !hubMode;
+
+      singleDestination.fields.forEach(f => {
+        f.hidden = !fanMode;
+      });
+
+      destination.field.hidden = fanMode;
+      decisionsField.hidden = fanMode;
+
       refreshPlayWorkers();
       refreshPreview();
     }

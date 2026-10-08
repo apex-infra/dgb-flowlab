@@ -364,6 +364,22 @@ def validate(cfg):
     _need(not audit.has_secret_keys(cfg), "config must not contain credentials or key material")
     cfg = copy.deepcopy(cfg)
 
+    play = cfg.get("play")
+    if play is not None:
+        _need(isinstance(play, dict), "config.play must be an object")
+        _need(
+            set(play) == {"name", "version"},
+            "config.play must contain exactly name and version",
+        )
+        _need(
+            play.get("name") == "fan_out_fan_in",
+            "config.play.name is not supported",
+        )
+        _need(
+            play.get("version") == 1,
+            "config.play.version is not supported",
+        )
+
     flows = cfg.get("flows")
     _need(isinstance(flows, list) and flows, "config.flows must be a non-empty list")
     for i, fl in enumerate(flows):

@@ -7,6 +7,8 @@ experimental config that is already reviewed, hashed, approved, and executed.
 """
 
 from copy import deepcopy
+import hashlib
+import random
 
 from .config_schema import validate
 
@@ -44,6 +46,16 @@ PLAY_SPECS = {
         "min_workers": 1,
         "requires_hub": True,
     },
+    "fan_out_fan_in": {
+        "name": "fan_out_fan_in",
+        "title": "Fan-Out / Fan-In",
+        "description": (
+            "Commit the allocation to Stage, distribute seeded amounts across "
+            "approved workers, then sweep every branch back into Stage before "
+            "the terminal destination."
+        ),
+        "min_workers": 2,
+    },
 }
 
 
@@ -75,7 +87,12 @@ def list_plays():
     """Return public play metadata in stable catalog order."""
     return [
         deepcopy(PLAY_SPECS[name])
-        for name in ("random_walk", "ring", "hub_and_spoke")
+        for name in (
+            "random_walk",
+            "ring",
+            "hub_and_spoke",
+            "fan_out_fan_in",
+        )
     ]
 
 
@@ -135,7 +152,12 @@ def _validate_params(name, params):
     _need(name in PLAY_SPECS, f"unknown play: {name}")
     _need(isinstance(params, dict), "play parameters must be an object")
 
-    missing = sorted(_REQUIRED_PARAMS - set(params))
+    required = set(_REQUIRED_PARAMS)
+
+    if name == "fan_out_fan_in":
+        required.discard("decisions")
+
+    missing = sorted(required - set(params))
     _need(not missing, f"missing play parameters: {', '.join(missing)}")
 
     src = params["source_wallet"]
@@ -199,7 +221,7 @@ def _validate_params(name, params):
     allocation = params["allocation_sats"]
     minimum = params["amount_sats_min"]
     maximum = params["amount_sats_max"]
-    decisions = params["decisions"]
+    decisions = params.get("decisions")
     min_delay = params["delay_seconds_min"]
     max_delay = params["delay_seconds_max"]
     confirmations = params["confirmations_required"]
@@ -209,7 +231,12 @@ def _validate_params(name, params):
     _need(_is_int(minimum) and minimum > 0, "amount_sats_min must be a positive integer")
     _need(_is_int(maximum) and maximum >= minimum, "amount_sats_max must be >= amount_sats_min")
     _need(maximum <= allocation, "amount_sats_max cannot exceed allocation_sats")
-    _need(_is_int(decisions) and decisions > 0, "decisions must be a positive integer")
+    if name != "fan_out_fan_in":
+        _need(
+            _is_int(decisions) and decisions > 0,
+            "decisions must be a positive integer",
+        )
+
     _need(_is_int(min_delay) and min_delay >= 0, "delay_seconds_min must be >= 0")
     _need(_is_int(max_delay) and max_delay >= min_delay, "delay_seconds_max must be >= delay_seconds_min")
     _need(
@@ -252,6 +279,91 @@ def _hub_and_spoke_transitions(src, hub, workers):
     return transitions
 
 
+def _fan_out_fan_in_transfers(params):
+    """Return one reproducible ordered Fan-Out/Fan-In transfer lifecycle."""
+    source = params["source_wallet"]
+    stage = params["allocation_wallet"]
+    workers = list(params["workers"])
+    allocation = params["allocation_sats"]
+
+    material = (
+        f"flowlab-fan-out-fan-in-v1:{params['seed']}"
+    ).encode()
+    derived = int.from_bytes(hashlib.sha256(material).digest(), "big")
+    rng = random.Random(derived)
+
+    rng.shuffle(workers)
+
+    fanout = []
+    total_fanout = 0
+
+    for worker in workers:
+        amount = rng.randint(
+            params["amount_sats_min"],
+            params["amount_sats_max"],
+        )
+        total_fanout += amount
+
+        fanout.append({
+            "from": stage,
+            "to": worker,
+            "amount_sats": amount,
+            "delay_seconds": rng.randint(
+                params["delay_seconds_min"],
+                params["delay_seconds_max"],
+            ),
+        })
+
+    _need(
+        total_fanout < allocation,
+        "fan_out_fan_in seeded fan-out total must be less than allocation_sats "
+        "so Stage retains fee headroom",
+    )
+
+    fanin = [
+        {
+            "from": worker,
+            "to": stage,
+            "amount_sats": "all",
+            "delay_seconds": rng.randint(
+                params["delay_seconds_min"],
+                params["delay_seconds_max"],
+            ),
+        }
+        for worker in workers
+    ]
+
+    destination = params.get("destination_wallet")
+    if not destination:
+        destination = params.get("destination_address")
+
+    _need(
+        isinstance(destination, str) and destination,
+        "fan_out_fan_in v1 requires one destination_wallet or "
+        "destination_address",
+    )
+
+    return [
+        {
+            "from": source,
+            "to": stage,
+            "amount_sats": allocation,
+            "delay_seconds": 0,
+        },
+        *fanout,
+        *fanin,
+        {
+            "from": stage,
+            "to": destination,
+            "amount_sats": "all",
+            "delay_seconds": rng.randint(
+                params["delay_seconds_min"],
+                params["delay_seconds_max"],
+            ),
+        },
+    ]
+
+
 def compile_play(name, params):
     """
     Compile a named play into the existing experimental FlowLab config schema.
@@ -263,6 +375,50 @@ def compile_play(name, params):
     src = params["source_wallet"]
     stage = params["allocation_wallet"]
     workers = list(params["workers"])
+
+    if name == "fan_out_fan_in":
+        _need(
+            params.get("destinations") is None,
+            "fan_out_fan_in v1 does not support multi-destination settlement",
+        )
+
+        flow = {
+            "description": PLAY_SPECS[name]["title"],
+            "source_wallet": src,
+            "allocation_wallet": stage,
+            "flow_wallets": [stage, *workers],
+            "allocation_sats": params["allocation_sats"],
+            "transfers": _fan_out_fan_in_transfers(params),
+        }
+
+        if params.get("destination_wallet"):
+            flow["destination_wallet"] = params["destination_wallet"]
+        else:
+            flow["destination_address"] = params["destination_address"]
+
+        cfg = {
+            "play": {
+                "name": "fan_out_fan_in",
+                "version": 1,
+            },
+            "flows": [flow],
+            "confirmations_required": params["confirmations_required"],
+            "fee_policy": {
+                "type": "minimum",
+            },
+            "address_policy": "new",
+            "randomization": {
+                "enabled": False,
+            },
+        }
+
+        try:
+            return validate(cfg)
+        except Exception as exc:
+            raise PlayError(
+                f"compiled play is invalid: {exc}"
+            ) from exc
+
     destinations = _destination_spec(params)
     hub = None
 

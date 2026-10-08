@@ -25,7 +25,12 @@ class PlayCatalogTests(unittest.TestCase):
         names = [p["name"] for p in list_plays()]
         self.assertEqual(
             names,
-            ["random_walk", "ring", "hub_and_spoke"],
+            [
+                "random_walk",
+                "ring",
+                "hub_and_spoke",
+                "fan_out_fan_in",
+            ],
         )
 
     def test_get_play_spec_returns_public_metadata(self):
@@ -237,6 +242,157 @@ class PlayCompilerTests(unittest.TestCase):
             "must all be distinct",
         ):
             compile_play("hub_and_spoke", duplicate)
+
+    def test_fan_out_fan_in_compiles_to_ordered_deterministic_lifecycle(self):
+        cfg = compile_play("fan_out_fan_in", BASE)
+        self.assertEqual(validate(cfg), cfg)
+
+        self.assertEqual(
+            cfg["randomization"],
+            {"enabled": False},
+        )
+        self.assertNotIn("workload", cfg)
+        self.assertNotIn("finalization", cfg)
+
+        flow = cfg["flows"][0]
+
+        self.assertEqual(
+            flow["flow_wallets"],
+            ["flab_stage", "flab_a", "flab_b", "flab_c"],
+        )
+
+        transfers = flow["transfers"]
+
+        # Exact reserve -> Stage commitment.
+        self.assertEqual(
+            transfers[0],
+            {
+                "from": "flab_source",
+                "to": "flab_stage",
+                "amount_sats": BASE["allocation_sats"],
+                "delay_seconds": 0,
+            },
+        )
+
+        # Three fan-out jobs, then exactly three fan-in jobs.
+        fanout = transfers[1:4]
+        fanin = transfers[4:7]
+        terminal = transfers[7]
+
+        self.assertEqual(
+            {t["from"] for t in fanout},
+            {"flab_stage"},
+        )
+        self.assertEqual(
+            {t["to"] for t in fanout},
+            {"flab_a", "flab_b", "flab_c"},
+        )
+
+        for t in fanout:
+            self.assertGreaterEqual(
+                t["amount_sats"],
+                BASE["amount_sats_min"],
+            )
+            self.assertLessEqual(
+                t["amount_sats"],
+                BASE["amount_sats_max"],
+            )
+            self.assertGreaterEqual(
+                t["delay_seconds"],
+                BASE["delay_seconds_min"],
+            )
+            self.assertLessEqual(
+                t["delay_seconds"],
+                BASE["delay_seconds_max"],
+            )
+
+        self.assertLess(
+            sum(t["amount_sats"] for t in fanout),
+            BASE["allocation_sats"],
+        )
+
+        self.assertEqual(
+            {t["from"] for t in fanin},
+            {"flab_a", "flab_b", "flab_c"},
+        )
+        self.assertEqual(
+            {t["to"] for t in fanin},
+            {"flab_stage"},
+        )
+        self.assertTrue(
+            all(t["amount_sats"] == "all" for t in fanin)
+        )
+
+        self.assertEqual(
+            terminal["from"],
+            "flab_stage",
+        )
+        self.assertEqual(
+            terminal["to"],
+            "flab_dest",
+        )
+        self.assertEqual(
+            terminal["amount_sats"],
+            "all",
+        )
+
+    def test_fan_out_fan_in_is_seed_reproducible(self):
+        a = compile_play("fan_out_fan_in", BASE)
+        b = compile_play(
+            "fan_out_fan_in",
+            dict(BASE),
+        )
+
+        self.assertEqual(a, b)
+
+        changed = dict(BASE)
+        changed["seed"] = BASE["seed"] + 1
+
+        c = compile_play("fan_out_fan_in", changed)
+
+        self.assertNotEqual(
+            a["flows"][0]["transfers"],
+            c["flows"][0]["transfers"],
+        )
+
+    def test_fan_out_fan_in_does_not_require_decision_count(self):
+        params = dict(BASE)
+        params.pop("decisions")
+
+        cfg = compile_play("fan_out_fan_in", params)
+
+        self.assertEqual(validate(cfg), cfg)
+        self.assertNotIn("workload", cfg)
+
+    def test_fan_out_fan_in_requires_two_workers(self):
+        bad = dict(BASE)
+        bad["workers"] = ["flab_a"]
+
+        with self.assertRaisesRegex(
+            PlayError,
+            "requires at least 2 workers",
+        ):
+            compile_play("fan_out_fan_in", bad)
+
+    def test_fan_out_fan_in_v1_refuses_multi_destination(self):
+        params = dict(BASE)
+        params.pop("destination_wallet")
+        params["destinations"] = {
+            "mode": "percentage",
+            "items": [
+                {
+                    "type": "wallet",
+                    "wallet": "flab_dest",
+                    "percent_bps": 10_000,
+                },
+            ],
+        }
+
+        with self.assertRaisesRegex(
+            PlayError,
+            "does not support multi-destination",
+        ):
+            compile_play("fan_out_fan_in", params)
 
     def test_same_play_parameters_compile_identically(self):
         a = compile_play("random_walk", BASE)
