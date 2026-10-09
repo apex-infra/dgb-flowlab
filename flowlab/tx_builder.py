@@ -24,6 +24,11 @@ class BuildError(Exception):
     pass
 
 
+class FeeLimitExceeded(BuildError):
+    """A valid build proposed a network fee above the configured safety cap."""
+    pass
+
+
 @dataclass(frozen=True)
 class Prepared:
     source_wallet: str
@@ -921,10 +926,16 @@ class TxBuilder:
 
         fee = to_sats(funded_probe.get("fee", 0))
 
-        if fee < 0 or fee > self.max_fee_sats:
+        if fee < 0:
             raise BuildError(
                 f"fee {fee} sats is outside the allowed range "
                 f"0..{self.max_fee_sats}"
+            )
+
+        if fee > self.max_fee_sats:
+            raise FeeLimitExceeded(
+                f"fee {fee} sats exceeds the configured maximum "
+                f"{self.max_fee_sats} sats"
             )
 
         net = budget - fee
@@ -1242,8 +1253,17 @@ class TxBuilder:
         if len(others) > 1 or any(a != change for a, _ in others):
             raise BuildError("unexpected output (only destination and our own change allowed)")
         fee = sum(value_of.values()) - sum(v for _, v in outs)
-        if fee < 0 or fee > self.max_fee_sats:
-            raise BuildError(f"fee {fee} sats is outside the allowed range 0..{self.max_fee_sats}")
+        if fee < 0:
+            raise BuildError(
+                f"fee {fee} sats is outside the allowed range "
+                f"0..{self.max_fee_sats}"
+            )
+
+        if fee > self.max_fee_sats:
+            raise FeeLimitExceeded(
+                f"fee {fee} sats exceeds the configured maximum "
+                f"{self.max_fee_sats} sats"
+            )
         verdict = self.rpc.test_mempool_accept(hexstr)[0]
         if verdict.get("allowed") is not True:
             raise BuildError(f"node would reject it: {verdict.get('reject-reason')}")

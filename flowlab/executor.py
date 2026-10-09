@@ -3,8 +3,9 @@ executor.py -- runs the operator's approved transfer list, one safe step at a ti
 
 tick() makes at most one state change per flow and then returns, so it can be
 called in a loop (or by hand). Every action still goes through the engine's
-verification and journal. Anything unexpected pauses the experiment; nothing
-is retried automatically.
+verification and journal. Anything unexpected pauses the experiment. The one
+bounded automatic retry is an over-cap network fee: nothing is broadcast, the
+same PLANNED job remains intact, and a later tick rebuilds it from scratch.
 """
 
 import json
@@ -32,6 +33,7 @@ from .planner import (
 from .rpc import RpcError, to_sats
 from .tx_builder import (
     BuildError,
+    FeeLimitExceeded,
     Prepared,
     broadcast,
     broadcast_distribution,
@@ -70,6 +72,12 @@ class Executor:
         except GuardFailed as g:
             out["blocked"] = f"verification failed: {g}"
             self._pause(exp_id, out["blocked"])
+        except FeeLimitExceeded as err:
+            out["wait_s"] = POLL_SECONDS
+            out["actions"].append(
+                f"fee above safety cap; retrying build in "
+                f"{POLL_SECONDS}s: {err}"
+            )
         except (BuildError, RpcError, PlanError, EngineError) as err:
             out["blocked"] = f"{type(err).__name__}: {err}"
             self._pause(exp_id, out["blocked"])

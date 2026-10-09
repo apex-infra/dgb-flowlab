@@ -7,11 +7,11 @@ from decimal import Decimal
 from datetime import datetime, timedelta, timezone
 
 from flowlab import Engine
-from flowlab.executor import Executor
+from flowlab.executor import POLL_SECONDS, Executor
 from flowlab.node_verifier import NodeVerifier
 from flowlab.plays import compile_play
 from flowlab.rpc import RpcError, to_sats
-from flowlab.tx_builder import BuildError, TxBuilder
+from flowlab.tx_builder import BuildError, FeeLimitExceeded, TxBuilder
 from tests.fake_chain import FEE, FakeChain
 from tests.test_engine import FakeVerifier
 
@@ -1403,6 +1403,64 @@ class RunTests(ExecBase):
         self.chain.mine(2)
         r = self.x.tick(self.exp)
         self.assertTrue(any("confirmed" in a for a in r["actions"]), r)
+
+    def test_fee_limit_build_refusal_backs_off_and_retries(self):
+        # START -> PLAN and make the first scheduled job due.
+        self.x.tick(self.exp)
+        self.t += timedelta(seconds=30)
+        self.x.tick(self.exp)
+
+        flow = self.e.list_flows(self.exp)[0]
+        self.assertEqual(
+            self.e.get_flow(flow["id"])["state"],
+            "EXECUTE",
+        )
+
+        original_build = self.b.build
+        calls = []
+
+        def high_fee_once(*args, **kwargs):
+            calls.append(1)
+
+            if len(calls) == 1:
+                raise FeeLimitExceeded(
+                    "fee 105833520 sats exceeds the configured maximum "
+                    "10000000 sats"
+                )
+
+            return original_build(*args, **kwargs)
+
+        self.b.build = high_fee_once
+
+        # First build sees an excessive fee. It must NOT pause and must
+        # NOT broadcast. The same PLANNED job remains available to retry.
+        r = self.x.tick(self.exp)
+
+        self.assertIsNone(r["blocked"], r)
+        self.assertEqual(r["wait_s"], POLL_SECONDS)
+        self.assertEqual(
+            self.e.get_experiment(self.exp)["state"],
+            "RUNNING",
+        )
+
+        jobs = self.e.list_jobs(flow["id"])
+
+        self.assertEqual(jobs[0]["state"], "PLANNED")
+        self.assertEqual(self.sent(), [])
+
+        # After the retry interval, rebuild from scratch. When the builder
+        # reports an acceptable fee, normal execution continues.
+        self.t += timedelta(seconds=POLL_SECONDS)
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNone(r["blocked"], r)
+        self.assertEqual(
+            self.e.get_job(jobs[0]["id"])["state"],
+            "BROADCAST",
+        )
+        self.assertEqual(len(self.sent()), 1)
+        self.assertEqual(len(calls), 2)
 
     def test_build_refusal_pauses_and_sends_nothing(self):
         for u in self.chain.utxos.values():
