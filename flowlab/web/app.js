@@ -120,7 +120,9 @@ function renderHops(flow) {
   const box = h("div"), req = flow.required;
   flow.jobs.forEach(j => {
     const row = h("div", "hop");
-    row.append(h("span", "n", String(j.seq)), h("span", null, j.from + " → " + j.to),
+    row.append(
+      h("span", "n", String(j.seq)),
+      h("span", null, j.from + " → " + (j.to_label || j.to || "-")),
       h("span", null, amountOf(j) + (j.planned === "all" && j.amount == null ? "" : " DGB")));
     const t = h("span", "t"), pips = h("span", "pips");
     for (let i = 0; i < req; i++) pips.appendChild(h("i", "pip" + (i < (j.confs || 0) ? " on" : "")));

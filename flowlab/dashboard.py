@@ -106,11 +106,28 @@ def snapshot(db_path, exp_id=None, now=None):
                     for k in SAFE_GENERATED_KEYS
                     if k in generated_raw
                 }
+                to = plan.get("to")
+
+                settlement = plan.get("settlement")
+                if (
+                    to is None
+                    and isinstance(settlement, dict)
+                    and isinstance(settlement.get("items"), list)
+                ):
+                    count = len(settlement["items"])
+                    to_label = (
+                        f"Settlement ({count} destination"
+                        f"{'' if count == 1 else 's'})"
+                    )
+                else:
+                    to_label = to
+
                 jobs.append({
                     "seq": j["seq"],
                     "state": j["state"],
                     "from": plan["from"],
-                    "to": plan["to"],
+                    "to": to,
+                    "to_label": to_label,
                     "planned": plan["amount_sats"],
                     "amount": res.get("amount_sats"),
                     "fee": res.get("fee_sats"),
@@ -312,7 +329,7 @@ def render(snap, bal=None, width=100, color=True, now=None):
             amt = j["amount"] if j["amount"] is not None else j["planned"]
             amt = "ENTIRE BAL" if amt == "all" else dgb(amt)
             conf = "-" if j["confs"] is None else f"{j['confs']}/{f['required']}"
-            hop = f"{j['from']} → {j['to']}"
+            hop = f"{j['from']} → {j['to_label']}"
             L.append(f" {j['seq']:>2}  " + p(f"{j['state']:<10}", STATE_COLOR.get(j["state"], "d"))
                      + f" {hop:<28} {amt:>13} {dgb(j['fee']) if j['fee'] else '-':>12} {conf:>6}  "
                      + p((j["txid"] or "")[:12], "d"))

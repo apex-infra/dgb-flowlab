@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 
@@ -91,6 +92,80 @@ class DashboardTests(DashBase):
             self.assertNotIn("planned_json", job)
             self.assertNotIn("result_json", job)
             self.assertNotIn("generated_from_json", job)
+
+    def test_snapshot_handles_multi_destination_settlement_without_scalar_to(self):
+        exp = self.make()
+
+        calls = []
+
+        def stop_with_planned_job(s):
+            calls.append(1)
+            if len(calls) == 1:
+                raise KeyboardInterrupt
+            self.chain.mine(2)
+
+        self.call(
+            "run",
+            exp,
+            sleep=stop_with_planned_job,
+        )
+
+        con = sqlite3.connect(self.db)
+
+        row = con.execute(
+            """
+            SELECT j.id
+            FROM jobs j
+            JOIN flows f ON f.id=j.flow_id
+            WHERE f.experiment_id=?
+            ORDER BY j.seq DESC
+            LIMIT 1
+            """,
+            (exp,),
+        ).fetchone()
+
+        self.assertIsNotNone(row)
+
+        settlement_plan = {
+            "from": "flab_stage",
+            "amount_sats": "all",
+            "settlement": {
+                "mode": "fixed",
+                "items": [
+                    {
+                        "type": "wallet",
+                        "wallet": "flab_dest",
+                        "amount_sats": 25_000_000,
+                    },
+                    {
+                        "type": "address",
+                        "address": "D_EXTERNAL_TEST_ADDRESS",
+                        "amount_sats": 15_000_000,
+                    },
+                ],
+                "retain_remainder": True,
+                "source_wallet": "flab_stage",
+            },
+        }
+
+        con.execute(
+            "UPDATE jobs SET planned_json=? WHERE id=?",
+            (
+                json.dumps(settlement_plan),
+                row[0],
+            ),
+        )
+        con.commit()
+        con.close()
+
+        snap = snapshot(self.db, exp)
+        job = snap["flows"][0]["jobs"][-1]
+
+        self.assertIsNone(job["to"])
+        self.assertEqual(
+            job["to_label"],
+            "Settlement (2 destinations)",
+        )
 
     def test_mid_run_shows_planned_hops_and_countdown(self):
         exp = self.make()
