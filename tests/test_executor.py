@@ -758,6 +758,111 @@ class SettlementCycleMixedExecutionTests(ExecBase):
 class SettlementCycleExecutionTests(ExecBase):
     config = SETTLEMENT_CYCLE_CFG
 
+    def test_consolidation_uses_sender_actual_utxo_count_for_fee_reserve(self):
+        # Drive through allocation + both outbound decisions, stopping at the
+        # PLAN tick immediately before pre-settlement consolidation.
+        flow = self.e.list_flows(self.exp)[0]
+
+        for _ in range(200):
+            jobs = self.e.list_jobs(flow["id"])
+            workload = [
+                job
+                for job in jobs
+                if json.loads(
+                    job["generated_from_json"] or "{}"
+                ).get("phase") == "workload"
+            ]
+
+            if (
+                len(workload) == 2
+                and all(job["state"] == "CONFIRMED" for job in workload)
+                and self.e.get_flow(flow["id"])["state"] == "PLAN"
+            ):
+                break
+
+            r = self.x.tick(self.exp)
+            self.assertIsNone(r["blocked"], r)
+
+            self.t += timedelta(seconds=r["wait_s"] or 1)
+            self.chain.mine(2)
+        else:
+            self.fail(
+                "Settlement Cycle did not reach pre-settlement "
+                "consolidation PLAN"
+            )
+
+        # Reproduce the live failure deterministically:
+        #
+        #   sender balance = 500 sats
+        #   actual eligible UTXOs = 1
+        #   generic 8-input reserve = 1,000 sats
+        #   actual 1-input reserve = 100 sats
+        #
+        # The consolidation must use the sender's actual eligible input count,
+        # not the generic workload-planning reserve.
+        def balances(_flow):
+            return {
+                "flab_source": 1_000_000_000,
+                "flab_stage": 400_000_000,
+                "flab_a": 500,
+                "flab_b": 0,
+            }
+
+        self.x._confirmed_balances = balances
+
+        original_list_unspent = self.chain.list_unspent
+
+        def one_input(wallet, minconf=0):
+            if wallet == "flab_a":
+                return [{
+                    "txid": "11" * 32,
+                    "vout": 0,
+                    "amount": Decimal("0.00000500"),
+                    "confirmations": 100,
+                    "spendable": True,
+                    "safe": True,
+                }]
+
+            return original_list_unspent(wallet, minconf)
+
+        self.chain.list_unspent = one_input
+
+        calls = []
+
+        def reserve_for_inputs(n_inputs=8):
+            calls.append(n_inputs)
+            return 100 if n_inputs == 1 else 1_000
+
+        self.b.planning_fee_reserve_sats = reserve_for_inputs
+
+        r = self.x.tick(self.exp)
+
+        self.assertIsNone(r["blocked"], r)
+
+        jobs = self.e.list_jobs(flow["id"])
+        consolidation = [
+            job
+            for job in jobs
+            if json.loads(
+                job["generated_from_json"] or "{}"
+            ).get("phase") == "consolidation"
+        ]
+
+        self.assertEqual(len(consolidation), 1)
+
+        plan = json.loads(consolidation[0]["planned_json"])
+
+        self.assertEqual(plan["from"], "flab_a")
+        self.assertEqual(plan["to"], "flab_stage")
+        self.assertEqual(plan["amount_sats"], "all")
+
+        generated = json.loads(
+            consolidation[0]["generated_from_json"] or "{}"
+        )
+
+        self.assertEqual(generated["fee_reserve_sats"], 100)
+        self.assertIn(1, calls)
+
     def _drive_to_settlement_execute(self):
         settlement = None
 

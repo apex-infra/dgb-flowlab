@@ -123,6 +123,42 @@ class TxBuilder:
             raise BuildError("planning fee input count must be a positive integer")
         return self._fee_reserve(n_inputs)
 
+    def planning_sweep_fee_reserve_sats(
+            self,
+            source_wallet,
+            *,
+            utxo_policy,
+            phase,
+            cohort_outpoints=None,
+            seed_material="",
+    ):
+        """Return a planning reserve based on the sweep's eligible inputs.
+
+        Sweep planning must use the same approved UTXO-policy eligibility
+        rules as transaction construction.  The actual builder will repeat
+        selection before signing/broadcasting and remains the final
+        fail-closed authority.
+        """
+        chosen, _ = self._policy_select_inputs(
+            source_wallet,
+            None,
+            sweep=True,
+            utxo_policy=utxo_policy,
+            phase=phase,
+            cohort_outpoints=cohort_outpoints,
+            seed_material=seed_material,
+            reserve_fee=False,
+        )
+
+        if not chosen:
+            raise BuildError(
+                "nothing to sweep: UTXO policy produced no eligible inputs"
+            )
+
+        return self.planning_fee_reserve_sats(
+            n_inputs=len(chosen),
+        )
+
     def _policy_select_inputs(
             self,
             source_wallet,

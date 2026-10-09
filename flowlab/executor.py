@@ -615,6 +615,102 @@ class Executor:
         balances = self._confirmed_balances(flow)
         fee_reserve = self.builder.planning_fee_reserve_sats()
 
+        phase = settlement_cycle_next_phase(
+            self.engine,
+            flow["id"],
+            balances,
+        )
+
+        if phase == "consolidation":
+            cfg = self._config_for_flow(flow)
+            cycle = cfg["settlement_cycle"]
+
+            internal_wallets = list(dict.fromkeys([
+                *cycle["hubs"],
+                *cycle["workers"],
+            ]))
+
+            sender = next(
+                (
+                    wallet
+                    for wallet in internal_wallets
+                    if balances.get(wallet, 0) > 0
+                ),
+                None,
+            )
+
+            if sender is not None:
+                rule = resolve_policy(
+                    cfg["utxo_policy"],
+                    "consolidation",
+                )
+
+                cohort_outpoints = None
+                can_measure_exact_inputs = (
+                    rule["scope"] == "live_wallet"
+                )
+
+                if rule["scope"] == "snapshot_at_start":
+                    cohort = self.engine.get_utxo_cohort(
+                        flow["id"],
+                        "snapshot_at_start",
+                    )
+
+                    if cohort is None:
+                        raise PlanError(
+                            "required experiment-start UTXO cohort "
+                            "is missing"
+                        )
+
+                    wallets = cohort.get("wallets")
+
+                    if not isinstance(wallets, dict):
+                        raise PlanError(
+                            "experiment-start UTXO cohort has "
+                            "invalid wallets"
+                        )
+
+                    rows = wallets.get(sender)
+
+                    if not isinstance(rows, list):
+                        raise PlanError(
+                            "experiment-start UTXO cohort is "
+                            f"missing source wallet {sender}"
+                        )
+
+                    cohort_outpoints = {
+                        (row[0], row[1])
+                        for row in rows
+                        if (
+                            isinstance(row, list)
+                            and len(row) == 2
+                            and isinstance(row[0], str)
+                            and isinstance(row[1], int)
+                            and not isinstance(row[1], bool)
+                        )
+                    }
+
+                    if len(cohort_outpoints) != len(rows):
+                        raise PlanError(
+                            "experiment-start UTXO cohort contains "
+                            "invalid outpoints"
+                        )
+
+                    can_measure_exact_inputs = True
+
+                # snapshot_at_phase_start intentionally remains on the
+                # conservative generic reserve because its immutable cohort
+                # is not captured until execution begins.
+                if can_measure_exact_inputs:
+                    fee_reserve = (
+                        self.builder.planning_sweep_fee_reserve_sats(
+                            sender,
+                            utxo_policy=cfg["utxo_policy"],
+                            phase="consolidation",
+                            cohort_outpoints=cohort_outpoints,
+                        )
+                    )
+
         return generate_settlement_cycle_phase_job(
             self.engine,
             flow["id"],
