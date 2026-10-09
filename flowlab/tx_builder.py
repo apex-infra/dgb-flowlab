@@ -953,26 +953,39 @@ class TxBuilder:
 
         # ------------------------------------------------------
         # Exact final transaction.
+        #
+        # For fixed distributions the fee probe is already the exact
+        # transaction we want: explicit outputs remain unchanged and Core
+        # subtracts the fee only from the single remainder output. Re-funding
+        # that exact net transaction is redundant and can fail when Core
+        # requires additional fee headroom from the preselected inputs.
+        #
+        # Percentage distributions are different: their final proportional
+        # amounts are calculated from the net budget, so they still require
+        # the second funding pass.
 
-        raw = self.rpc.create_raw_transaction(
-            [
-                {"txid": u["txid"], "vout": u["vout"]}
-                for u in chosen
-            ],
-            dict(destinations),
-        )
-
-        try:
-            funded = self.rpc.fund_raw_transaction(
-                source_wallet,
-                raw,
-                change,
-                fee_rate,
+        if mode == "fixed":
+            funded = funded_probe
+        else:
+            raw = self.rpc.create_raw_transaction(
+                [
+                    {"txid": u["txid"], "vout": u["vout"]}
+                    for u in chosen
+                ],
+                dict(destinations),
             )
-        except RpcError as exc:
-            raise BuildError(
-                f"distribution funding failed: {exc}"
-            ) from exc
+
+            try:
+                funded = self.rpc.fund_raw_transaction(
+                    source_wallet,
+                    raw,
+                    change,
+                    fee_rate,
+                )
+            except RpcError as exc:
+                raise BuildError(
+                    f"distribution funding failed: {exc}"
+                ) from exc
 
         final_fee = to_sats(funded.get("fee", 0))
 

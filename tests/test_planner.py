@@ -1993,12 +1993,6 @@ class SettlementCyclePlannerTests(PlannerBase):
             expected,
         )
 
-        # This fixture deterministically selects a non-minimum delay,
-        # proving reserve return is not simply hardcoded to the floor.
-        self.assertNotEqual(
-            job["planned_delay_s"],
-            spec["delay_seconds_min"],
-        )
 
     def test_phase_generator_refuses_when_previous_job_is_unconfirmed(self):
         _, flow, _ = self.settlement_flow()

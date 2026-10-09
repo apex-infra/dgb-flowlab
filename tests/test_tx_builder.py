@@ -242,6 +242,67 @@ class DistributionBuildTests(unittest.TestCase):
             prepared.outputs,
         )
 
+    def test_fixed_remainder_distribution_uses_successful_fee_probe_as_final_funding(self):
+        original_fund = self.chain.fund_raw_transaction
+        calls = []
+
+        def fail_redundant_second_funding(*args, **kwargs):
+            calls.append({
+                "subtract_fee": kwargs.get("subtract_fee", False),
+                "subtract_fee_indexes": kwargs.get(
+                    "subtract_fee_indexes"
+                ),
+            })
+
+            if len(calls) > 1:
+                raise RpcError(
+                    "The preselected coins total amount does not cover "
+                    "the transaction target. Please allow other inputs "
+                    "to be automatically selected or include more coins "
+                    "manually",
+                    -4,
+                )
+
+            return original_fund(*args, **kwargs)
+
+        self.chain.fund_raw_transaction = (
+            fail_redundant_second_funding
+        )
+
+        prepared = self.b.build_distribution(
+            "flab_source",
+            "all",
+            "fixed",
+            [
+                {
+                    "address": self.external_a,
+                    "amount_sats": 300_000_000,
+                },
+                {
+                    "address": self.internal,
+                    "remainder": True,
+                },
+            ],
+            allowed_external_addresses={self.external_a},
+        )
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(
+            calls[0]["subtract_fee_indexes"],
+            [1],
+        )
+        self.assertEqual(prepared.fee_sats, FEE)
+        self.assertEqual(
+            prepared.destinations,
+            (
+                (self.external_a, 300_000_000),
+                (
+                    self.internal,
+                    700_000_000 - FEE,
+                ),
+            ),
+        )
+
     def test_distribution_external_address_must_be_explicitly_approved(self):
         with self.assertRaisesRegex(
             BuildError,
