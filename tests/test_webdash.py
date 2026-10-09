@@ -2362,6 +2362,64 @@ class WebControlTests(WebBase):
         self.wait_idle()
         self.assertEqual(self.state(exp), "COMPLETE")
 
+    def test_recover_then_continue_does_not_reenter_recovery(self):
+        self.up()
+
+        exp = self.do(
+            "new",
+            {"config": cfg_sweep()},
+        )[1]["exp"]
+
+        self.do(
+            "approve",
+            {
+                "exp": exp,
+                "hash": self.do(
+                    "review",
+                    {"exp": exp},
+                )[1]["hash"],
+            },
+        )
+
+        # Start the experiment without letting the normal run finish.
+        from flowlab.cli import _open
+
+        e = _open(self.db, self.chain)[0]
+
+        try:
+            e.recover()
+            e.start(exp)
+        finally:
+            # Simulate a real crash: leave clean_shutdown = 0.
+            e.close(clean=False)
+
+        # First recovery check after the simulated restart is legitimate.
+        s, out = self.do(
+            "recover",
+            {"exp": exp},
+        )
+
+        self.assertEqual(s, 200, out)
+        self.assertTrue(out["left_recovery"], out)
+        self.assertEqual(self.state(exp), "RUNNING")
+
+        # Continue in the SAME web-server process. This must not perform
+        # another startup recovery check and put the experiment back into
+        # RECOVERY merely because clean_shutdown is already 0.
+        s, out = self.do(
+            "run",
+            {"exp": exp},
+        )
+
+        self.assertEqual(s, 200, out)
+
+        self.wait_idle()
+
+        self.assertNotEqual(
+            self.state(exp),
+            "RECOVERY",
+        )
+
     def test_emergency_stop_aborts_and_clear_needs_a_note(self):
         self.up()
         exp = self.do("new", {"config": cfg_sweep()})[1]["exp"]

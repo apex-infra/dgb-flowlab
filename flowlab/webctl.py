@@ -130,6 +130,8 @@ class Controller:
         }
         self.control, self._sleep = control, sleep
         self._lock, self._halt = threading.Lock(), threading.Event()
+        self._recovery_lock = threading.Lock()
+        self._startup_recovery = None
         self._thread, self.exp = None, None
         self.log = deque(maxlen=300)
         self.actions = {
@@ -155,6 +157,14 @@ class Controller:
 
     def active(self):
         return bool(self._thread and self._thread.is_alive())
+
+    def _recover_once(self, engine):
+        """Perform process-start recovery once per dashboard server."""
+        with self._recovery_lock:
+            if self._startup_recovery is None:
+                self._startup_recovery = engine.recover()
+
+            return dict(self._startup_recovery)
 
     def _with_engine(self, fn, node=False):
         if node and not (self.rpc and self.builder):
@@ -728,7 +738,20 @@ class Controller:
         e, clean = None, False
         try:
             e = _open(self.db, self.rpc)[0]
-            code = _run(e, self.rpc, self.builder, exp, self.say, self._wait)
+
+            # Startup recovery belongs to the serve process, not to each
+            # background Continue/run thread.
+            self._recover_once(e)
+
+            code = _run(
+                e,
+                self.rpc,
+                self.builder,
+                exp,
+                self.say,
+                self._wait,
+                recover_startup=False,
+            )
             self.say(f"run ended (code {code})")
             clean = True
         except _Halt:
@@ -764,7 +787,7 @@ class Controller:
         exp = _text(body, "exp")
 
         def go(e):
-            e.recover()
+            self._recover_once(e)
             e.resume(exp)
         self._with_engine(go, node=True)
         return {"ok": True}
@@ -774,11 +797,15 @@ class Controller:
         exp = _text(body, "exp")
 
         def go(e):
-            s = e.recover()
+            s = self._recover_once(e)
             left = e.get_experiment(exp)["state"] == "RECOVERY"
             if left:
                 e.leave_recovery(exp)
-            return {"clean_shutdown": s["clean_shutdown"], "interrupted": s["unknown_actions"], "left_recovery": left}
+            return {
+                "clean_shutdown": s["clean_shutdown"],
+                "interrupted": s["unknown_actions"],
+                "left_recovery": left,
+            }
         return self._with_engine(go, node=True)
 
     def resolve(self, body):

@@ -219,8 +219,25 @@ def _dispatch(a, e, rpc, builder, out, sleep):
     return 0
 
 
-def _run(e, rpc, builder, exp, out, sleep):
-    s = e.recover()
+def _run(
+        e,
+        rpc,
+        builder,
+        exp,
+        out,
+        sleep,
+        *,
+        recover_startup=True,
+):
+    if recover_startup:
+        s = e.recover()
+    else:
+        s = {
+            "clean_shutdown": True,
+            "unknown_actions": [],
+            "moved_to_recovery": [],
+        }
+
     st = e.get_experiment(exp)["state"]
     if st == "RECOVERY" or exp in s["moved_to_recovery"]:
         out(f"experiment is in RECOVERY. Run: python3 flowctl.py recover {exp}")
