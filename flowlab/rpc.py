@@ -21,7 +21,7 @@ from decimal import Decimal, ROUND_HALF_EVEN
 ALLOWED_METHODS = frozenset("""
 getblockcount getblockchaininfo getblockhash getblockheader getnetworkinfo uptime
 estimatesmartfee getmempoolinfo listwallets listwalletdir getwalletinfo getbalances
-getbalance getnewaddress getaddressinfo setlabel validateaddress listunspent lockunspent
+getbalance getnewaddress getaddressinfo getaddressesbylabel setlabel validateaddress listunspent lockunspent
 listlockunspent listtransactions gettransaction getrawtransaction decoderawtransaction
 testmempoolaccept createrawtransaction fundrawtransaction signrawtransactionwithwallet
 sendrawtransaction
@@ -160,6 +160,9 @@ class RpcClient:
 
     def get_address_info(self, wallet, address):
         return self._call("getaddressinfo", [address], wallet=wallet)
+
+    def get_addresses_by_label(self, wallet, label):
+        return self._call("getaddressesbylabel", [label], wallet=wallet)
 
     def set_label(self, wallet, address, label):
         return self._call("setlabel", [address, label], wallet=wallet)

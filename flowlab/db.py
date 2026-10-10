@@ -15,7 +15,7 @@ together with its audit row, so state and audit can never disagree.
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -223,6 +223,43 @@ def validate_pool_schema(conn):
         )
 
 
+def validate_pool_registration_schema(conn):
+    """Reject incomplete schema-v3 participant registration objects."""
+
+    required = {
+        ("table", "pool_payout_instructions"),
+        ("table", "pool_registration_seals"),
+        ("table", "pool_deposit_addresses"),
+        ("trigger", "pool_deposit_address_ready_immutable"),
+        ("trigger", "pool_deposit_address_no_delete"),
+        ("trigger", "pool_deposit_address_no_insert_ready"),
+        ("trigger", "pool_registration_seal_validate"),
+        ("trigger", "pool_payout_no_update"),
+        ("trigger", "pool_payout_no_delete"),
+        ("trigger", "pool_payout_no_insert_after_seal"),
+        ("trigger", "pool_registration_seal_no_update"),
+        ("trigger", "pool_registration_seal_no_delete"),
+    }
+
+    objects = {
+        (row["type"], row["name"])
+        for row in conn.execute(
+            """
+            SELECT type, name
+            FROM sqlite_master
+            WHERE type IN ('table', 'trigger')
+            """
+        )
+    }
+
+    missing = sorted(required - objects)
+
+    if missing:
+        raise RuntimeError(
+            f"incomplete Mixer Lab registration schema v3: {missing}"
+        )
+
+
 def init(conn):
     # Check existing schema versions before changing an existing database.
     has_meta = conn.execute(
@@ -239,14 +276,17 @@ def init(conn):
             version = int(row["value"])
         except ValueError as exc:
             raise RuntimeError("invalid database schema_version") from exc
-        if version not in (1, SCHEMA_VERSION):
+        if version not in (1, 2, SCHEMA_VERSION):
             raise RuntimeError(
                 f"database schema_version {version} != code {SCHEMA_VERSION}; "
                 "refusing unsupported migration"
             )
         if version == SCHEMA_VERSION:
             validate_pool_schema(conn)
+            validate_pool_registration_schema(conn)
             return
+        if version == 2:
+            validate_pool_schema(conn)
     else:
         version = None
 
@@ -265,207 +305,364 @@ def init(conn):
             if statement.strip():
                 raise RuntimeError("Incomplete FlowLab schema statement")
 
-        existing_pool_object = conn.execute(
-            """
-            SELECT type FROM sqlite_master
-            WHERE name = 'pools'
-            """
-        ).fetchone()
+        if version in (None, 1):
+            existing_pool_object = conn.execute(
+                """
+                SELECT type FROM sqlite_master
+                WHERE name = 'pools'
+                """
+            ).fetchone()
 
-        if existing_pool_object is not None:
-            if existing_pool_object["type"] != "table":
-                raise sqlite3.OperationalError(
-                    "schema migration conflict: pools exists but is not a table"
+            if existing_pool_object is not None:
+                if existing_pool_object["type"] != "table":
+                    raise sqlite3.OperationalError(
+                        "schema migration conflict: pools exists but is not a table"
+                    )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS pools (
+                    id             TEXT PRIMARY KEY,
+                    state          TEXT NOT NULL DEFAULT 'PAUSED'
+                                     CHECK(state IN ('PAUSED', 'ACTIVE', 'RETIRED')),
+                    reserve_wallet TEXT NOT NULL,
+                    fee_wallet     TEXT NOT NULL,
+                    created_at     TEXT NOT NULL,
+                    updated_at     TEXT NOT NULL,
+                    CHECK(reserve_wallet <> fee_wallet)
                 )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS pools (
-                id             TEXT PRIMARY KEY,
-                state          TEXT NOT NULL DEFAULT 'PAUSED'
-                                 CHECK(state IN ('PAUSED', 'ACTIVE', 'RETIRED')),
-                reserve_wallet TEXT NOT NULL,
-                fee_wallet     TEXT NOT NULL,
-                created_at     TEXT NOT NULL,
-                updated_at     TEXT NOT NULL,
-                CHECK(reserve_wallet <> fee_wallet)
+                """
             )
-            """
-        )
-        # Mixer Lab financial records. All are created in the same
-        # transaction as the schema version update.
-        conn.execute("""
-            CREATE TABLE pool_sessions (
-                id TEXT PRIMARY KEY,
-                pool_id TEXT NOT NULL REFERENCES pools(id),
-                fee_basis_points INTEGER NOT NULL
-                    CHECK(fee_basis_points BETWEEN 0 AND 10000),
-                state TEXT NOT NULL DEFAULT 'REGISTERED',
-                created_at TEXT NOT NULL,
-                UNIQUE(id, pool_id)
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE pool_deposits (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pool_id TEXT NOT NULL REFERENCES pools(id),
-                session_id TEXT NOT NULL,
-                txid TEXT NOT NULL,
-                vout INTEGER NOT NULL CHECK(vout >= 0),
-                amount_sats INTEGER NOT NULL CHECK(amount_sats > 0),
-                fee_sats INTEGER NOT NULL CHECK(fee_sats >= 0),
-                credited_at TEXT NOT NULL,
-                UNIQUE(txid, vout),
-                FOREIGN KEY(session_id, pool_id)
-                    REFERENCES pool_sessions(id, pool_id)
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE pool_journal_transactions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                pool_id TEXT NOT NULL REFERENCES pools(id),
-                deposit_id INTEGER UNIQUE REFERENCES pool_deposits(id),
-                state TEXT NOT NULL DEFAULT 'DRAFT'
-                    CHECK(state IN ('DRAFT', 'POSTED')),
-                created_at TEXT NOT NULL
-            )
-        """)
-
-        conn.execute("""
-            CREATE TABLE pool_journal_entries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                transaction_id INTEGER NOT NULL
-                    REFERENCES pool_journal_transactions(id),
-                account TEXT NOT NULL,
-                debit_sats INTEGER NOT NULL DEFAULT 0
-                    CHECK(debit_sats >= 0),
-                credit_sats INTEGER NOT NULL DEFAULT 0
-                    CHECK(credit_sats >= 0),
-                CHECK(
-                    (debit_sats > 0 AND credit_sats = 0)
-                    OR
-                    (credit_sats > 0 AND debit_sats = 0)
+            # Mixer Lab financial records. All are created in the same
+            # transaction as the schema version update.
+            conn.execute("""
+                CREATE TABLE pool_sessions (
+                    id TEXT PRIMARY KEY,
+                    pool_id TEXT NOT NULL REFERENCES pools(id),
+                    fee_basis_points INTEGER NOT NULL
+                        CHECK(fee_basis_points BETWEEN 0 AND 10000),
+                    state TEXT NOT NULL DEFAULT 'REGISTERED',
+                    created_at TEXT NOT NULL,
+                    UNIQUE(id, pool_id)
                 )
+            """)
+
+            conn.execute("""
+                CREATE TABLE pool_deposits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_id TEXT NOT NULL REFERENCES pools(id),
+                    session_id TEXT NOT NULL,
+                    txid TEXT NOT NULL,
+                    vout INTEGER NOT NULL CHECK(vout >= 0),
+                    amount_sats INTEGER NOT NULL CHECK(amount_sats > 0),
+                    fee_sats INTEGER NOT NULL CHECK(fee_sats >= 0),
+                    credited_at TEXT NOT NULL,
+                    UNIQUE(txid, vout),
+                    FOREIGN KEY(session_id, pool_id)
+                        REFERENCES pool_sessions(id, pool_id)
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE pool_journal_transactions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    pool_id TEXT NOT NULL REFERENCES pools(id),
+                    deposit_id INTEGER UNIQUE REFERENCES pool_deposits(id),
+                    state TEXT NOT NULL DEFAULT 'DRAFT'
+                        CHECK(state IN ('DRAFT', 'POSTED')),
+                    created_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE pool_journal_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    transaction_id INTEGER NOT NULL
+                        REFERENCES pool_journal_transactions(id),
+                    account TEXT NOT NULL,
+                    debit_sats INTEGER NOT NULL DEFAULT 0
+                        CHECK(debit_sats >= 0),
+                    credit_sats INTEGER NOT NULL DEFAULT 0
+                        CHECK(credit_sats >= 0),
+                    CHECK(
+                        (debit_sats > 0 AND credit_sats = 0)
+                        OR
+                        (credit_sats > 0 AND debit_sats = 0)
+                    )
+                )
+            """)
+
+            # Registration terms are immutable once a session exists.
+            conn.execute("""
+                CREATE TRIGGER pool_session_fee_immutable
+                BEFORE UPDATE OF fee_basis_points ON pool_sessions
+                WHEN NEW.fee_basis_points != OLD.fee_basis_points
+                BEGIN
+                    SELECT RAISE(ABORT, 'session fee terms are immutable');
+                END
+            """)
+
+            # Credited deposit records are immutable. Reorganizations,
+            # refunds, and corrections require separate auditable events,
+            # never rewriting a previously credited deposit.
+            conn.execute("""
+                CREATE TRIGGER pool_deposit_no_update
+                BEFORE UPDATE ON pool_deposits
+                BEGIN
+                    SELECT RAISE(ABORT, 'credited deposit is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_deposit_no_delete
+                BEFORE DELETE ON pool_deposits
+                BEGIN
+                    SELECT RAISE(ABORT, 'credited deposit is immutable');
+                END
+            """)
+
+            # Journal transactions must begin as DRAFT.
+            # POSTED is only allowed through the balanced transition.
+            conn.execute("""
+                CREATE TRIGGER pool_journal_insert_draft_only
+                BEFORE INSERT ON pool_journal_transactions
+                WHEN NEW.state != 'DRAFT'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'pool journal must begin as DRAFT'
+                    );
+                END
+            """)
+
+            # A journal transaction cannot be posted unless it balances.
+            conn.execute("""
+                CREATE TRIGGER pool_journal_post_balanced
+                BEFORE UPDATE OF state ON pool_journal_transactions
+                WHEN NEW.state = 'POSTED'
+                BEGIN
+                    SELECT CASE WHEN
+                        COALESCE((
+                            SELECT SUM(debit_sats - credit_sats)
+                            FROM pool_journal_entries
+                            WHERE transaction_id = NEW.id
+                        ), 0) != 0
+                        OR NOT EXISTS (
+                            SELECT 1 FROM pool_journal_entries
+                            WHERE transaction_id = NEW.id
+                        )
+                    THEN RAISE(ABORT, 'unbalanced pool journal')
+                    END;
+                END
+            """)
+
+            # Posted journals are immutable.
+            conn.execute("""
+                CREATE TRIGGER pool_journal_no_update
+                BEFORE UPDATE ON pool_journal_entries
+                WHEN EXISTS (
+                    SELECT 1 FROM pool_journal_transactions
+                    WHERE id = OLD.transaction_id AND state = 'POSTED'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'posted journal is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_journal_no_delete
+                BEFORE DELETE ON pool_journal_entries
+                WHEN EXISTS (
+                    SELECT 1 FROM pool_journal_transactions
+                    WHERE id = OLD.transaction_id AND state = 'POSTED'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'posted journal is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_journal_no_insert
+                BEFORE INSERT ON pool_journal_entries
+                WHEN EXISTS (
+                    SELECT 1 FROM pool_journal_transactions
+                    WHERE id = NEW.transaction_id AND state = 'POSTED'
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'posted journal is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_journal_transaction_immutable
+                BEFORE UPDATE ON pool_journal_transactions
+                WHEN OLD.state = 'POSTED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'posted journal is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_journal_transaction_no_delete
+                BEFORE DELETE ON pool_journal_transactions
+                WHEN OLD.state = 'POSTED'
+                BEGIN
+                    SELECT RAISE(ABORT, 'posted journal is immutable');
+                END
+            """)
+
+
+        # M2.1: immutable participant payout instructions.
+        conn.execute("""
+            CREATE TABLE pool_payout_instructions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL
+                    REFERENCES pool_sessions(id),
+                position INTEGER NOT NULL
+                    CHECK(position BETWEEN 1 AND 10),
+                payout_address TEXT NOT NULL,
+                allocation_bps INTEGER NOT NULL
+                    CHECK(allocation_bps BETWEEN 1 AND 10000),
+                UNIQUE(session_id, position),
+                UNIQUE(session_id, payout_address)
             )
         """)
 
-        # Registration terms are immutable once a session exists.
+        # A registration seal can only be created when payout
+        # instructions are complete and total exactly 100%.
         conn.execute("""
-            CREATE TRIGGER pool_session_fee_immutable
-            BEFORE UPDATE OF fee_basis_points ON pool_sessions
-            WHEN NEW.fee_basis_points != OLD.fee_basis_points
-            BEGIN
-                SELECT RAISE(ABORT, 'session fee terms are immutable');
-            END
-        """)
-
-        # Credited deposit records are immutable. Reorganizations,
-        # refunds, and corrections require separate auditable events,
-        # never rewriting a previously credited deposit.
-        conn.execute("""
-            CREATE TRIGGER pool_deposit_no_update
-            BEFORE UPDATE ON pool_deposits
-            BEGIN
-                SELECT RAISE(ABORT, 'credited deposit is immutable');
-            END
+            CREATE TABLE pool_registration_seals (
+                session_id TEXT PRIMARY KEY
+                    REFERENCES pool_sessions(id),
+                completed_at TEXT NOT NULL
+            )
         """)
 
         conn.execute("""
-            CREATE TRIGGER pool_deposit_no_delete
-            BEFORE DELETE ON pool_deposits
-            BEGIN
-                SELECT RAISE(ABORT, 'credited deposit is immutable');
-            END
-        """)
-
-        # Journal transactions must begin as DRAFT.
-        # POSTED is only allowed through the balanced transition.
-        conn.execute("""
-            CREATE TRIGGER pool_journal_insert_draft_only
-            BEFORE INSERT ON pool_journal_transactions
-            WHEN NEW.state != 'DRAFT'
-            BEGIN
-                SELECT RAISE(
-                    ABORT,
-                    'pool journal must begin as DRAFT'
-                );
-            END
-        """)
-
-        # A journal transaction cannot be posted unless it balances.
-        conn.execute("""
-            CREATE TRIGGER pool_journal_post_balanced
-            BEFORE UPDATE OF state ON pool_journal_transactions
-            WHEN NEW.state = 'POSTED'
+            CREATE TRIGGER pool_registration_seal_validate
+            BEFORE INSERT ON pool_registration_seals
             BEGIN
                 SELECT CASE WHEN
-                    COALESCE((
-                        SELECT SUM(debit_sats - credit_sats)
-                        FROM pool_journal_entries
-                        WHERE transaction_id = NEW.id
-                    ), 0) != 0
-                    OR NOT EXISTS (
-                        SELECT 1 FROM pool_journal_entries
-                        WHERE transaction_id = NEW.id
-                    )
-                THEN RAISE(ABORT, 'unbalanced pool journal')
+                    (
+                        SELECT COUNT(*)
+                        FROM pool_payout_instructions
+                        WHERE session_id = NEW.session_id
+                    ) NOT BETWEEN 1 AND 10
+                    OR
+                    (
+                        SELECT COALESCE(SUM(allocation_bps), 0)
+                        FROM pool_payout_instructions
+                        WHERE session_id = NEW.session_id
+                    ) != 10000
+                THEN RAISE(
+                    ABORT,
+                    'incomplete payout registration'
+                )
                 END;
             END
         """)
 
-        # Posted journals are immutable.
         conn.execute("""
-            CREATE TRIGGER pool_journal_no_update
-            BEFORE UPDATE ON pool_journal_entries
+            CREATE TRIGGER pool_payout_no_update
+            BEFORE UPDATE ON pool_payout_instructions
+            BEGIN
+                SELECT RAISE(ABORT, 'payout instruction is immutable');
+            END
+        """)
+
+        conn.execute("""
+            CREATE TRIGGER pool_payout_no_delete
+            BEFORE DELETE ON pool_payout_instructions
+            BEGIN
+                SELECT RAISE(ABORT, 'payout instruction is immutable');
+            END
+        """)
+
+        conn.execute("""
+            CREATE TRIGGER pool_payout_no_insert_after_seal
+            BEFORE INSERT ON pool_payout_instructions
             WHEN EXISTS (
-                SELECT 1 FROM pool_journal_transactions
-                WHERE id = OLD.transaction_id AND state = 'POSTED'
+                SELECT 1 FROM pool_registration_seals
+                WHERE session_id = NEW.session_id
             )
             BEGIN
-                SELECT RAISE(ABORT, 'posted journal is immutable');
+                SELECT RAISE(ABORT, 'registration already finalized');
             END
         """)
 
         conn.execute("""
-            CREATE TRIGGER pool_journal_no_delete
-            BEFORE DELETE ON pool_journal_entries
-            WHEN EXISTS (
-                SELECT 1 FROM pool_journal_transactions
-                WHERE id = OLD.transaction_id AND state = 'POSTED'
+            CREATE TRIGGER pool_registration_seal_no_update
+            BEFORE UPDATE ON pool_registration_seals
+            BEGIN
+                SELECT RAISE(ABORT, 'registration seal is immutable');
+            END
+        """)
+
+        conn.execute("""
+            CREATE TRIGGER pool_registration_seal_no_delete
+            BEFORE DELETE ON pool_registration_seals
+            BEGIN
+                SELECT RAISE(ABORT, 'registration seal is immutable');
+            END
+        """)
+
+
+        # M2.2: persistent deposit-address request lifecycle.
+        conn.execute("""
+            CREATE TABLE pool_deposit_addresses (
+                session_id TEXT PRIMARY KEY
+                    REFERENCES pool_registration_seals(session_id),
+                wallet TEXT NOT NULL,
+                request_label TEXT NOT NULL UNIQUE,
+                address TEXT UNIQUE,
+                state TEXT NOT NULL
+                    CHECK(state IN (
+                        'REQUESTING',
+                        'READY',
+                        'RECOVERY_REQUIRED'
+                    )),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                CHECK(
+                    (state = 'READY' AND address IS NOT NULL)
+                    OR
+                    (state != 'READY' AND address IS NULL)
+                )
             )
+        """)
+
+        conn.execute("""
+            CREATE TRIGGER pool_deposit_address_ready_immutable
+            BEFORE UPDATE ON pool_deposit_addresses
+            WHEN OLD.state = 'READY'
             BEGIN
-                SELECT RAISE(ABORT, 'posted journal is immutable');
+                SELECT RAISE(
+                    ABORT,
+                    'ready deposit address is immutable'
+                );
             END
         """)
 
         conn.execute("""
-            CREATE TRIGGER pool_journal_no_insert
-            BEFORE INSERT ON pool_journal_entries
-            WHEN EXISTS (
-                SELECT 1 FROM pool_journal_transactions
-                WHERE id = NEW.transaction_id AND state = 'POSTED'
-            )
+            CREATE TRIGGER pool_deposit_address_no_delete
+            BEFORE DELETE ON pool_deposit_addresses
             BEGIN
-                SELECT RAISE(ABORT, 'posted journal is immutable');
+                SELECT RAISE(
+                    ABORT,
+                    'deposit address request is immutable'
+                );
             END
         """)
 
         conn.execute("""
-            CREATE TRIGGER pool_journal_transaction_immutable
-            BEFORE UPDATE ON pool_journal_transactions
-            WHEN OLD.state = 'POSTED'
+            CREATE TRIGGER pool_deposit_address_no_insert_ready
+            BEFORE INSERT ON pool_deposit_addresses
+            WHEN NEW.state != 'REQUESTING'
+                 OR NEW.address IS NOT NULL
             BEGIN
-                SELECT RAISE(ABORT, 'posted journal is immutable');
-            END
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER pool_journal_transaction_no_delete
-            BEFORE DELETE ON pool_journal_transactions
-            WHEN OLD.state = 'POSTED'
-            BEGIN
-                SELECT RAISE(ABORT, 'posted journal is immutable');
+                SELECT RAISE(
+                    ABORT,
+                    'deposit address request must start REQUESTING'
+                );
             END
         """)
 
