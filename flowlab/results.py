@@ -165,6 +165,10 @@ def analyze_experiment(snapshot, wallet_roles=None):
             phase_counts["terminal_distribution"] += 1
         elif phase == "finalization":
             phase_counts["finalization"] += 1
+        elif phase == "settlement":
+            phase_counts["settlement"] += 1
+        elif phase == "reserve_return":
+            phase_counts["reserve_return"] += 1
         else:
             phase_counts["other"] += 1
 
@@ -312,6 +316,8 @@ def analyze_experiment(snapshot, wallet_roles=None):
             "finalization_jobs": phase_counts["finalization"],
             "terminal_distribution_jobs":
                 phase_counts["terminal_distribution"],
+            "settlement_jobs": phase_counts["settlement"],
+            "reserve_return_jobs": phase_counts["reserve_return"],
             "other_jobs": phase_counts["other"],
         },
         "topology": {

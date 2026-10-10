@@ -130,6 +130,7 @@ def snapshot(db_path, exp_id=None, now=None):
                     "to_label": to_label,
                     "planned": plan["amount_sats"],
                     "amount": res.get("amount_sats"),
+                    "distributed": res.get("distributed_sats"),
                     "fee": res.get("fee_sats"),
                     "txid": j["txid"],
                     "confs": j["confs"],
@@ -170,6 +171,18 @@ def snapshot(db_path, exp_id=None, now=None):
                 job for job in all_jobs
                 if job["generated"]
                 and job["generated"].get("phase") == "finalization"
+            ]
+
+            settlement_jobs = [
+                job for job in all_jobs
+                if job["generated"]
+                and job["generated"].get("phase") == "settlement"
+            ]
+
+            reserve_return_jobs = [
+                job for job in all_jobs
+                if job["generated"]
+                and job["generated"].get("phase") == "reserve_return"
             ]
 
             approved_principal = sum(
@@ -226,6 +239,20 @@ def snapshot(db_path, exp_id=None, now=None):
                 and isinstance(job["amount"], int)
             )
 
+            settlement_distributions = sum(
+                job["distributed"]
+                for job in settlement_jobs
+                if job["state"] == "CONFIRMED"
+                and isinstance(job["distributed"], int)
+            )
+
+            reserve_return = sum(
+                job["amount"]
+                for job in reserve_return_jobs
+                if job["state"] == "CONFIRMED"
+                and isinstance(job["amount"], int)
+            )
+
             principal_after_fees = max(
                 0,
                 committed_principal - experiment_fees,
@@ -239,6 +266,8 @@ def snapshot(db_path, exp_id=None, now=None):
                     committed_principal
                     - experiment_fees
                     - destination_receipts
+                    - settlement_distributions
+                    - reserve_return
                 )
                 accounting_reconciled = accounting_delta == 0
 
@@ -251,6 +280,9 @@ def snapshot(db_path, exp_id=None, now=None):
                 "experiment_fees_sats": experiment_fees,
                 "commitment_fee_sats": commitment_fees,
                 "destination_receipts_sats": destination_receipts,
+                "settlement_distributions_sats":
+                    settlement_distributions,
+                "reserve_return_sats": reserve_return,
                 "accounting_delta_sats": accounting_delta,
                 "accounting_reconciled": accounting_reconciled,
             }

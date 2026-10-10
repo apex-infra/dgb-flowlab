@@ -105,6 +105,53 @@ class ResultsTests(unittest.TestCase):
         self.assertEqual(result["activity"]["allocation_jobs"], 1)
         self.assertEqual(result["activity"]["workload_jobs"], 3)
 
+    def test_settlement_cycle_phases_have_explicit_activity_counts(self):
+        snap = self.snapshot()
+
+        snap["flows"][0]["jobs"].extend([
+            {
+                "state": "CONFIRMED",
+                "from": "stage",
+                "to": None,
+                "amount": None,
+                "distributed": 4000,
+                "fee": 5,
+                "delay_s": 0,
+                "actual_executed_at":
+                    "2026-10-07T12:00:30+00:00",
+                "confirmed_at":
+                    "2026-10-07T12:00:32+00:00",
+                "generated": {
+                    "source": "settlement cycle settlement",
+                    "phase": "settlement",
+                },
+            },
+            {
+                "state": "CONFIRMED",
+                "from": "stage",
+                "to": "reserve",
+                "amount": 950,
+                "distributed": None,
+                "fee": 5,
+                "delay_s": 0,
+                "actual_executed_at":
+                    "2026-10-07T12:00:35+00:00",
+                "confirmed_at":
+                    "2026-10-07T12:00:37+00:00",
+                "generated": {
+                    "source": "settlement cycle reserve return",
+                    "phase": "reserve_return",
+                },
+            },
+        ])
+
+        result = analyze_experiment(snap)
+        activity = result["activity"]
+
+        self.assertEqual(activity["settlement_jobs"], 1)
+        self.assertEqual(activity["reserve_return_jobs"], 1)
+        self.assertEqual(activity["other_jobs"], 0)
+
     def test_topology_metrics_are_workload_only(self):
         result = analyze_experiment(self.snapshot())
         topology = result["topology"]

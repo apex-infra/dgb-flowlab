@@ -223,6 +223,14 @@ function renderExperimental(data) {
       item("Cumulative workload", dgb(accounting.cumulative_workload_sats) + " DGB"),
       item("Experiment fees", dgb(accounting.experiment_fees_sats) + " DGB"),
       item("Destination receipts", dgb(accounting.destination_receipts_sats) + " DGB"),
+      item(
+        "Settlement distributions",
+        dgb(accounting.settlement_distributions_sats || 0) + " DGB"
+      ),
+      item(
+        "Reserve return",
+        dgb(accounting.reserve_return_sats || 0) + " DGB"
+      ),
       item("Reserve commit fee", dgb(accounting.commitment_fee_sats) + " DGB")
     );
 
@@ -1085,6 +1093,14 @@ function renderResults(data) {
         resultDGB(accounting.destination_receipts_sats),
       ],
       [
+        "Settlement distributions",
+        resultDGB(accounting.settlement_distributions_sats || 0),
+      ],
+      [
+        "Reserve return",
+        resultDGB(accounting.reserve_return_sats || 0),
+      ],
+      [
         "Reconciliation",
         accounting.accounting_reconciled === true
           ? "reconciled ✓"
@@ -1110,6 +1126,8 @@ function renderResults(data) {
       "Terminal distributions",
       activity.terminal_distribution_jobs ?? 0,
     ],
+    ["Settlement jobs", activity.settlement_jobs ?? 0],
+    ["Reserve return jobs", activity.reserve_return_jobs ?? 0],
   ]));
 
   box.appendChild(resultSection("Topology", [

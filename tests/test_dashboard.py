@@ -9,7 +9,12 @@ from flowlab import Engine
 from flowlab.cli import main
 from flowlab.dashboard import dgb, snapshot
 from tests.fake_chain import FakeChain
-from tests.test_executor import EXP_CFG, STAGED_EXP_CFG, W
+from tests.test_executor import (
+    EXP_CFG,
+    SETTLEMENT_CYCLE_CFG,
+    STAGED_EXP_CFG,
+    W,
+)
 from tests.test_sweep import cfg_sweep
 
 
@@ -275,6 +280,8 @@ class DashboardTests(DashBase):
             "experiment_fees_sats": 0,
             "commitment_fee_sats": 0,
             "destination_receipts_sats": 0,
+            "settlement_distributions_sats": 0,
+            "reserve_return_sats": 0,
             "accounting_delta_sats": None,
             "accounting_reconciled": None,
         })
@@ -328,9 +335,89 @@ class DashboardTests(DashBase):
             "experiment_fees_sats": experiment_fees,
             "commitment_fee_sats": commitment_fee,
             "destination_receipts_sats": destination_receipts,
+            "settlement_distributions_sats": 0,
+            "reserve_return_sats": 0,
             "accounting_delta_sats": 0,
             "accounting_reconciled": True,
         })
+
+    def test_settlement_cycle_accounting_reconciles_settlement_and_reserve_return(self):
+        with open(self.cf, "w") as f:
+            json.dump(SETTLEMENT_CYCLE_CFG, f)
+
+        exp = self.make()
+
+        self.assertEqual(
+            self.call("run", exp)[0],
+            0,
+        )
+
+        snap = snapshot(self.db, exp)
+        jobs = snap["flows"][0]["jobs"]
+
+        settlement_jobs = [
+            j for j in jobs
+            if j["generated"]
+            and j["generated"].get("phase") == "settlement"
+        ]
+        reserve_return_jobs = [
+            j for j in jobs
+            if j["generated"]
+            and j["generated"].get("phase") == "reserve_return"
+        ]
+        allocation_jobs = [
+            j for j in jobs
+            if j["generated"]
+            and j["generated"].get("source")
+            == "experimental allocation commit"
+        ]
+
+        self.assertEqual(len(settlement_jobs), 1)
+        self.assertEqual(len(reserve_return_jobs), 1)
+        self.assertEqual(len(allocation_jobs), 1)
+
+        settlement = settlement_jobs[0]
+        reserve_return = reserve_return_jobs[0]
+
+        self.assertIsInstance(
+            settlement["distributed"],
+            int,
+        )
+
+        approved = SETTLEMENT_CYCLE_CFG["flows"][0][
+            "allocation_sats"
+        ]
+
+        experiment_fees = sum(
+            j["fee"] or 0
+            for j in jobs
+            if j is not allocation_jobs[0]
+        )
+
+        accounting = snap["staged_accounting"]
+
+        self.assertEqual(
+            accounting["settlement_distributions_sats"],
+            settlement["distributed"],
+        )
+        self.assertEqual(
+            accounting["reserve_return_sats"],
+            reserve_return["amount"],
+        )
+        self.assertEqual(
+            accounting["accounting_delta_sats"],
+            approved
+            - experiment_fees
+            - settlement["distributed"]
+            - reserve_return["amount"],
+        )
+        self.assertEqual(
+            accounting["accounting_delta_sats"],
+            0,
+        )
+        self.assertTrue(
+            accounting["accounting_reconciled"],
+        )
 
     def test_deterministic_snapshot_reports_deterministic_mode(self):
         exp = self.make()
