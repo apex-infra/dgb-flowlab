@@ -44,7 +44,7 @@ class PoolMigrationTests(unittest.TestCase):
                     "SELECT value FROM meta WHERE key='schema_version'"
                 ).fetchone()[0]
 
-                self.assertEqual(version, "4")
+                self.assertEqual(version, "5")
 
                 pool_table = conn.execute(
                     """
@@ -93,7 +93,7 @@ class PoolMigrationTests(unittest.TestCase):
                     "SELECT value FROM meta WHERE key='schema_version'"
                 ).fetchone()[0]
 
-                self.assertEqual(version, "4")
+                self.assertEqual(version, "5")
 
                 tables = {
                     row[0]
@@ -284,7 +284,7 @@ class PoolMigrationTests(unittest.TestCase):
                     conn.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()[0],
-                    "4",
+                    "5",
                 )
 
                 db.validate_pool_schema(conn)

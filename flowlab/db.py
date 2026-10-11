@@ -15,7 +15,7 @@ together with its audit row, so state and audit can never disagree.
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -280,6 +280,33 @@ def validate_pool_observation_schema(conn):
         raise RuntimeError(f'incomplete Mixer Lab schema v4: {missing}')
 
 
+
+def validate_pool_verification_schema(conn):
+    """Reject incomplete M4.1 verification history infrastructure."""
+
+    required = {
+        ("table", "pool_verification_events"),
+        ("index", "pool_verification_events_observation_idx"),
+        ("trigger", "pool_verification_events_no_update"),
+        ("trigger", "pool_verification_events_no_delete"),
+    }
+
+    existing = {
+        (row["type"], row["name"])
+        for row in conn.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE type IN ('table', 'index', 'trigger')"
+        )
+    }
+
+    missing = sorted(required - existing)
+
+    if missing:
+        raise RuntimeError(
+            f"incomplete Mixer Lab verification schema v5: {missing}"
+        )
+
+
 def init(conn):
     # Check existing schema versions before changing an existing database.
     has_meta = conn.execute(
@@ -296,7 +323,7 @@ def init(conn):
             version = int(row["value"])
         except ValueError as exc:
             raise RuntimeError("invalid database schema_version") from exc
-        if version not in (1, 2, 3, SCHEMA_VERSION):
+        if version not in (1, 2, 3, 4, SCHEMA_VERSION):
             raise RuntimeError(
                 f"database schema_version {version} != code {SCHEMA_VERSION}; "
                 "refusing unsupported migration"
@@ -305,11 +332,14 @@ def init(conn):
             validate_pool_schema(conn)
             validate_pool_registration_schema(conn)
             validate_pool_observation_schema(conn)
+            validate_pool_verification_schema(conn)
             return
-        if version in (2, 3):
+        if version in (2, 3, 4):
             validate_pool_schema(conn)
-        if version == 3:
+        if version in (3, 4):
             validate_pool_registration_schema(conn)
+        if version == 4:
+            validate_pool_observation_schema(conn)
     else:
         version = None
 
@@ -691,16 +721,24 @@ def init(conn):
             """)
 
 
-        # M3.1: Observations are separate from financial credits.
-        conn.execute("CREATE TABLE pool_deposit_observations (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n pool_id TEXT NOT NULL REFERENCES pools(id),\n session_id TEXT NOT NULL REFERENCES pool_deposit_addresses(session_id),\n txid TEXT NOT NULL,\n vout INTEGER NOT NULL CHECK(vout >= 0),\n amount_sats INTEGER NOT NULL CHECK(amount_sats > 0),\n address TEXT NOT NULL,\n confirmations INTEGER NOT NULL,\n blockhash TEXT,\n state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED','CONFIRMED','CONFLICTED')),\n first_seen_at TEXT NOT NULL,\n last_seen_at TEXT NOT NULL,\n UNIQUE(txid, vout),\n FOREIGN KEY(session_id, pool_id) REFERENCES pool_sessions(id, pool_id)\n)")
-        conn.execute("CREATE TABLE pool_observation_history (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n observation_id INTEGER NOT NULL REFERENCES pool_deposit_observations(id),\n confirmations INTEGER NOT NULL,\n blockhash TEXT,\n state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED','CONFIRMED','CONFLICTED')),\n observed_at TEXT NOT NULL\n)")
-        conn.execute("CREATE TRIGGER pool_observation_history_no_update\nBEFORE UPDATE ON pool_observation_history\nBEGIN\n SELECT RAISE(ABORT, 'observation history is immutable');\nEND")
-        conn.execute("CREATE TRIGGER pool_observation_history_no_delete\nBEFORE DELETE ON pool_observation_history\nBEGIN\n SELECT RAISE(ABORT, 'observation history is immutable');\nEND")
+        if version in (None, 1, 2, 3):
+            # M3.1: Observations are separate from financial credits.
+            conn.execute("CREATE TABLE pool_deposit_observations (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n pool_id TEXT NOT NULL REFERENCES pools(id),\n session_id TEXT NOT NULL REFERENCES pool_deposit_addresses(session_id),\n txid TEXT NOT NULL,\n vout INTEGER NOT NULL CHECK(vout >= 0),\n amount_sats INTEGER NOT NULL CHECK(amount_sats > 0),\n address TEXT NOT NULL,\n confirmations INTEGER NOT NULL,\n blockhash TEXT,\n state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED','CONFIRMED','CONFLICTED')),\n first_seen_at TEXT NOT NULL,\n last_seen_at TEXT NOT NULL,\n UNIQUE(txid, vout),\n FOREIGN KEY(session_id, pool_id) REFERENCES pool_sessions(id, pool_id)\n)")
+            conn.execute("CREATE TABLE pool_observation_history (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n observation_id INTEGER NOT NULL REFERENCES pool_deposit_observations(id),\n confirmations INTEGER NOT NULL,\n blockhash TEXT,\n state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED','CONFIRMED','CONFLICTED')),\n observed_at TEXT NOT NULL\n)")
+            conn.execute("CREATE TRIGGER pool_observation_history_no_update\nBEFORE UPDATE ON pool_observation_history\nBEGIN\n SELECT RAISE(ABORT, 'observation history is immutable');\nEND")
+            conn.execute("CREATE TRIGGER pool_observation_history_no_delete\nBEFORE DELETE ON pool_observation_history\nBEGIN\n SELECT RAISE(ABORT, 'observation history is immutable');\nEND")
 
 
-        # Enforce receiving-address ownership and immutable output identity.
-        conn.execute("CREATE TRIGGER pool_observation_address_guard\nBEFORE INSERT ON pool_deposit_observations\nWHEN NOT EXISTS (\n SELECT 1 FROM pool_deposit_addresses a\n JOIN pool_sessions s ON s.id = a.session_id\n WHERE a.session_id = NEW.session_id\n AND s.pool_id = NEW.pool_id\n AND a.state = 'READY'\n AND a.address = NEW.address\n)\nBEGIN\n SELECT RAISE(ABORT, 'observation address does not belong to session');\nEND")
-        conn.execute("CREATE TRIGGER pool_observation_identity_immutable\nBEFORE UPDATE ON pool_deposit_observations\nWHEN NEW.pool_id != OLD.pool_id\n OR NEW.session_id != OLD.session_id\n OR NEW.address != OLD.address\n OR NEW.txid != OLD.txid\n OR NEW.vout != OLD.vout\n OR NEW.amount_sats != OLD.amount_sats\nBEGIN\n SELECT RAISE(ABORT, 'observation identity is immutable');\nEND")
+            # Enforce receiving-address ownership and immutable output identity.
+            conn.execute("CREATE TRIGGER pool_observation_address_guard\nBEFORE INSERT ON pool_deposit_observations\nWHEN NOT EXISTS (\n SELECT 1 FROM pool_deposit_addresses a\n JOIN pool_sessions s ON s.id = a.session_id\n WHERE a.session_id = NEW.session_id\n AND s.pool_id = NEW.pool_id\n AND a.state = 'READY'\n AND a.address = NEW.address\n)\nBEGIN\n SELECT RAISE(ABORT, 'observation address does not belong to session');\nEND")
+            conn.execute("CREATE TRIGGER pool_observation_identity_immutable\nBEFORE UPDATE ON pool_deposit_observations\nWHEN NEW.pool_id != OLD.pool_id\n OR NEW.session_id != OLD.session_id\n OR NEW.address != OLD.address\n OR NEW.txid != OLD.txid\n OR NEW.vout != OLD.vout\n OR NEW.amount_sats != OLD.amount_sats\nBEGIN\n SELECT RAISE(ABORT, 'observation identity is immutable');\nEND")
+
+
+        # M4.1: Append-only verification evidence.
+        conn.execute("CREATE TABLE pool_verification_events (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n observation_id INTEGER NOT NULL\n   REFERENCES pool_deposit_observations(id),\n state TEXT NOT NULL CHECK (\n   state IN ('VERIFIED', 'PENDING', 'REJECTED')\n ),\n reason TEXT NOT NULL CHECK (length(reason) > 0),\n confirmations INTEGER NOT NULL CHECK (confirmations >= 0),\n blockhash TEXT,\n verified_at TEXT NOT NULL,\n CHECK (\n   state != 'VERIFIED'\n   OR (confirmations > 0 AND blockhash IS NOT NULL)\n )\n)")
+        conn.execute('CREATE INDEX pool_verification_events_observation_idx\nON pool_verification_events(observation_id, id)')
+        conn.execute("CREATE TRIGGER pool_verification_events_no_update\nBEFORE UPDATE ON pool_verification_events\nBEGIN\n SELECT RAISE(ABORT, 'verification history is immutable');\nEND")
+        conn.execute("CREATE TRIGGER pool_verification_events_no_delete\nBEFORE DELETE ON pool_verification_events\nBEGIN\n SELECT RAISE(ABORT, 'verification history is immutable');\nEND")
 
         if version is None:
             conn.execute(
