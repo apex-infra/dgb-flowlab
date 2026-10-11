@@ -92,7 +92,18 @@ def coordinate_session(
         session_id=session_id,
     )
 
+    if lifecycle["state"] == "READY_FOR_REVIEW":
+        review_state = "READY_FOR_REVIEW"
+    elif lifecycle["state"] == "AWAITING_DEPOSIT":
+        review_state = "AWAITING_DEPOSIT"
+    elif lifecycle["state"] == "EVIDENCE_REVIEW_REQUIRED":
+        review_state = "EVIDENCE_REVIEW_REQUIRED"
+    else:
+        review_state = "RECHECK_REQUIRED"
+
     return {
+        "pass_state": "COMPLETED",
+        "review_state": review_state,
         "pool_id": pool_id,
         "session_id": session_id,
         "observation": observation_result,

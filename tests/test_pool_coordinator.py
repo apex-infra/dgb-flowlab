@@ -299,6 +299,8 @@ class CoordinatorTests(unittest.TestCase):
 
         result = self.coordinate()
 
+        self.assertEqual(result["pass_state"], "COMPLETED")
+        self.assertEqual(result["review_state"], "READY_FOR_REVIEW")
         self.assertEqual(result["processed_observations"], 2)
         self.assertEqual(result["observation"]["inserted"], 0)
         self.assertEqual(result["observation"]["updated"], 0)
@@ -326,6 +328,20 @@ class CoordinatorTests(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
+
+        from flowlab.pool_lifecycle import session_snapshot
+
+        before_reads = self.conn.total_changes
+
+        snapshot = session_snapshot(
+            self.conn,
+            pool_id="observer-pool",
+            session_id="observer-session",
+        )
+
+        self.assertEqual(snapshot["state"], "READY_FOR_REVIEW")
+        self.assertFalse(snapshot["financial_actions_authorized"])
+        self.assertEqual(self.conn.total_changes, before_reads)
 
 
     def test_reorganization_revokes_ready_status(self):
@@ -502,6 +518,116 @@ class CoordinatorTests(unittest.TestCase):
                     f"SELECT COUNT(*) FROM {table}"
                 ).fetchone()[0]
                 self.assertEqual(count, 0)
+
+
+    def test_completed_pass_reports_review_state(self):
+        result = self.coordinate()
+
+        self.assertEqual(result["pass_state"], "COMPLETED")
+        self.assertEqual(
+            result["review_state"],
+            "AWAITING_DEPOSIT",
+        )
+        self.assertEqual(result["processed_observations"], 0)
+        self.assertFalse(result["financial_actions_authorized"])
+
+    def test_unconfirmed_pass_reports_recheck_required(self):
+        self.rpc.entries = [
+            ObserverTests.entry(self, confirmations=0)
+        ]
+
+        result = self.coordinate()
+
+        self.assertEqual(result["pass_state"], "COMPLETED")
+        self.assertEqual(result["review_state"], "RECHECK_REQUIRED")
+        self.assertEqual(result["lifecycle"]["state"], "OBSERVING")
+        self.assertFalse(result["financial_actions_authorized"])
+
+    def test_invalid_identifiers_rejected_without_rpc(self):
+        for invalid in ("", "   ", None, 123):
+            with self.subTest(session_id=invalid):
+                before_calls = len(self.rpc.calls)
+
+                with self.assertRaises(ValueError):
+                    coordinate_session(
+                        self.conn,
+                        self.rpc,
+                        pool_id="observer-pool",
+                        session_id=invalid,
+                    )
+
+                self.assertEqual(len(self.rpc.calls), before_calls)
+
+
+    def test_repeat_pass_updates_review_telemetry(self):
+        from tests.test_pool_verifier import FakeRPC as VerificationRPC
+
+        observer = self.rpc
+        verifier = VerificationRPC()
+
+        observer.entries = [{
+            **ObserverTests.entry(
+                self,
+                amount="1.25000000",
+                confirmations=3,
+            ),
+            "blockhash": "b" * 64,
+        }]
+
+        class CombinedRPC:
+            def list_transactions(self, *args, **kwargs):
+                return observer.list_transactions(*args, **kwargs)
+
+            def get_raw_transaction(self, *args, **kwargs):
+                return verifier.get_raw_transaction(*args, **kwargs)
+
+            def get_block_header(self, *args, **kwargs):
+                return verifier.get_block_header(*args, **kwargs)
+
+            def get_block_hash(self, *args, **kwargs):
+                return verifier.get_block_hash(*args, **kwargs)
+
+        self.rpc = CombinedRPC()
+
+        first = self.coordinate()
+
+        self.assertEqual(first["pass_state"], "COMPLETED")
+        self.assertEqual(first["review_state"], "READY_FOR_REVIEW")
+
+        first_history = self.conn.execute(
+            "SELECT COUNT(*) FROM pool_verification_events"
+        ).fetchone()[0]
+
+        # Historical evidence is no longer supported.
+        verifier.active_hash = "d" * 64
+
+        second = self.coordinate()
+
+        self.assertEqual(second["pass_state"], "COMPLETED")
+        self.assertEqual(second["review_state"], "RECHECK_REQUIRED")
+        self.assertEqual(second["lifecycle"]["state"], "OBSERVING")
+
+        second_history = self.conn.execute(
+            "SELECT COUNT(*) FROM pool_verification_events"
+        ).fetchone()[0]
+
+        self.assertGreater(second_history, first_history)
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM pool_deposits"
+            ).fetchone()[0],
+            0,
+        )
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM pool_journal_entries"
+            ).fetchone()[0],
+            0,
+        )
+
+        self.assertFalse(second["financial_actions_authorized"])
 
 
 if __name__ == "__main__":
