@@ -15,7 +15,7 @@ together with its audit row, so state and audit can never disagree.
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -307,6 +307,34 @@ def validate_pool_verification_schema(conn):
         )
 
 
+
+def validate_pool_reconciliation_schema(conn):
+    """Reject incomplete M4.2 reconciliation history infrastructure."""
+
+    required = {
+        ("table", "pool_reconciliation_events"),
+        ("index", "pool_reconciliation_events_observation_idx"),
+        ("trigger", "pool_reconciliation_events_no_update"),
+        ("trigger", "pool_reconciliation_events_no_delete"),
+        ("trigger", "pool_reconciliation_events_reference_guard"),
+    }
+
+    existing = {
+        (row["type"], row["name"])
+        for row in conn.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE type IN ('table', 'index', 'trigger')"
+        )
+    }
+
+    missing = sorted(required - existing)
+
+    if missing:
+        raise RuntimeError(
+            f"incomplete Mixer Lab schema v6: {missing}"
+        )
+
+
 def init(conn):
     # Check existing schema versions before changing an existing database.
     has_meta = conn.execute(
@@ -323,7 +351,7 @@ def init(conn):
             version = int(row["value"])
         except ValueError as exc:
             raise RuntimeError("invalid database schema_version") from exc
-        if version not in (1, 2, 3, 4, SCHEMA_VERSION):
+        if version not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
             raise RuntimeError(
                 f"database schema_version {version} != code {SCHEMA_VERSION}; "
                 "refusing unsupported migration"
@@ -333,13 +361,16 @@ def init(conn):
             validate_pool_registration_schema(conn)
             validate_pool_observation_schema(conn)
             validate_pool_verification_schema(conn)
+            validate_pool_reconciliation_schema(conn)
             return
-        if version in (2, 3, 4):
+        if version in (2, 3, 4, 5):
             validate_pool_schema(conn)
-        if version in (3, 4):
+        if version in (3, 4, 5):
             validate_pool_registration_schema(conn)
-        if version == 4:
+        if version in (4, 5):
             validate_pool_observation_schema(conn)
+        if version == 5:
+            validate_pool_verification_schema(conn)
     else:
         version = None
 
@@ -735,10 +766,84 @@ def init(conn):
 
 
         # M4.1: Append-only verification evidence.
-        conn.execute("CREATE TABLE pool_verification_events (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n observation_id INTEGER NOT NULL\n   REFERENCES pool_deposit_observations(id),\n state TEXT NOT NULL CHECK (\n   state IN ('VERIFIED', 'PENDING', 'REJECTED')\n ),\n reason TEXT NOT NULL CHECK (length(reason) > 0),\n confirmations INTEGER NOT NULL CHECK (confirmations >= 0),\n blockhash TEXT,\n verified_at TEXT NOT NULL,\n CHECK (\n   state != 'VERIFIED'\n   OR (confirmations > 0 AND blockhash IS NOT NULL)\n )\n)")
-        conn.execute('CREATE INDEX pool_verification_events_observation_idx\nON pool_verification_events(observation_id, id)')
-        conn.execute("CREATE TRIGGER pool_verification_events_no_update\nBEFORE UPDATE ON pool_verification_events\nBEGIN\n SELECT RAISE(ABORT, 'verification history is immutable');\nEND")
-        conn.execute("CREATE TRIGGER pool_verification_events_no_delete\nBEFORE DELETE ON pool_verification_events\nBEGIN\n SELECT RAISE(ABORT, 'verification history is immutable');\nEND")
+        if version in (None, 1, 2, 3, 4):
+            conn.execute("CREATE TABLE pool_verification_events (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n observation_id INTEGER NOT NULL\n   REFERENCES pool_deposit_observations(id),\n state TEXT NOT NULL CHECK (\n   state IN ('VERIFIED', 'PENDING', 'REJECTED')\n ),\n reason TEXT NOT NULL CHECK (length(reason) > 0),\n confirmations INTEGER NOT NULL CHECK (confirmations >= 0),\n blockhash TEXT,\n verified_at TEXT NOT NULL,\n CHECK (\n   state != 'VERIFIED'\n   OR (confirmations > 0 AND blockhash IS NOT NULL)\n )\n)")
+            conn.execute('CREATE INDEX pool_verification_events_observation_idx\nON pool_verification_events(observation_id, id)')
+            conn.execute("CREATE TRIGGER pool_verification_events_no_update\nBEFORE UPDATE ON pool_verification_events\nBEGIN\n SELECT RAISE(ABORT, 'verification history is immutable');\nEND")
+            conn.execute("CREATE TRIGGER pool_verification_events_no_delete\nBEFORE DELETE ON pool_verification_events\nBEGIN\n SELECT RAISE(ABORT, 'verification history is immutable');\nEND")
+
+        # M4.2: Append-only historical reconciliation evidence.
+        conn.execute("""
+            CREATE TABLE pool_reconciliation_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id INTEGER NOT NULL
+                    REFERENCES pool_deposit_observations(id),
+                verification_event_id INTEGER
+                    REFERENCES pool_verification_events(id),
+                state TEXT NOT NULL CHECK (
+                    state IN ('CURRENT', 'INVALIDATED', 'INDETERMINATE')
+                ),
+                reason TEXT NOT NULL CHECK (length(reason) > 0),
+                blockhash TEXT,
+                reconciled_at TEXT NOT NULL,
+                CHECK (
+                    state != 'CURRENT'
+                    OR (
+                        verification_event_id IS NOT NULL
+                        AND blockhash IS NOT NULL
+                    )
+                )
+            )
+        """)
+
+        conn.execute("""
+            CREATE INDEX pool_reconciliation_events_observation_idx
+            ON pool_reconciliation_events(observation_id, id)
+        """)
+
+        # A reconciliation may reference only verification evidence
+        # belonging to the same deposit observation.
+        conn.execute("""
+            CREATE TRIGGER pool_reconciliation_events_reference_guard
+            BEFORE INSERT ON pool_reconciliation_events
+            WHEN NEW.verification_event_id IS NOT NULL
+                 AND NOT EXISTS (
+                     SELECT 1
+                     FROM pool_verification_events v
+                     WHERE v.id = NEW.verification_event_id
+                       AND v.observation_id = NEW.observation_id
+                       AND v.state = 'VERIFIED'
+                       AND (
+                           NEW.state != 'CURRENT'
+                           OR (
+                               NEW.blockhash IS NOT NULL
+                               AND v.blockhash = NEW.blockhash
+                           )
+                       )
+                 )
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'reconciliation verification reference mismatch'
+                );
+            END
+        """)
+
+        conn.execute("""
+            CREATE TRIGGER pool_reconciliation_events_no_update
+            BEFORE UPDATE ON pool_reconciliation_events
+            BEGIN
+                SELECT RAISE(ABORT, 'reconciliation history is immutable');
+            END
+        """)
+
+        conn.execute("""
+            CREATE TRIGGER pool_reconciliation_events_no_delete
+            BEFORE DELETE ON pool_reconciliation_events
+            BEGIN
+                SELECT RAISE(ABORT, 'reconciliation history is immutable');
+            END
+        """)
 
         if version is None:
             conn.execute(

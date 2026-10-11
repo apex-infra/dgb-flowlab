@@ -202,7 +202,7 @@ class VerificationMigrationTests(unittest.TestCase):
                         "SELECT value FROM meta "
                         "WHERE key='schema_version'"
                     ).fetchone()[0],
-                    "5",
+                    "6",
                 )
 
                 self.assertEqual(
