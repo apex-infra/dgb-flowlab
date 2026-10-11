@@ -121,6 +121,18 @@ class RpcClient:
     def get_block_count(self):
         return self._call("getblockcount")
 
+    def get_block_hash(self, height):
+        if type(height) is not int or height < 0:
+            raise RpcError("Invalid block height")
+        return self._call("getblockhash", [height])
+
+    def get_block_header(self, blockhash):
+        if not isinstance(blockhash, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{64}", blockhash
+        ):
+            raise RpcError("Invalid block hash")
+        return self._call("getblockheader", [blockhash, True])
+
     def get_blockchain_info(self):
         return self._call("getblockchaininfo")
 
@@ -142,8 +154,16 @@ class RpcClient:
     def test_mempool_accept(self, hexstr):
         return self._call("testmempoolaccept", [[hexstr]])
 
-    def get_raw_transaction(self, txid, verbose=True):
-        return self._call("getrawtransaction", [txid, bool(verbose)])
+    def get_raw_transaction(self, txid, verbose=True, blockhash=None):
+        if blockhash is not None and (
+            not isinstance(blockhash, str)
+            or re.fullmatch(r'[0-9a-fA-F]{64}', blockhash) is None
+        ):
+            raise RpcError("Invalid transaction block hash")
+        params = [txid, int(bool(verbose))]
+        if blockhash is not None:
+            params.append(blockhash)
+        return self._call("getrawtransaction", params)
 
     # -- wallet-scoped ----------------------------------------------------
     def get_wallet_info(self, wallet):
@@ -169,6 +189,28 @@ class RpcClient:
 
     def list_unspent(self, wallet, minconf=0):
         return self._call("listunspent", [int(minconf)], wallet=wallet)
+
+    def list_transactions(
+        self, wallet, label="*", count=100, skip=0,
+        include_watchonly=False,
+    ):
+        if not isinstance(label, str) or not label:
+            raise RpcError("Invalid transaction-history label")
+
+        if (
+            type(count) is not int
+            or not 1 <= count <= 1000
+            or type(skip) is not int
+            or skip < 0
+            or type(include_watchonly) is not bool
+        ):
+            raise RpcError("Invalid transaction-history parameters")
+
+        return self._call(
+            "listtransactions",
+            [label, count, skip, include_watchonly],
+            wallet=wallet,
+        )
 
     def get_transaction(self, wallet, txid):
         return self._call("gettransaction", [txid], wallet=wallet)

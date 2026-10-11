@@ -15,7 +15,7 @@ together with its audit row, so state and audit can never disagree.
 import sqlite3
 from contextlib import contextmanager
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -260,6 +260,26 @@ def validate_pool_registration_schema(conn):
         )
 
 
+def validate_pool_observation_schema(conn):
+    required = {
+        ('table', 'pool_deposit_observations'),
+        ('table', 'pool_observation_history'),
+        ('trigger', 'pool_observation_history_no_update'),
+        ('trigger', 'pool_observation_history_no_delete'),
+        ('trigger', 'pool_observation_address_guard'),
+        ('trigger', 'pool_observation_identity_immutable'),
+    }
+    existing = {
+        (row['type'], row['name'])
+        for row in conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('table','trigger')"
+        )
+    }
+    missing = sorted(required - existing)
+    if missing:
+        raise RuntimeError(f'incomplete Mixer Lab schema v4: {missing}')
+
+
 def init(conn):
     # Check existing schema versions before changing an existing database.
     has_meta = conn.execute(
@@ -276,7 +296,7 @@ def init(conn):
             version = int(row["value"])
         except ValueError as exc:
             raise RuntimeError("invalid database schema_version") from exc
-        if version not in (1, 2, SCHEMA_VERSION):
+        if version not in (1, 2, 3, SCHEMA_VERSION):
             raise RuntimeError(
                 f"database schema_version {version} != code {SCHEMA_VERSION}; "
                 "refusing unsupported migration"
@@ -284,9 +304,12 @@ def init(conn):
         if version == SCHEMA_VERSION:
             validate_pool_schema(conn)
             validate_pool_registration_schema(conn)
+            validate_pool_observation_schema(conn)
             return
-        if version == 2:
+        if version in (2, 3):
             validate_pool_schema(conn)
+        if version == 3:
+            validate_pool_registration_schema(conn)
     else:
         version = None
 
@@ -511,160 +534,173 @@ def init(conn):
             """)
 
 
-        # M2.1: immutable participant payout instructions.
-        conn.execute("""
-            CREATE TABLE pool_payout_instructions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL
-                    REFERENCES pool_sessions(id),
-                position INTEGER NOT NULL
-                    CHECK(position BETWEEN 1 AND 10),
-                payout_address TEXT NOT NULL,
-                allocation_bps INTEGER NOT NULL
-                    CHECK(allocation_bps BETWEEN 1 AND 10000),
-                UNIQUE(session_id, position),
-                UNIQUE(session_id, payout_address)
-            )
-        """)
-
-        # A registration seal can only be created when payout
-        # instructions are complete and total exactly 100%.
-        conn.execute("""
-            CREATE TABLE pool_registration_seals (
-                session_id TEXT PRIMARY KEY
-                    REFERENCES pool_sessions(id),
-                completed_at TEXT NOT NULL
-            )
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER pool_registration_seal_validate
-            BEFORE INSERT ON pool_registration_seals
-            BEGIN
-                SELECT CASE WHEN
-                    (
-                        SELECT COUNT(*)
-                        FROM pool_payout_instructions
-                        WHERE session_id = NEW.session_id
-                    ) NOT BETWEEN 1 AND 10
-                    OR
-                    (
-                        SELECT COALESCE(SUM(allocation_bps), 0)
-                        FROM pool_payout_instructions
-                        WHERE session_id = NEW.session_id
-                    ) != 10000
-                THEN RAISE(
-                    ABORT,
-                    'incomplete payout registration'
+        if version in (None, 1, 2):
+            # M2.1: immutable participant payout instructions.
+            conn.execute("""
+                CREATE TABLE pool_payout_instructions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL
+                        REFERENCES pool_sessions(id),
+                    position INTEGER NOT NULL
+                        CHECK(position BETWEEN 1 AND 10),
+                    payout_address TEXT NOT NULL,
+                    allocation_bps INTEGER NOT NULL
+                        CHECK(allocation_bps BETWEEN 1 AND 10000),
+                    UNIQUE(session_id, position),
+                    UNIQUE(session_id, payout_address)
                 )
-                END;
-            END
-        """)
+            """)
 
-        conn.execute("""
-            CREATE TRIGGER pool_payout_no_update
-            BEFORE UPDATE ON pool_payout_instructions
-            BEGIN
-                SELECT RAISE(ABORT, 'payout instruction is immutable');
-            END
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER pool_payout_no_delete
-            BEFORE DELETE ON pool_payout_instructions
-            BEGIN
-                SELECT RAISE(ABORT, 'payout instruction is immutable');
-            END
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER pool_payout_no_insert_after_seal
-            BEFORE INSERT ON pool_payout_instructions
-            WHEN EXISTS (
-                SELECT 1 FROM pool_registration_seals
-                WHERE session_id = NEW.session_id
-            )
-            BEGIN
-                SELECT RAISE(ABORT, 'registration already finalized');
-            END
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER pool_registration_seal_no_update
-            BEFORE UPDATE ON pool_registration_seals
-            BEGIN
-                SELECT RAISE(ABORT, 'registration seal is immutable');
-            END
-        """)
-
-        conn.execute("""
-            CREATE TRIGGER pool_registration_seal_no_delete
-            BEFORE DELETE ON pool_registration_seals
-            BEGIN
-                SELECT RAISE(ABORT, 'registration seal is immutable');
-            END
-        """)
-
-
-        # M2.2: persistent deposit-address request lifecycle.
-        conn.execute("""
-            CREATE TABLE pool_deposit_addresses (
-                session_id TEXT PRIMARY KEY
-                    REFERENCES pool_registration_seals(session_id),
-                wallet TEXT NOT NULL,
-                request_label TEXT NOT NULL UNIQUE,
-                address TEXT UNIQUE,
-                state TEXT NOT NULL
-                    CHECK(state IN (
-                        'REQUESTING',
-                        'READY',
-                        'RECOVERY_REQUIRED'
-                    )),
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                CHECK(
-                    (state = 'READY' AND address IS NOT NULL)
-                    OR
-                    (state != 'READY' AND address IS NULL)
+            # A registration seal can only be created when payout
+            # instructions are complete and total exactly 100%.
+            conn.execute("""
+                CREATE TABLE pool_registration_seals (
+                    session_id TEXT PRIMARY KEY
+                        REFERENCES pool_sessions(id),
+                    completed_at TEXT NOT NULL
                 )
-            )
-        """)
+            """)
 
-        conn.execute("""
-            CREATE TRIGGER pool_deposit_address_ready_immutable
-            BEFORE UPDATE ON pool_deposit_addresses
-            WHEN OLD.state = 'READY'
-            BEGIN
-                SELECT RAISE(
-                    ABORT,
-                    'ready deposit address is immutable'
-                );
-            END
-        """)
+            conn.execute("""
+                CREATE TRIGGER pool_registration_seal_validate
+                BEFORE INSERT ON pool_registration_seals
+                BEGIN
+                    SELECT CASE WHEN
+                        (
+                            SELECT COUNT(*)
+                            FROM pool_payout_instructions
+                            WHERE session_id = NEW.session_id
+                        ) NOT BETWEEN 1 AND 10
+                        OR
+                        (
+                            SELECT COALESCE(SUM(allocation_bps), 0)
+                            FROM pool_payout_instructions
+                            WHERE session_id = NEW.session_id
+                        ) != 10000
+                    THEN RAISE(
+                        ABORT,
+                        'incomplete payout registration'
+                    )
+                    END;
+                END
+            """)
 
-        conn.execute("""
-            CREATE TRIGGER pool_deposit_address_no_delete
-            BEFORE DELETE ON pool_deposit_addresses
-            BEGIN
-                SELECT RAISE(
-                    ABORT,
-                    'deposit address request is immutable'
-                );
-            END
-        """)
+            conn.execute("""
+                CREATE TRIGGER pool_payout_no_update
+                BEFORE UPDATE ON pool_payout_instructions
+                BEGIN
+                    SELECT RAISE(ABORT, 'payout instruction is immutable');
+                END
+            """)
 
-        conn.execute("""
-            CREATE TRIGGER pool_deposit_address_no_insert_ready
-            BEFORE INSERT ON pool_deposit_addresses
-            WHEN NEW.state != 'REQUESTING'
-                 OR NEW.address IS NOT NULL
-            BEGIN
-                SELECT RAISE(
-                    ABORT,
-                    'deposit address request must start REQUESTING'
-                );
-            END
-        """)
+            conn.execute("""
+                CREATE TRIGGER pool_payout_no_delete
+                BEFORE DELETE ON pool_payout_instructions
+                BEGIN
+                    SELECT RAISE(ABORT, 'payout instruction is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_payout_no_insert_after_seal
+                BEFORE INSERT ON pool_payout_instructions
+                WHEN EXISTS (
+                    SELECT 1 FROM pool_registration_seals
+                    WHERE session_id = NEW.session_id
+                )
+                BEGIN
+                    SELECT RAISE(ABORT, 'registration already finalized');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_registration_seal_no_update
+                BEFORE UPDATE ON pool_registration_seals
+                BEGIN
+                    SELECT RAISE(ABORT, 'registration seal is immutable');
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_registration_seal_no_delete
+                BEFORE DELETE ON pool_registration_seals
+                BEGIN
+                    SELECT RAISE(ABORT, 'registration seal is immutable');
+                END
+            """)
+
+
+            # M2.2: persistent deposit-address request lifecycle.
+            conn.execute("""
+                CREATE TABLE pool_deposit_addresses (
+                    session_id TEXT PRIMARY KEY
+                        REFERENCES pool_registration_seals(session_id),
+                    wallet TEXT NOT NULL,
+                    request_label TEXT NOT NULL UNIQUE,
+                    address TEXT UNIQUE,
+                    state TEXT NOT NULL
+                        CHECK(state IN (
+                            'REQUESTING',
+                            'READY',
+                            'RECOVERY_REQUIRED'
+                        )),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    CHECK(
+                        (state = 'READY' AND address IS NOT NULL)
+                        OR
+                        (state != 'READY' AND address IS NULL)
+                    )
+                )
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_deposit_address_ready_immutable
+                BEFORE UPDATE ON pool_deposit_addresses
+                WHEN OLD.state = 'READY'
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'ready deposit address is immutable'
+                    );
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_deposit_address_no_delete
+                BEFORE DELETE ON pool_deposit_addresses
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'deposit address request is immutable'
+                    );
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER pool_deposit_address_no_insert_ready
+                BEFORE INSERT ON pool_deposit_addresses
+                WHEN NEW.state != 'REQUESTING'
+                     OR NEW.address IS NOT NULL
+                BEGIN
+                    SELECT RAISE(
+                        ABORT,
+                        'deposit address request must start REQUESTING'
+                    );
+                END
+            """)
+
+
+        # M3.1: Observations are separate from financial credits.
+        conn.execute("CREATE TABLE pool_deposit_observations (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n pool_id TEXT NOT NULL REFERENCES pools(id),\n session_id TEXT NOT NULL REFERENCES pool_deposit_addresses(session_id),\n txid TEXT NOT NULL,\n vout INTEGER NOT NULL CHECK(vout >= 0),\n amount_sats INTEGER NOT NULL CHECK(amount_sats > 0),\n address TEXT NOT NULL,\n confirmations INTEGER NOT NULL,\n blockhash TEXT,\n state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED','CONFIRMED','CONFLICTED')),\n first_seen_at TEXT NOT NULL,\n last_seen_at TEXT NOT NULL,\n UNIQUE(txid, vout),\n FOREIGN KEY(session_id, pool_id) REFERENCES pool_sessions(id, pool_id)\n)")
+        conn.execute("CREATE TABLE pool_observation_history (\n id INTEGER PRIMARY KEY AUTOINCREMENT,\n observation_id INTEGER NOT NULL REFERENCES pool_deposit_observations(id),\n confirmations INTEGER NOT NULL,\n blockhash TEXT,\n state TEXT NOT NULL CHECK(state IN ('UNCONFIRMED','CONFIRMED','CONFLICTED')),\n observed_at TEXT NOT NULL\n)")
+        conn.execute("CREATE TRIGGER pool_observation_history_no_update\nBEFORE UPDATE ON pool_observation_history\nBEGIN\n SELECT RAISE(ABORT, 'observation history is immutable');\nEND")
+        conn.execute("CREATE TRIGGER pool_observation_history_no_delete\nBEFORE DELETE ON pool_observation_history\nBEGIN\n SELECT RAISE(ABORT, 'observation history is immutable');\nEND")
+
+
+        # Enforce receiving-address ownership and immutable output identity.
+        conn.execute("CREATE TRIGGER pool_observation_address_guard\nBEFORE INSERT ON pool_deposit_observations\nWHEN NOT EXISTS (\n SELECT 1 FROM pool_deposit_addresses a\n JOIN pool_sessions s ON s.id = a.session_id\n WHERE a.session_id = NEW.session_id\n AND s.pool_id = NEW.pool_id\n AND a.state = 'READY'\n AND a.address = NEW.address\n)\nBEGIN\n SELECT RAISE(ABORT, 'observation address does not belong to session');\nEND")
+        conn.execute("CREATE TRIGGER pool_observation_identity_immutable\nBEFORE UPDATE ON pool_deposit_observations\nWHEN NEW.pool_id != OLD.pool_id\n OR NEW.session_id != OLD.session_id\n OR NEW.address != OLD.address\n OR NEW.txid != OLD.txid\n OR NEW.vout != OLD.vout\n OR NEW.amount_sats != OLD.amount_sats\nBEGIN\n SELECT RAISE(ABORT, 'observation identity is immutable');\nEND")
 
         if version is None:
             conn.execute(
