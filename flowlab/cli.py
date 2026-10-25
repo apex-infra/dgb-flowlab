@@ -129,6 +129,8 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
     r = sub.add_parser("recovery")
     rsub = r.add_subparsers(dest="recovery_cmd", required=True)
     rsub.add_parser("status")
+    preflight = rsub.add_parser("preflight")
+    preflight.add_argument("--check-node", action="store_true")
     rsub.add_parser("schedules")
     h = rsub.add_parser("history")
     h.add_argument("--limit", type=int, default=25)
@@ -142,6 +144,41 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
         from .pool_recovery_cli import recovery_command
 
         recovery_rpc = rpc
+        preflight_node_rpc = None
+
+        if a.recovery_cmd == "preflight" and a.check_node:
+            from .pool_recovery_cli import validate_recovery_database
+
+            if not validate_recovery_database(db):
+                out("PREFLIGHT FAIL: Existing schema V7 database required")
+                return 2
+
+            try:
+                if rpc is not None:
+                    preflight_node_rpc = rpc
+                else:
+                    local = _load(local_path)
+                    preflight_node_rpc = RpcClient(
+                        local["rpc_user"],
+                        local["rpc_password"],
+                        port=local.get("rpc_port", 14022),
+                        host=local.get("rpc_host", "127.0.0.1"),
+                        timeout=30,
+                        allowed_wallets=local["wallets"],
+                    )
+
+                    if not preflight_node_rpc.allowed_wallets:
+                        raise ValueError("Empty recovery wallet allowlist")
+
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                RpcError,
+            ):
+                out("RPC connectivity: FAILED")
+                return 2
 
         if (
             a.recovery_cmd == "run-once"
@@ -187,6 +224,8 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
             limit=getattr(a, "limit", 25),
             authorize=getattr(a, "authorize", False),
             rpc=recovery_rpc,
+            check_node=getattr(a, "check_node", False),
+            node_rpc=preflight_node_rpc,
         )
 
     if a.cmd in ("watch", "serve"):

@@ -27,9 +27,98 @@ def validate_recovery_database(path):
         conn.close()
 
 
-def recovery_command(
-    path, command, out=print, *, limit=25, authorize=False, rpc=None
+
+def offline_recovery_preflight(
+    path, out=print, *, report_offline_rpc=True
 ):
+    """Inspect Mixer Lab recovery readiness without database writes."""
+    from .pool_recovery_supervisor import eligible_sessions
+
+    if not validate_recovery_database(path):
+        out("PREFLIGHT FAIL: Existing schema V7 database required")
+        return 2
+
+    conn = database.connect_readonly(path)
+
+    try:
+        leases = conn.execute(
+            "SELECT lease_name,owner_token,fencing_token,expires_at "
+            "FROM pool_recovery_leases ORDER BY lease_name"
+        ).fetchall()
+
+        sessions = eligible_sessions(conn)
+
+        out("Mixer Lab Recovery Preflight")
+        out("Database schema: V7 VALID")
+        out("Recovery tables: VALID")
+        out(f"Eligible sessions: {len(sessions)}")
+
+        if not leases:
+            out("Recovery lease: NOT INITIALIZED")
+        else:
+            for lease in leases:
+                owner = (
+                    "FREE"
+                    if lease["owner_token"] is None
+                    else "OWNED"
+                )
+
+                out(
+                    f"Recovery lease: {lease['lease_name']} "
+                    f"| {owner} "
+                    f"| fence={lease['fencing_token']}"
+                )
+
+        if report_offline_rpc:
+            out("RPC connectivity: NOT CHECKED (offline preflight)")
+        out("Financial actions authorized: NO")
+        out("Automatic recovery: DISABLED")
+
+    finally:
+        conn.close()
+
+    return 0
+
+
+
+def recovery_node_connectivity(rpc, out=print):
+    """Perform one read-only DigiByte Core connectivity request."""
+    from .rpc import RpcError
+
+    try:
+        height = rpc.get_block_count()
+
+        if type(height) is not int or height < 0:
+            raise ValueError("Invalid blockchain height")
+
+    except (RpcError, OSError, ValueError, TypeError, AttributeError):
+        out("RPC connectivity: FAILED")
+        return 2
+
+    out(f"RPC connectivity: OK | block height={height}")
+    return 0
+
+
+def recovery_command(
+    path, command, out=print, *, limit=25, authorize=False,
+    rpc=None, check_node=False, node_rpc=None,
+):
+    if command == "preflight":
+        result = offline_recovery_preflight(
+            path,
+            out,
+            report_offline_rpc=not check_node,
+        )
+
+        if result != 0 or not check_node:
+            return result
+
+        if node_rpc is None:
+            out("RPC connectivity: FAILED")
+            return 2
+
+        return recovery_node_connectivity(node_rpc, out)
+
     if command == "run-once":
         if not authorize:
             out("REFUSED: recovery requires --authorize")

@@ -756,5 +756,325 @@ class RecoveryCliTests(unittest.TestCase):
             "\n".join(self.lines),
         )
 
+
+    def test_offline_preflight_read_only(self):
+        from unittest.mock import patch
+
+        before = Path(self.path).read_bytes()
+        output = []
+
+        with (
+            patch("flowlab.cli._load") as config_mock,
+            patch(
+                "flowlab.pool_recovery_runner."
+                "run_persistent_recovery_pass"
+            ) as runner_mock,
+        ):
+            result = main(
+                ["recovery", "preflight"],
+                db=self.path,
+                rpc=None,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Database schema: V7 VALID", "\n".join(output))
+        self.assertIn("Financial actions authorized: NO", "\n".join(output))
+        self.assertIn("Automatic recovery: DISABLED", "\n".join(output))
+
+        config_mock.assert_not_called()
+        runner_mock.assert_not_called()
+
+        self.assertEqual(Path(self.path).read_bytes(), before)
+
+    def test_offline_preflight_missing_database(self):
+        missing = str(Path(self.tmp.name) / "missing-recovery.db")
+        output = []
+
+        result = main(
+            ["recovery", "preflight"],
+            db=missing,
+            rpc=None,
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertFalse(Path(missing).exists())
+        self.assertIn("PREFLIGHT FAIL", "\n".join(output))
+
+    def test_offline_preflight_invalid_schema(self):
+        conn = db.connect(self.path)
+
+        try:
+            conn.execute(
+                "UPDATE meta SET value='6' "
+                "WHERE key='schema_version'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        output = []
+
+        result = main(
+            ["recovery", "preflight"],
+            db=self.path,
+            rpc=None,
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertIn("PREFLIGHT FAIL", "\n".join(output))
+
+    def test_offline_preflight_does_not_change_existing_lease(self):
+        from flowlab.pool_recovery_persistence import acquire_lease
+        from flowlab.pool_recovery_runner import LEASE_NAME
+
+        conn = db.connect(self.path)
+
+        try:
+            acquire_lease(
+                conn,
+                lease_name=LEASE_NAME,
+                owner_token="existing-test-owner",
+                ttl_seconds=600,
+            )
+
+            before = tuple(
+                conn.execute(
+                    "SELECT owner_token,fencing_token,expires_at "
+                    "FROM pool_recovery_leases WHERE lease_name=?",
+                    (LEASE_NAME,),
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+
+        output = []
+
+        result = main(
+            ["recovery", "preflight"],
+            db=self.path,
+            rpc=None,
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("OWNED", "\n".join(output))
+
+        conn = db.connect_readonly(self.path)
+
+        try:
+            after = tuple(
+                conn.execute(
+                    "SELECT owner_token,fencing_token,expires_at "
+                    "FROM pool_recovery_leases WHERE lease_name=?",
+                    (LEASE_NAME,),
+                ).fetchone()
+            )
+        finally:
+            conn.close()
+
+        self.assertEqual(before, after)
+
+    def test_preflight_check_node_success(self):
+        from unittest.mock import patch
+
+        class ReadOnlyNode:
+            allowed_wallets = frozenset({"flab_pool_reserve"})
+
+            def get_block_count(self):
+                return 24400000
+
+        output = []
+
+        with (
+            patch(
+                "flowlab.cli._load",
+                return_value={
+                    "rpc_user": "test",
+                    "rpc_password": "test-secret",
+                    "rpc_host": "127.0.0.1",
+                    "rpc_port": 14022,
+                    "wallets": ["flab_pool_reserve"],
+                },
+            ),
+            patch(
+                "flowlab.cli.RpcClient",
+                return_value=ReadOnlyNode(),
+            ),
+            patch(
+                "flowlab.pool_recovery_runner.run_persistent_recovery_pass"
+            ) as runner,
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                rpc=None,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn(
+            "RPC connectivity: OK",
+            "\n".join(output),
+        )
+        self.assertIn(
+            "24400000",
+            "\n".join(output),
+        )
+        runner.assert_not_called()
+
+        self.assertNotIn(
+            "RPC connectivity: NOT CHECKED",
+            "\n".join(output),
+        )
+
+    def test_preflight_check_node_failure(self):
+        from unittest.mock import patch
+        from flowlab.rpc import RpcError
+
+        class FailedNode:
+            allowed_wallets = frozenset({"flab_pool_reserve"})
+
+            def get_block_count(self):
+                raise RpcError("TEST_SECRET_DO_NOT_DISPLAY")
+
+        output = []
+
+        with (
+            patch(
+                "flowlab.cli._load",
+                return_value={
+                    "rpc_user": "test",
+                    "rpc_password": "test-secret",
+                    "rpc_host": "127.0.0.1",
+                    "rpc_port": 14022,
+                    "wallets": ["flab_pool_reserve"],
+                },
+            ),
+            patch(
+                "flowlab.cli.RpcClient",
+                return_value=FailedNode(),
+            ),
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                rpc=None,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 2)
+        self.assertIn(
+            "RPC connectivity: FAILED",
+            "\n".join(output),
+        )
+        self.assertNotIn(
+            "TEST_SECRET_DO_NOT_DISPLAY",
+            "\n".join(output),
+        )
+
+        self.assertNotIn(
+            "RPC connectivity: NOT CHECKED",
+            "\n".join(output),
+        )
+
+    def test_node_preflight_preserves_recovery_database(self):
+        """Node connectivity must not change persistent recovery state."""
+        from unittest.mock import patch
+        from flowlab.pool_recovery_persistence import acquire_lease
+        from flowlab.pool_recovery_runner import LEASE_NAME
+
+        conn = db.connect(self.path)
+
+        try:
+            acquire_lease(
+                conn,
+                lease_name=LEASE_NAME,
+                owner_token="existing-owner",
+                ttl_seconds=600,
+            )
+
+            before = {}
+
+            for table in (
+                "pool_recovery_leases",
+                "pool_recovery_schedules",
+                "pool_recovery_runs",
+            ):
+                before[table] = [
+                    tuple(row)
+                    for row in conn.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    )
+                ]
+        finally:
+            conn.close()
+
+        class FakeNode:
+            allowed_wallets = frozenset({"flab_pool_reserve"})
+
+            def get_block_count(self):
+                return 24400000
+
+        config = {
+            "rpc_user": "test",
+            "rpc_password": "test-secret",
+            "rpc_host": "127.0.0.1",
+            "rpc_port": 14022,
+            "wallets": ["flab_pool_reserve"],
+        }
+
+        output = []
+
+        with (
+            patch("flowlab.cli._load", return_value=config),
+            patch("flowlab.cli.RpcClient", return_value=FakeNode()),
+            patch(
+                "flowlab.pool_recovery_runner."
+                "run_persistent_recovery_pass"
+            ) as runner_mock,
+            patch(
+                "flowlab.pool_recovery_persistence.acquire_lease"
+            ) as acquire_mock,
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                rpc=None,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("RPC connectivity: OK", "\n".join(output))
+
+        runner_mock.assert_not_called()
+        acquire_mock.assert_not_called()
+
+        conn = db.connect_readonly(self.path)
+
+        try:
+            after = {}
+
+            for table in (
+                "pool_recovery_leases",
+                "pool_recovery_schedules",
+                "pool_recovery_runs",
+            ):
+                after[table] = [
+                    tuple(row)
+                    for row in conn.execute(
+                        f"SELECT * FROM {table} ORDER BY rowid"
+                    )
+                ]
+        finally:
+            conn.close()
+
+        self.assertEqual(
+            before,
+            after,
+            "Node connectivity preflight modified recovery records",
+        )
 if __name__ == "__main__":
     unittest.main()
