@@ -126,7 +126,29 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
     s = sub.add_parser("watch"); s.add_argument("exp", nargs="?"); s.add_argument("--once", action="store_true")
     s = sub.add_parser("serve"); s.add_argument("exp", nargs="?"); s.add_argument("--port", type=int, default=8787)
     s.add_argument("--read-only", action="store_true")
+    r = sub.add_parser("recovery")
+    rsub = r.add_subparsers(dest="recovery_cmd", required=True)
+    rsub.add_parser("status")
+    rsub.add_parser("schedules")
+    h = rsub.add_parser("history")
+    h.add_argument("--limit", type=int, default=25)
+
+    run = rsub.add_parser("run-once")
+    run.add_argument("--authorize", action="store_true")
+
     a = p.parse_args(argv)
+
+    if a.cmd == "recovery":
+        from .pool_recovery_cli import recovery_command
+        return recovery_command(
+            db,
+            a.recovery_cmd,
+            out,
+            limit=getattr(a, "limit", 25),
+            authorize=getattr(a, "authorize", False),
+            rpc=rpc,
+        )
+
     if a.cmd in ("watch", "serve"):
         return _watch(a, rpc, out, sleep, db, local_path)
 

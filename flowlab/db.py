@@ -158,6 +158,29 @@ def connect(path):
     return conn
 
 
+def connect_readonly(path):
+    """Open an existing SQLite database without write permission.
+
+    No migrations, WAL configuration changes, or schema initialization.
+    """
+    from pathlib import Path
+    from urllib.parse import quote
+
+    resolved = Path(path).expanduser().resolve(strict=True)
+    uri = "file:" + quote(str(resolved), safe="/") + "?mode=ro"
+
+    conn = sqlite3.connect(
+        uri,
+        uri=True,
+        isolation_level=None,
+        timeout=30,
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA query_only=ON")
+    return conn
+
+
 @contextmanager
 def tx(conn):
     """One atomic write transaction. Commits on success, rolls back on any error."""
