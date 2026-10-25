@@ -97,13 +97,40 @@ class RecoveryCliTests(unittest.TestCase):
             "\\n".join(self.lines),
         )
 
-    def test_run_once_requires_explicit_rpc(self):
-        result = self.call("recovery", "run-once", "--authorize")
+    def test_run_once_requires_available_rpc_configuration(self):
+        from unittest.mock import patch
+
+        with patch(
+            "flowlab.cli._load",
+            side_effect=FileNotFoundError("Missing local config"),
+        ):
+            result = main(
+                ["recovery", "run-once", "--authorize"],
+                db=self.path,
+                rpc=None,
+                out=self.lines.append,
+            )
+
         self.assertEqual(result, 2)
-        self.assertIn(
-            "RPC must be explicitly supplied",
-            "\\n".join(self.lines),
+        self.assertTrue(
+            any("REFUSED" in line for line in self.lines)
         )
+
+
+    def test_recovery_without_authorization_does_not_load_config(self):
+        from unittest.mock import patch
+
+        with patch("flowlab.cli._load") as load_mock:
+            result = main(
+                ["recovery", "run-once"],
+                db=self.path,
+                rpc=None,
+                out=self.lines.append,
+            )
+
+        self.assertEqual(result, 2)
+        load_mock.assert_not_called()
+
 
 
     def test_run_once_valid_schema_executes(self):
@@ -499,5 +526,209 @@ class RecoveryCliTests(unittest.TestCase):
             )
 
         self.assertEqual(result, 2)
+
+    def test_run_once_revalidates_writable_connection(self):
+        from unittest.mock import patch
+        from flowlab import db as database
+
+        original_validator = database.validate_pool_recovery_schema
+        validations = []
+
+        def validator(conn):
+            validations.append(True)
+
+            if len(validations) == 2:
+                raise RuntimeError("Simulated writable schema failure")
+
+            return original_validator(conn)
+
+        with (
+            patch(
+                "flowlab.db.validate_pool_recovery_schema",
+                side_effect=validator,
+            ),
+            patch(
+                "flowlab.pool_recovery_runner."
+                "run_persistent_recovery_pass"
+            ) as runner_mock,
+        ):
+            result = main(
+                ["recovery", "run-once", "--authorize"],
+                db=self.path,
+                rpc=ObservationRpc(),
+                out=self.lines.append,
+            )
+
+        self.assertEqual(result, 2)
+        self.assertEqual(len(validations), 2)
+        runner_mock.assert_not_called()
+        self.assertIn(
+            "REFUSED: recovery schema validation failed",
+            "\n".join(self.lines),
+        )
+
+
+    def test_recovery_invalid_database_never_loads_config(self):
+        from unittest.mock import patch
+        from flowlab import db as database
+
+        conn = database.connect(self.path)
+        try:
+            conn.execute(
+                "UPDATE meta SET value='6' WHERE key='schema_version'"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        with (
+            patch("flowlab.cli._load") as load_mock,
+            patch(
+                "flowlab.pool_recovery_rpc.create_recovery_rpc"
+            ) as rpc_mock,
+        ):
+            result = main(
+                ["recovery", "run-once", "--authorize"],
+                db=self.path,
+                rpc=None,
+                out=self.lines.append,
+            )
+
+        self.assertEqual(result, 2)
+        load_mock.assert_not_called()
+        rpc_mock.assert_not_called()
+
+    def test_recovery_missing_config_returns_refusal(self):
+        from unittest.mock import patch
+
+        with patch(
+            "flowlab.cli._load",
+            side_effect=FileNotFoundError("missing configuration"),
+        ):
+            result = main(
+                ["recovery", "run-once", "--authorize"],
+                db=self.path,
+                rpc=None,
+                out=self.lines.append,
+            )
+
+        self.assertEqual(result, 2)
+        self.assertTrue(
+            any("REFUSED" in line for line in self.lines)
+        )
+
+
+    def test_recovery_configuration_security(self):
+        from unittest.mock import patch
+        from flowlab.pool_recovery_rpc import RecoveryRpc
+
+        secret = "PRIVATE_TEST_PASSWORD_DO_NOT_DISPLAY"
+
+        cases = [
+            {
+                "rpc_user": "operator",
+                "rpc_password": secret,
+                "rpc_host": "192.168.1.100",
+                "rpc_port": 14022,
+                "wallets": ["flab_pool_reserve"],
+            },
+            {
+                "rpc_user": "operator",
+                "rpc_password": secret,
+                "rpc_host": "127.0.0.1",
+                "rpc_port": 14022,
+                "wallets": [],
+            },
+            {
+                "rpc_user": "operator",
+                "rpc_password": secret,
+                "rpc_host": "127.0.0.1",
+                "rpc_port": 14022,
+            },
+        ]
+
+        for config in cases:
+            with self.subTest(config=config.get("rpc_host")):
+                output = []
+
+                with (
+                    patch("flowlab.cli._load", return_value=config),
+                    patch(
+                        "flowlab.pool_recovery_runner."
+                        "run_persistent_recovery_pass"
+                    ) as runner,
+                ):
+                    result = main(
+                        ["recovery", "run-once", "--authorize"],
+                        db=self.path,
+                        rpc=None,
+                        out=output.append,
+                    )
+
+                self.assertEqual(result, 2)
+                runner.assert_not_called()
+                self.assertNotIn(secret, "\n".join(output))
+                self.assertTrue(
+                    any("REFUSED" in line for line in output)
+                )
+
+    def test_recovery_inspection_never_loads_rpc_configuration(self):
+        from unittest.mock import patch
+
+        for command in ("status", "schedules", "history"):
+            with self.subTest(command=command):
+                with patch("flowlab.cli._load") as load_mock:
+                    result = main(
+                        ["recovery", command],
+                        db=self.path,
+                        rpc=None,
+                        out=self.lines.append,
+                    )
+
+                self.assertEqual(result, 0)
+                load_mock.assert_not_called()
+
+    def test_recovery_local_configuration_passes_restricted_rpc(self):
+        from unittest.mock import patch
+        from flowlab.pool_recovery_rpc import RecoveryRpc
+
+        config = {
+            "rpc_user": "operator",
+            "rpc_password": "test-only",
+            "rpc_host": "127.0.0.1",
+            "rpc_port": 14022,
+            "wallets": ["flab_pool_reserve"],
+        }
+
+        observed = []
+
+        def runner(conn, rpc):
+            observed.append(rpc)
+            self.assertIsInstance(rpc, RecoveryRpc)
+            self.assertFalse(hasattr(rpc, "send_raw_transaction"))
+
+            return {
+                "state": "PASS_FINISHED",
+                "results": [],
+                "financial_actions_authorized": False,
+            }
+
+        with (
+            patch("flowlab.cli._load", return_value=config),
+            patch(
+                "flowlab.pool_recovery_runner."
+                "run_persistent_recovery_pass",
+                side_effect=runner,
+            ),
+        ):
+            result = main(
+                ["recovery", "run-once", "--authorize"],
+                db=self.path,
+                rpc=None,
+                out=self.lines.append,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(len(observed), 1)
 if __name__ == "__main__":
     unittest.main()

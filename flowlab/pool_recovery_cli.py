@@ -3,6 +3,30 @@
 from . import db as database
 
 
+
+def validate_recovery_database(path):
+    """Validate an existing V7 database without writing or migrating."""
+    try:
+        conn = database.connect_readonly(path)
+    except (OSError, database.sqlite3.DatabaseError):
+        return False
+
+    try:
+        version = conn.execute(
+            "SELECT value FROM meta WHERE key='schema_version'"
+        ).fetchone()
+
+        if version is None or version["value"] != "7":
+            return False
+
+        database.validate_pool_recovery_schema(conn)
+        return True
+    except (RuntimeError, ValueError, database.sqlite3.DatabaseError):
+        return False
+    finally:
+        conn.close()
+
+
 def recovery_command(
     path, command, out=print, *, limit=25, authorize=False, rpc=None
 ):
@@ -44,6 +68,22 @@ def recovery_command(
         # before acquiring a writable recovery connection.
         conn = database.connect(path)
         try:
+            # Revalidate on the writable connection before any
+            # recovery lease, schedule, or journal modification.
+            version = conn.execute(
+                "SELECT value FROM meta WHERE key='schema_version'"
+            ).fetchone()
+
+            if version is None or version["value"] != "7":
+                out("REFUSED: recovery requires schema V7")
+                return 2
+
+            try:
+                database.validate_pool_recovery_schema(conn)
+            except (RuntimeError, ValueError, database.sqlite3.DatabaseError):
+                out("REFUSED: recovery schema validation failed")
+                return 2
+
             result = run_persistent_recovery_pass(conn, observation_rpc)
         finally:
             conn.close()

@@ -25,7 +25,7 @@ from . import dashboard
 from .engine import Engine, EngineError
 from .executor import Executor
 from .node_verifier import NodeVerifier
-from .rpc import RpcClient
+from .rpc import RpcClient, RpcError
 from .tx_builder import TxBuilder
 
 DB, LOCAL = "flowlab.db", "config.local.json"
@@ -140,13 +140,53 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
 
     if a.cmd == "recovery":
         from .pool_recovery_cli import recovery_command
+
+        recovery_rpc = rpc
+
+        if (
+            a.recovery_cmd == "run-once"
+            and a.authorize
+            and recovery_rpc is None
+        ):
+            from .pool_recovery_rpc import create_recovery_rpc
+            from .pool_recovery_cli import validate_recovery_database
+
+            # Fail closed before reading credentials or creating RPC.
+            if not validate_recovery_database(db):
+                out("REFUSED: recovery requires a valid existing V7 database")
+                return 2
+
+            # Explicit authorization permits one evidence-only pass.
+            # Never display local RPC credentials or exception details.
+            try:
+                local = _load(local_path)
+
+                recovery_rpc = create_recovery_rpc(
+                    user=local["rpc_user"],
+                    password=local["rpc_password"],
+                    port=local.get("rpc_port", 14022),
+                    host=local.get("rpc_host", "127.0.0.1"),
+                    allowed_wallets=local["wallets"],
+                    timeout=30,
+                )
+            except (
+                OSError,
+                ValueError,
+                KeyError,
+                TypeError,
+                __import__("json").JSONDecodeError,
+                RpcError,
+            ):
+                out("REFUSED: recovery RPC configuration unavailable or invalid")
+                return 2
+
         return recovery_command(
             db,
             a.recovery_cmd,
             out,
             limit=getattr(a, "limit", 25),
             authorize=getattr(a, "authorize", False),
-            rpc=rpc,
+            rpc=recovery_rpc,
         )
 
     if a.cmd in ("watch", "serve"):
