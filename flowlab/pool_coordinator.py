@@ -19,6 +19,7 @@ def coordinate_session(
     pool_id,
     session_id,
     page_size=100,
+    lease=None,
 ):
     """Run one explicit observation/evidence pass for a participant.
 
@@ -47,6 +48,7 @@ def coordinate_session(
         pool_id=pool_id,
         session_id=session_id,
         page_size=page_size,
+        lease=lease,
     )
 
     observation_ids = [
@@ -69,6 +71,7 @@ def coordinate_session(
             conn,
             rpc,
             observation_id=observation_id,
+            lease=lease,
         )
 
         reconciliation = None
@@ -78,6 +81,7 @@ def coordinate_session(
                 conn,
                 rpc,
                 observation_id=observation_id,
+                lease=lease,
             )
 
         results.append({

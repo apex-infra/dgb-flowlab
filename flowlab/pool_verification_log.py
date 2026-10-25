@@ -6,6 +6,7 @@ Records independent verification results without financial crediting.
 from datetime import datetime, timezone
 
 from . import db
+from .pool_recovery_persistence import require_active_lease
 from .pool_verifier import verify_observation, _hash
 
 
@@ -35,7 +36,7 @@ def _observation_snapshot(conn, observation_id):
 
 
 
-def record_verification(conn, rpc, *, observation_id):
+def record_verification(conn, rpc, *, observation_id, lease=None):
     """Verify a deposit and permanently record the verification outcome."""
 
     if type(observation_id) is not int or observation_id <= 0:
@@ -77,6 +78,8 @@ def record_verification(conn, rpc, *, observation_id):
         raise ValueError("Incomplete verified evidence")
 
     with db.tx(conn):
+        if lease is not None:
+            require_active_lease(conn, lease)
         # BEGIN IMMEDIATE serializes this check and insertion
         # against other SQLite writers.
         after = _observation_snapshot(conn, observation_id)

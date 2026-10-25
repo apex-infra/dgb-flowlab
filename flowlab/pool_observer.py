@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from datetime import datetime, timezone
 
 from . import db
+from .pool_recovery_persistence import require_active_lease
 from .pool_ledger import MAX_SQLITE_INTEGER
 
 
@@ -69,7 +70,7 @@ def _state(confirmations):
     return "CONFIRMED"
 
 
-def observe_session(conn, rpc, *, pool_id, session_id, page_size=100):
+def observe_session(conn, rpc, *, pool_id, session_id, page_size=100, lease=None):
     """Discover deposits for one READY session without financial crediting."""
 
     if type(page_size) is not int or not 1 <= page_size <= 1000:
@@ -198,6 +199,8 @@ def observe_session(conn, rpc, *, pool_id, session_id, page_size=100):
 
     # Persist the completed scan atomically.
     with db.tx(conn):
+        if lease is not None:
+            require_active_lease(conn, lease)
         for observation in found.values():
             existing = conn.execute(
                 """

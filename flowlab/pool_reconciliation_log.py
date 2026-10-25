@@ -7,6 +7,7 @@ financial balances, or historical verification records.
 from datetime import datetime, timezone
 
 from . import db
+from .pool_recovery_persistence import require_active_lease
 from .pool_reconciliation import reconcile_verification
 from .pool_verifier import _hash
 
@@ -62,7 +63,7 @@ def _snapshot(conn, observation_id):
     )
 
 
-def record_reconciliation(conn, rpc, *, observation_id):
+def record_reconciliation(conn, rpc, *, observation_id, lease=None):
     """Reconcile historical evidence and append an immutable audit event."""
 
     if type(observation_id) is not int or observation_id <= 0:
@@ -107,6 +108,8 @@ def record_reconciliation(conn, rpc, *, observation_id):
         raise ValueError("Incomplete CURRENT reconciliation evidence")
 
     with db.tx(conn):
+        if lease is not None:
+            require_active_lease(conn, lease)
         after = _snapshot(conn, observation_id)
 
         if after != before:
