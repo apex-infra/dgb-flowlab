@@ -84,7 +84,13 @@ def recovery_command(
                 out("REFUSED: recovery schema validation failed")
                 return 2
 
-            result = run_persistent_recovery_pass(conn, observation_rpc)
+            try:
+                result = run_persistent_recovery_pass(conn, observation_rpc)
+            except KeyboardInterrupt:
+                # The runner owns lease cleanup and interruption recovery.
+                # Never report an interrupted pass as successful.
+                out("Recovery interrupted by operator")
+                return 130
         finally:
             conn.close()
 

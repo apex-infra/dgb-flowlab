@@ -526,5 +526,272 @@ class RecoveryRunnerTests(unittest.TestCase):
         self.assertEqual(events, ["STARTED"])
 
 
+
+    def test_keyboard_interrupt_preserves_attempt_and_releases_lease(self):
+        """Interrupted recovery must preserve evidence for the next owner."""
+        from unittest.mock import patch
+
+        # Pass one: operator interrupts after STARTED is journaled.
+        with (
+            patch.object(
+                runner,
+                "eligible_sessions",
+                return_value=[self.session],
+            ),
+            patch.object(
+                runner,
+                "recover_session",
+                side_effect=KeyboardInterrupt,
+            ) as interrupted_recovery,
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                runner.run_persistent_recovery_pass(
+                    self.conn,
+                    object(),
+                )
+
+        interrupted_recovery.assert_called_once()
+
+        events = self.conn.execute(
+            "SELECT id,event,attempt_id "
+            "FROM pool_recovery_runs ORDER BY id"
+        ).fetchall()
+
+        self.assertEqual(
+            [row["event"] for row in events],
+            ["STARTED"],
+        )
+
+        started_id = events[0]["id"]
+
+        lease = self.conn.execute(
+            "SELECT owner_token,fencing_token "
+            "FROM pool_recovery_leases "
+            "WHERE lease_name=?",
+            (runner.LEASE_NAME,),
+        ).fetchone()
+
+        self.assertIsNotNone(lease)
+        self.assertIsNone(
+            lease["owner_token"],
+            "Interrupted runner must release its lease",
+        )
+
+        first_fence = lease["fencing_token"]
+
+        # Pass two: new fenced owner handles the abandoned attempt.
+        with (
+            patch.object(
+                runner,
+                "eligible_sessions",
+                return_value=[self.session],
+            ),
+            patch.object(
+                runner,
+                "recover_session",
+            ) as second_recovery,
+        ):
+            result = runner.run_persistent_recovery_pass(
+                self.conn,
+                object(),
+            )
+
+        second_recovery.assert_not_called()
+
+        self.assertEqual(
+            result["state"],
+            "PASS_FINISHED",
+        )
+        self.assertEqual(
+            result["results"][0]["state"],
+            "INTERRUPTED_BACKOFF",
+        )
+        self.assertIs(
+            result["financial_actions_authorized"],
+            False,
+        )
+
+        events = self.conn.execute(
+            "SELECT id,event,attempt_id "
+            "FROM pool_recovery_runs ORDER BY id"
+        ).fetchall()
+
+        self.assertEqual(
+            [row["event"] for row in events],
+            ["STARTED", "INTERRUPTED"],
+        )
+
+        self.assertEqual(
+            events[1]["attempt_id"],
+            started_id,
+        )
+
+        schedule = self.conn.execute(
+            "SELECT state,next_attempt_at "
+            "FROM pool_recovery_schedules "
+            "WHERE session_id='session'"
+        ).fetchone()
+
+        self.assertEqual(schedule["state"], "BACKOFF")
+        self.assertIsNotNone(schedule["next_attempt_at"])
+
+        final_lease = self.conn.execute(
+            "SELECT owner_token,fencing_token "
+            "FROM pool_recovery_leases "
+            "WHERE lease_name=?",
+            (runner.LEASE_NAME,),
+        ).fetchone()
+
+        self.assertIsNone(final_lease["owner_token"])
+        self.assertGreater(
+            final_lease["fencing_token"],
+            first_fence,
+        )
+
+    def test_rpc_failure_persists_backoff_without_leaking_message(self):
+        """RPC errors must become fenced failures, never success."""
+        from unittest.mock import patch
+        from flowlab.rpc import RpcError
+
+        secret = "PRIVATE_RPC_ERROR_DETAIL_DO_NOT_STORE"
+
+        with (
+            patch.object(
+                runner,
+                "eligible_sessions",
+                return_value=[self.session],
+            ),
+            patch.object(
+                runner,
+                "recover_session",
+                side_effect=RpcError(secret),
+            ) as recovery_mock,
+        ):
+            result = runner.run_persistent_recovery_pass(
+                self.conn,
+                object(),
+            )
+
+        recovery_mock.assert_called_once()
+
+        self.assertEqual(result["state"], "PASS_FINISHED")
+        self.assertIs(result["financial_actions_authorized"], False)
+        self.assertEqual(len(result["results"]), 1)
+        self.assertEqual(
+            result["results"][0]["state"],
+            "FAILED_BACKOFF",
+        )
+        self.assertEqual(
+            result["results"][0]["error_type"],
+            "RpcError",
+        )
+
+        events = self.conn.execute(
+            "SELECT id,event,attempt_id,error_type "
+            "FROM pool_recovery_runs ORDER BY id"
+        ).fetchall()
+
+        self.assertEqual(
+            [row["event"] for row in events],
+            ["STARTED", "FAILED"],
+        )
+        self.assertEqual(events[1]["attempt_id"], events[0]["id"])
+        self.assertEqual(events[1]["error_type"], "RpcError")
+
+        schedule = self.conn.execute(
+            "SELECT state,consecutive_failures,next_attempt_at "
+            "FROM pool_recovery_schedules WHERE session_id='session'"
+        ).fetchone()
+
+        self.assertEqual(schedule["state"], "BACKOFF")
+        self.assertEqual(schedule["consecutive_failures"], 1)
+        self.assertIsNotNone(schedule["next_attempt_at"])
+
+        lease = self.conn.execute(
+            "SELECT owner_token FROM pool_recovery_leases "
+            "WHERE lease_name=?",
+            (runner.LEASE_NAME,),
+        ).fetchone()
+
+        self.assertIsNone(lease["owner_token"])
+
+        # Search every textual field in the persistent recovery records.
+        for table in (
+            "pool_recovery_runs",
+            "pool_recovery_schedules",
+            "pool_recovery_leases",
+        ):
+            rows = self.conn.execute(
+                f"SELECT * FROM {table}"
+            ).fetchall()
+
+            for row in rows:
+                self.assertNotIn(secret, repr(tuple(row)))
+
+    def test_completion_write_failure_preserves_started_attempt(self):
+        """A failed terminal journal write must never report completion."""
+        import sqlite3
+        from unittest.mock import patch
+
+        with (
+            patch.object(
+                runner,
+                "eligible_sessions",
+                return_value=[self.session],
+            ),
+            patch.object(
+                runner,
+                "recover_session",
+                return_value={"pass_state": "COMPLETED"},
+            ) as recover_mock,
+            patch.object(
+                runner,
+                "complete_attempt",
+                side_effect=sqlite3.OperationalError(
+                    "Simulated journal write failure"
+                ),
+            ),
+        ):
+            with self.assertRaises(sqlite3.OperationalError):
+                runner.run_persistent_recovery_pass(
+                    self.conn,
+                    object(),
+                )
+
+        recover_mock.assert_called_once()
+
+        events = self.conn.execute(
+            "SELECT id,event,attempt_id "
+            "FROM pool_recovery_runs ORDER BY id"
+        ).fetchall()
+
+        self.assertEqual(
+            [row["event"] for row in events],
+            ["STARTED"],
+        )
+
+        lease = self.conn.execute(
+            "SELECT owner_token FROM pool_recovery_leases "
+            "WHERE lease_name=?",
+            (runner.LEASE_NAME,),
+        ).fetchone()
+
+        self.assertIsNotNone(lease)
+        self.assertIsNone(
+            lease["owner_token"],
+            "Completion failure must release the lease",
+        )
+
+        schedule = self.conn.execute(
+            "SELECT state FROM pool_recovery_schedules "
+            "WHERE session_id='session'"
+        ).fetchone()
+
+        if schedule is not None:
+            self.assertNotEqual(
+                schedule["state"],
+                "IDLE",
+                "Failed completion must not be recorded as success",
+            )
 if __name__ == "__main__":
     unittest.main()

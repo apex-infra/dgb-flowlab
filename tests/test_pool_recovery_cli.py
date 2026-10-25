@@ -730,5 +730,31 @@ class RecoveryCliTests(unittest.TestCase):
 
         self.assertEqual(result, 0)
         self.assertEqual(len(observed), 1)
+
+    def test_run_once_keyboard_interrupt_returns_130(self):
+        from unittest.mock import patch
+
+        with patch(
+            "flowlab.pool_recovery_runner.run_persistent_recovery_pass",
+            side_effect=KeyboardInterrupt,
+        ) as runner:
+            result = main(
+                ["recovery", "run-once", "--authorize"],
+                db=self.path,
+                rpc=ObservationRpc(),
+                out=self.lines.append,
+            )
+
+        runner.assert_called_once()
+        self.assertEqual(result, 130)
+        self.assertIn(
+            "Recovery interrupted by operator",
+            "\n".join(self.lines),
+        )
+        self.assertNotIn(
+            "Recovery result: PASS_FINISHED",
+            "\n".join(self.lines),
+        )
+
 if __name__ == "__main__":
     unittest.main()
