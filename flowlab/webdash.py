@@ -57,6 +57,111 @@ def export_run(snap, fmt):
     return json.dumps(doc, indent=2).encode(), "application/json"
 
 
+
+def mixer_lab_snapshot(path):
+    """Aggregate Mixer Lab status; never expose financial records."""
+    from . import db
+    from .pool_recovery_cli import (
+        validate_recovery_database,
+        recovery_operational_diagnostic,
+    )
+
+    authorization = {
+        "financial_actions": False,
+        "automatic_recovery": False,
+        "transaction_broadcast": False,
+    }
+
+    unavailable = {
+        "status": "UNAVAILABLE",
+        "schema": "V7 REQUIRED",
+        "read_only": True,
+        "pools": {"total": 0, "states": {}},
+        "sessions": {"total": 0, "states": {}},
+        "recovery": {
+            "eligible_sessions": None,
+            "lease": "UNKNOWN",
+            "node_sync": "NOT CHECKED",
+            "operational_readiness": "UNKNOWN",
+        },
+        "authorization": authorization,
+    }
+
+    if not validate_recovery_database(path):
+        return unavailable
+
+    def counts(conn, table):
+        rows = conn.execute(
+            f"SELECT state, COUNT(*) AS count "
+            f"FROM {table} GROUP BY state ORDER BY state"
+        ).fetchall()
+
+        states = {row["state"]: row["count"] for row in rows}
+
+        return {
+            "total": sum(states.values()),
+            "states": states,
+        }
+
+    try:
+        conn = db.connect_readonly(path)
+
+        try:
+            pools = counts(conn, "pools")
+            sessions = counts(conn, "pool_sessions")
+        finally:
+            conn.close()
+
+        diagnostic_lines = []
+
+        readiness = recovery_operational_diagnostic(
+            path,
+            out=diagnostic_lines.append,
+        )
+
+        observed = {}
+
+        for line in diagnostic_lines:
+            if ": " in line:
+                key, _, value = line.partition(": ")
+                observed[key] = value
+
+        lease = observed.get(
+            "Recovery lease availability",
+            "UNKNOWN",
+        )
+
+        eligible_text = observed.get(
+            "Session eligibility",
+            "UNKNOWN",
+        )
+
+        eligible = (
+            int(eligible_text)
+            if eligible_text.isdecimal()
+            else None
+        )
+
+        return {
+            "status": "AVAILABLE",
+            "schema": "V7",
+            "read_only": True,
+            "pools": pools,
+            "sessions": sessions,
+            "recovery": {
+                "eligible_sessions": eligible,
+                "lease": lease,
+                "node_sync": "NOT CHECKED",
+                "operational_readiness": readiness,
+            },
+            "authorization": authorization,
+        }
+
+    except Exception:
+        # Never return database exception details to the browser.
+        return unavailable
+
+
 def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None,
                 control=True, sleep=None, wallet_roles=None):
     wallet_roles = {
@@ -159,6 +264,8 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                                         "plays": list_plays(), "control": control,
                                         "runner": {"active": ctl.active(), "exp": ctl.exp},
                                         "log": list(ctl.log), "server_time": now.isoformat()})
+            if path == "/api/mixer-lab":
+                return self._json(200, mixer_lab_snapshot(db_path))
             if path == "/api/export":
                 q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                 fmt = q.get("fmt", "json")

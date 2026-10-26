@@ -134,9 +134,142 @@ function renderHops(flow) {
   return box;
 }
 
+
+let mixerLastRefresh = 0;
+let mixerLoading = false;
+
+function mixerElement(tag, className, value) {
+  const element = document.createElement(tag);
+  if (className) element.className = className;
+  if (value !== undefined && value !== null) {
+    element.textContent = String(value);
+  }
+  return element;
+}
+
+function renderMixerLab(data) {
+  const status = $("mixer-status");
+  const overview = $("mixer-overview");
+  const details = $("mixer-details");
+
+  overview.replaceChildren();
+  details.replaceChildren();
+
+  if (!data || data.status !== "AVAILABLE") {
+    status.textContent =
+      "Mixer Lab unavailable — existing schema V7 database required.";
+    return;
+  }
+
+  status.textContent =
+    "Schema V7 valid · Local research database · Read-only";
+
+  const recovery = data.recovery || {};
+
+  const metrics = [
+    ["Pools", data.pools.total],
+    ["Sessions", data.sessions.total],
+    [
+      "Eligible sessions",
+      recovery.eligible_sessions === null
+        ? "Unknown"
+        : recovery.eligible_sessions
+    ],
+    ["Recovery lease", recovery.lease || "UNKNOWN"],
+  ];
+
+  for (const [label, value] of metrics) {
+    const card = mixerElement("div", "mixer-card");
+    card.append(
+      mixerElement("span", "mixer-label", label),
+      mixerElement("strong", "mixer-value", value)
+    );
+    overview.append(card);
+  }
+
+  const groups = [
+    ["Pool states", data.pools.states || {}],
+    ["Session states", data.sessions.states || {}],
+  ];
+
+  for (const [title, states] of groups) {
+    const panel = mixerElement("section", "mixer-panel");
+    panel.append(mixerElement("h3", null, title));
+
+    const entries = Object.entries(states);
+
+    if (!entries.length) {
+      panel.append(
+        mixerElement("p", "mute", "No records")
+      );
+    }
+
+    for (const [state, count] of entries) {
+      const row = mixerElement("div", "mixer-row");
+      row.append(
+        mixerElement("span", null, state),
+        mixerElement("strong", null, count)
+      );
+      panel.append(row);
+    }
+
+    details.append(panel);
+  }
+
+  const operations = mixerElement("section", "mixer-panel");
+
+  operations.append(
+    mixerElement("h3", null, "Operational Diagnostics")
+  );
+
+  const operationalRows = [
+    ["Lease availability", recovery.lease],
+    ["Node synchronization", recovery.node_sync],
+    ["Operational readiness", recovery.operational_readiness],
+    ["Financial authorization", "DISABLED"],
+    ["Automatic recovery", "DISABLED"],
+    ["Transaction broadcasting", "DISABLED"],
+  ];
+
+  for (const [label, value] of operationalRows) {
+    const row = mixerElement("div", "mixer-row");
+    row.append(
+      mixerElement("span", null, label),
+      mixerElement("strong", null, value || "UNKNOWN")
+    );
+    operations.append(row);
+  }
+
+  details.append(operations);
+}
+
+async function pollMixerLab() {
+  if (mixerLoading) return;
+  mixerLoading = true;
+
+  try {
+    const response = await fetch("/api/mixer-lab", {
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      throw new Error("Mixer Lab endpoint unavailable");
+    }
+
+    renderMixerLab(await response.json());
+    mixerLastRefresh = Date.now();
+  } catch (_) {
+    $("mixer-status").textContent =
+      "Mixer Lab connection unavailable.";
+  } finally {
+    mixerLoading = false;
+  }
+}
+
 function showTab(name) {
-  for (const t of ["monitor", "fund", "new", "results", "infrastructure", "log"]) $("tab-" + t).hidden = t !== name;
+  for (const t of ["monitor", "fund", "new", "results", "infrastructure", "mixer", "log"]) $("tab-" + t).hidden = t !== name;
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === name));
+  if (name === "mixer") pollMixerLab();
 }
 document.querySelectorAll("#tabs button").forEach(b => { b.onclick = () => showTab(b.dataset.tab); });
 $("tab-btn-new").hidden = !CONTROL;
@@ -2080,3 +2213,9 @@ async function poll() {
   } catch (err) { $("foot").textContent = "cannot reach the dashboard server, retrying"; }
 }
 poll(); setInterval(poll, 2000);
+setInterval(() => {
+  if (!$("tab-mixer").hidden &&
+      Date.now() - mixerLastRefresh >= 10000) {
+    pollMixerLab();
+  }
+}, 10000);

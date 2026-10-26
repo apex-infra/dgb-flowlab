@@ -152,6 +152,103 @@ class WebReadTests(WebBase):
         self.call("run", self.exp)
         self.serve(rpc, db=db)
 
+
+    def test_mixer_lab_api_returns_read_only_aggregates(self):
+        self.start()
+
+        status, headers, body = self.get("/api/mixer-lab")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            headers["Content-Type"],
+            "application/json",
+        )
+
+        payload = json.loads(body)
+
+        self.assertEqual(payload["status"], "AVAILABLE")
+        self.assertEqual(payload["schema"], "V7")
+        self.assertIs(payload["read_only"], True)
+        self.assertIs(
+            payload["authorization"]["financial_actions"],
+            False,
+        )
+        self.assertIs(
+            payload["authorization"]["automatic_recovery"],
+            False,
+        )
+
+        self.assertIn("pools", payload)
+        self.assertIn("sessions", payload)
+        self.assertIn("recovery", payload)
+
+        # No wallet details or individual participant records.
+        self.assertNotIn("reserve_wallet", body.decode())
+        self.assertNotIn("fee_wallet", body.decode())
+        self.assertNotIn("deposit_address", body.decode())
+        self.assertNotIn("payout_address", body.decode())
+
+    def test_mixer_lab_api_rejects_wrong_host(self):
+        self.start()
+
+        status, _, _ = self.get(
+            "/api/mixer-lab",
+            host="invalid.example",
+        )
+
+        self.assertEqual(status, 403)
+
+    def test_mixer_lab_api_does_not_create_missing_database(self):
+        import os
+
+        missing = os.path.join(
+            self.dir.name,
+            "nonexistent-mixer.db",
+        )
+
+        self.serve(db=missing)
+
+        status, _, body = self.get("/api/mixer-lab")
+
+        self.assertEqual(status, 200)
+
+        payload = json.loads(body)
+
+        self.assertEqual(payload["status"], "UNAVAILABLE")
+        self.assertFalse(os.path.exists(missing))
+
+    def test_mixer_lab_tab_is_present_and_read_only(self):
+        self.start()
+
+        status, _, body = self.get("/")
+
+        self.assertEqual(status, 200)
+
+        page = body.decode()
+
+        self.assertIn('data-tab="mixer"', page)
+        self.assertIn('id="tab-mixer"', page)
+        self.assertIn("READ ONLY", page)
+
+        status, _, js = self.get("/app.js")
+
+        self.assertEqual(status, 200)
+        self.assertIn(b"/api/mixer-lab", js)
+        self.assertIn(b"pollMixerLab", js)
+
+    def test_mixer_lab_has_no_mutating_http_action(self):
+        self.start()
+
+        status, response = self.do(
+            "mixer-lab",
+            {},
+        )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(
+            response["error"],
+            "unknown action",
+        )
     def test_binds_to_loopback_only(self):
         self.start()
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
