@@ -247,6 +247,102 @@ def mixer_lab_sessions_snapshot(path, *, limit=50):
         return unavailable
 
 
+
+def mixer_lab_configuration_actions(path):
+    """Development-only pool/session setup; no wallet RPC."""
+    import re
+    from . import db
+    from .pool_ledger import create_pool, create_session
+    from .pool_recovery_cli import validate_recovery_database
+
+    def identifier(value):
+        if (
+            not isinstance(value, str)
+            or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value)
+        ):
+            raise ValueError(
+                "Identifiers must be 1-64 letters, numbers, _ or -"
+            )
+        return value
+
+    def existing_database():
+        if not validate_recovery_database(path):
+            raise ValueError("Existing Mixer Lab V7 database required")
+
+    def new_pool(body):
+        pool_id = identifier(body.get("pool_id"))
+        reserve = identifier(body.get("reserve_wallet"))
+        fees = identifier(body.get("fee_wallet"))
+
+        if reserve == fees:
+            raise ValueError("Reserve and fee wallets must differ")
+
+        existing_database()
+        conn = db.connect(path)
+        try:
+            create_pool(
+                conn,
+                pool_id=pool_id,
+                reserve_wallet=reserve,
+                fee_wallet=fees,
+            )
+        finally:
+            conn.close()
+
+        return {
+            "created": True,
+            "pool_id": pool_id,
+            "state": "PAUSED",
+            "financial_actions_authorized": False,
+        }
+
+    def new_session(body):
+        pool_id = identifier(body.get("pool_id"))
+        session_id = identifier(body.get("session_id"))
+        fee = body.get("fee_basis_points")
+
+        if type(fee) is not int or not 0 <= fee <= 10000:
+            raise ValueError(
+                "Fee must be an integer between 0 and 10000 basis points"
+            )
+
+        existing_database()
+        conn = db.connect(path)
+        try:
+            # Operational V1 intentionally creates sessions
+            # only under paused research pools.
+            row = conn.execute(
+                "SELECT state FROM pools WHERE id=?",
+                (pool_id,),
+            ).fetchone()
+
+            if row is None or row["state"] != "PAUSED":
+                raise ValueError(
+                    "An existing PAUSED research pool is required"
+                )
+
+            create_session(
+                conn,
+                pool_id=pool_id,
+                session_id=session_id,
+                fee_basis_points=fee,
+            )
+        finally:
+            conn.close()
+
+        return {
+            "created": True,
+            "pool_id": pool_id,
+            "session_id": session_id,
+            "financial_actions_authorized": False,
+        }
+
+    return {
+        "mixer_create_pool": new_pool,
+        "mixer_create_session": new_session,
+    }
+
+
 def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None,
                 control=True, sleep=None, wallet_roles=None,
                 mixer_db_path=None):
@@ -259,6 +355,22 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
         db_path, rpc, builder, wallets, sleep, control,
         wallet_roles=wallet_roles,
     )
+
+    # An explicit, separate development database is mandatory.
+    # A general-purpose production database is not enabled here.
+    mixer_configuration_enabled = (
+        control
+        and mixer_db_path is not None
+        and Path(mixer_db_path).name == "mixerlab-dev.db"
+        and Path(mixer_db_path).expanduser().resolve()
+            != Path(db_path).expanduser().resolve()
+    )
+
+    if mixer_configuration_enabled:
+        ctl.actions.update(
+            mixer_lab_configuration_actions(mixer_path)
+        )
+
     token = secrets.token_urlsafe(24)
     cache = {"at": 0.0, "value": None}
     infrastructure_cache = {"at": 0.0, "value": None}
@@ -352,7 +464,12 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                                         "runner": {"active": ctl.active(), "exp": ctl.exp},
                                         "log": list(ctl.log), "server_time": now.isoformat()})
             if path == "/api/mixer-lab":
-                return self._json(200, mixer_lab_snapshot(mixer_path))
+                report = mixer_lab_snapshot(mixer_path)
+                report["configuration_enabled"] = (
+                    mixer_configuration_enabled
+                    and report["status"] == "AVAILABLE"
+                )
+                return self._json(200, report)
             if path == "/api/mixer-lab/sessions":
                 return self._json(
                     200, mixer_lab_sessions_snapshot(mixer_path)

@@ -148,6 +148,8 @@ function mixerElement(tag, className, value) {
 }
 
 function renderMixerLab(data) {
+  $("mixer-config-panel").hidden =
+    !(CONTROL && data && data.configuration_enabled);
   const status = $("mixer-status");
   const overview = $("mixer-overview");
   const details = $("mixer-details");
@@ -243,6 +245,56 @@ function renderMixerLab(data) {
   details.append(operations);
 }
 
+
+
+function mixerFormBody(form) {
+  return Object.fromEntries(new FormData(form).entries());
+}
+
+async function mixerCreatePool(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+
+  if (!form.reportValidity()) return;
+
+  const body = mixerFormBody(form);
+
+  if (await act(
+    "mixer_create_pool",
+    body,
+    "Research pool created in PAUSED state"
+  )) {
+    form.reset();
+    await pollMixerLab();
+  }
+}
+
+async function mixerCreateSession(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+
+  if (!form.reportValidity()) return;
+
+  const body = mixerFormBody(form);
+  body.fee_basis_points = Number(body.fee_basis_points);
+
+  if (await act(
+    "mixer_create_session",
+    body,
+    "Research session created"
+  )) {
+    form.reset();
+    await pollMixerLab();
+  }
+}
+
+$("mixer-pool-form").addEventListener(
+  "submit", mixerCreatePool
+);
+
+$("mixer-session-form").addEventListener(
+  "submit", mixerCreateSession
+);
 
 function renderMixerSessions(payload) {
   const status = $("mixer-sessions-status");

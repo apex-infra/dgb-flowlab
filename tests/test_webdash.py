@@ -335,6 +335,174 @@ class WebReadTests(WebBase):
         self.assertIn(b"/api/mixer-lab/sessions", body)
         self.assertIn(b"renderMixerSessions", body)
 
+
+    def test_mixer_operational_v1_requires_explicit_dev_db(self):
+        self.start()
+
+        status, response = self.do(
+            "mixer_create_pool",
+            {
+                "pool_id": "pool_a",
+                "reserve_wallet": "reserve",
+                "fee_wallet": "fees",
+            },
+        )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(response["error"], "unknown action")
+
+    def test_mixer_operational_v1_creation_and_lifecycle(self):
+        import os
+        import sqlite3
+
+        self.make()
+
+        mixer = os.path.join(
+            self.dir.name, "mixerlab-dev.db"
+        )
+
+        # Isolated V7 fixture, never a live database.
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        self.serve(mixer_db=mixer)
+
+        pool_body = {
+            "pool_id": "research_pool",
+            "reserve_wallet": "research_reserve",
+            "fee_wallet": "research_fees",
+        }
+
+        status, payload = self.do(
+            "mixer_create_pool", pool_body
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["created"])
+        self.assertEqual(payload["state"], "PAUSED")
+
+        status, payload = self.do(
+            "mixer_create_session",
+            {
+                "pool_id": "research_pool",
+                "session_id": "session_01",
+                "fee_basis_points": 100,
+            },
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["created"])
+
+        overview = json.loads(
+            self.get("/api/mixer-lab")[2]
+        )
+        sessions = json.loads(
+            self.get("/api/mixer-lab/sessions")[2]
+        )
+
+        self.assertTrue(
+            overview["configuration_enabled"]
+        )
+        self.assertEqual(
+            overview["pools"]["total"], 1
+        )
+        self.assertEqual(
+            overview["sessions"]["total"], 1
+        )
+        self.assertEqual(
+            len(sessions["sessions"]), 1
+        )
+        self.assertEqual(
+            sessions["sessions"][0]["lifecycle_state"],
+            "REGISTRATION_REQUIRED",
+        )
+
+        # Original experiment DB must have no Mixer Lab pool.
+        source = sqlite3.connect(self.db)
+        try:
+            count = source.execute(
+                "SELECT COUNT(*) FROM pools"
+            ).fetchone()[0]
+        finally:
+            source.close()
+
+        self.assertEqual(count, 0)
+
+    def test_mixer_operational_v1_readonly_blocks_creation(self):
+        import os
+        import sqlite3
+
+        self.make()
+        mixer = os.path.join(
+            self.dir.name, "mixerlab-dev.db"
+        )
+
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        self.serve(control=False, mixer_db=mixer)
+
+        status, _ = self.do(
+            "mixer_create_pool",
+            {
+                "pool_id": "blocked",
+                "reserve_wallet": "reserve",
+                "fee_wallet": "fees",
+            },
+        )
+
+        self.assertEqual(status, 403)
+
+        overview = json.loads(
+            self.get("/api/mixer-lab")[2]
+        )
+
+        self.assertFalse(
+            overview["configuration_enabled"]
+        )
+
+    def test_mixer_operational_v1_requires_token(self):
+        import os
+        import sqlite3
+
+        self.make()
+        mixer = os.path.join(
+            self.dir.name, "mixerlab-dev.db"
+        )
+
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        self.serve(mixer_db=mixer)
+
+        status, _ = self.do(
+            "mixer_create_pool",
+            {
+                "pool_id": "blocked",
+                "reserve_wallet": "reserve",
+                "fee_wallet": "fees",
+            },
+            token=False,
+        )
+
+        self.assertEqual(status, 403)
+
     def test_binds_to_loopback_only(self):
         self.start()
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")

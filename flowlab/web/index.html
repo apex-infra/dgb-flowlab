@@ -87,6 +87,53 @@
 
   <div id="mixer-overview" class="mixer-overview"></div>
   <div id="mixer-details" class="mixer-details"></div>
+
+  <section id="mixer-config-panel" class="mixer-session-panel" hidden>
+    <div class="mixer-session-heading">
+      <h3>Research Pool Configuration</h3>
+      <span class="mixer-badge">DEVELOPMENT ONLY</span>
+    </div>
+
+    <p class="mute">
+      Configuration records only. No addresses, deposits,
+      experiments, or wallet transactions are created.
+    </p>
+
+    <form id="mixer-pool-form" autocomplete="off">
+      <h3>Create Paused Pool</h3>
+      <label>Pool ID
+        <input name="pool_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+" placeholder="research_pool_01">
+      </label>
+      <label>Reserve wallet name
+        <input name="reserve_wallet" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+" placeholder="flab_pool_reserve">
+      </label>
+      <label>Fee wallet name
+        <input name="fee_wallet" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+" placeholder="flab_pool_fees">
+      </label>
+      <button type="submit">Create Paused Pool</button>
+    </form>
+
+    <form id="mixer-session-form" autocomplete="off">
+      <h3>Create Research Session</h3>
+      <label>Pool ID
+        <input name="pool_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+" placeholder="research_pool_01">
+      </label>
+      <label>Session ID
+        <input name="session_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+" placeholder="session_01">
+      </label>
+      <label>Fee (basis points, 100 = 1%)
+        <input name="fee_basis_points" type="number" required
+               min="0" max="10000" step="1" value="0">
+      </label>
+      <button type="submit">Create Session</button>
+    </form>
+  </section>
+
   <section class="mixer-session-panel">
     <div class="mixer-session-heading">
       <h3>Participant Research Telemetry</h3>
