@@ -1334,5 +1334,214 @@ class RecoveryCliTests(unittest.TestCase):
             self.assertEqual(version["value"], "1")
         finally:
             conn.close()
+
+    def test_readiness_offline_validated(self):
+        """Valid offline preflight reports OFFLINE_VALIDATED."""
+        output = []
+
+        result = main(
+            ["recovery", "preflight"],
+            db=self.path,
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn(
+            "Recovery readiness: OFFLINE_VALIDATED",
+            output,
+        )
+
+    def test_readiness_node_connected(self):
+        """Valid DB and successful node check report READY."""
+        class FakeNode:
+            def get_block_count(self):
+                return 24449287
+
+        output = []
+
+        result = main(
+            ["recovery", "preflight", "--check-node"],
+            db=self.path,
+            rpc=FakeNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Recovery readiness: READY", output)
+        self.assertIn("Financial actions authorized: NO", output)
+
+    def test_readiness_node_failure(self):
+        """RPC failure reports DEGRADED without authorizing recovery."""
+        from flowlab.rpc import RpcError
+
+        class FailedNode:
+            def get_block_count(self):
+                raise RpcError("SECRET_RPC_ERROR")
+
+        output = []
+
+        result = main(
+            ["recovery", "preflight", "--check-node"],
+            db=self.path,
+            rpc=FailedNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertIn("Recovery readiness: DEGRADED", output)
+        self.assertNotIn("SECRET_RPC_ERROR", "\n".join(output))
+
+    def test_readiness_invalid_database_blocked(self):
+        """Invalid database reports BLOCKED without contacting RPC."""
+        from unittest.mock import patch
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as directory:
+            missing = str(Path(directory) / "missing.db")
+            output = []
+
+            with (
+                patch("flowlab.cli._load") as loader,
+                patch("flowlab.cli.RpcClient") as client,
+            ):
+                result = main(
+                    ["recovery", "preflight", "--check-node"],
+                    db=missing,
+                    out=output.append,
+                )
+
+            self.assertEqual(result, 2)
+            self.assertIn("Recovery readiness: BLOCKED", output)
+            loader.assert_not_called()
+            client.assert_not_called()
+
+    def test_readiness_exactly_one_offline(self):
+        """Offline preflight must report exactly one readiness state."""
+        output = []
+
+        result = main(
+            ["recovery", "preflight"],
+            db=self.path,
+            out=output.append,
+        )
+
+        readiness = [
+            line for line in output
+            if line.startswith("Recovery readiness:")
+        ]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            readiness,
+            ["Recovery readiness: OFFLINE_VALIDATED"],
+        )
+
+    def test_readiness_exactly_one_connected(self):
+        """Connected node reports READY without recovery authorization."""
+        class FakeNode:
+            def get_block_count(self):
+                return 24449287
+
+        output = []
+
+        result = main(
+            ["recovery", "preflight", "--check-node"],
+            db=self.path,
+            rpc=FakeNode(),
+            out=output.append,
+        )
+
+        readiness = [
+            line for line in output
+            if line.startswith("Recovery readiness:")
+        ]
+
+        self.assertEqual(result, 0)
+        self.assertEqual(readiness, ["Recovery readiness: READY"])
+        self.assertIn("Financial actions authorized: NO", output)
+        self.assertIn("Automatic recovery: DISABLED", output)
+
+    def test_readiness_exactly_one_node_failure(self):
+        """Failed connectivity reports DEGRADED exactly once."""
+        from flowlab.rpc import RpcError
+
+        class FailedNode:
+            def get_block_count(self):
+                raise RpcError("PRIVATE_NODE_ERROR")
+
+        output = []
+
+        result = main(
+            ["recovery", "preflight", "--check-node"],
+            db=self.path,
+            rpc=FailedNode(),
+            out=output.append,
+        )
+
+        readiness = [
+            line for line in output
+            if line.startswith("Recovery readiness:")
+        ]
+
+        self.assertEqual(result, 2)
+        self.assertEqual(
+            readiness,
+            ["Recovery readiness: DEGRADED"],
+        )
+        self.assertNotIn(
+            "PRIVATE_NODE_ERROR",
+            "\n".join(output),
+        )
+
+    def test_readiness_reporting_preserves_recovery_records(self):
+        """Readiness classification must never change recovery records."""
+        from flowlab import db
+        from unittest.mock import patch
+
+        tables = (
+            "pool_recovery_leases",
+            "pool_recovery_schedules",
+            "pool_recovery_runs",
+        )
+
+        def snapshot():
+            conn = db.connect_readonly(self.path)
+
+            try:
+                return {
+                    table: [
+                        tuple(row)
+                        for row in conn.execute(
+                            f"SELECT * FROM {table} ORDER BY rowid"
+                        )
+                    ]
+                    for table in tables
+                }
+            finally:
+                conn.close()
+
+        before = snapshot()
+
+        class FakeNode:
+            def get_block_count(self):
+                return 24449287
+
+        output = []
+
+        with patch(
+            "flowlab.pool_recovery_runner."
+            "run_persistent_recovery_pass"
+        ) as runner:
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                rpc=FakeNode(),
+                out=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Recovery readiness: READY", output)
+        self.assertEqual(before, snapshot())
+        runner.assert_not_called()
 if __name__ == "__main__":
     unittest.main()

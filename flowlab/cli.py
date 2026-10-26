@@ -151,6 +151,7 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
 
             if not validate_recovery_database(db):
                 out("PREFLIGHT FAIL: Existing schema V7 database required")
+                out("Recovery readiness: BLOCKED")
                 return 2
 
             try:
@@ -178,6 +179,7 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
                 RpcError,
             ):
                 out("RPC connectivity: FAILED")
+                out("Recovery readiness: DEGRADED")
                 return 2
 
         if (

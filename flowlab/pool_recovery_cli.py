@@ -36,6 +36,7 @@ def offline_recovery_preflight(
 
     if not validate_recovery_database(path):
         out("PREFLIGHT FAIL: Existing schema V7 database required")
+        out("Recovery readiness: BLOCKED")
         return 2
 
     conn = database.connect_readonly(path)
@@ -73,6 +74,9 @@ def offline_recovery_preflight(
             out("RPC connectivity: NOT CHECKED (offline preflight)")
         out("Financial actions authorized: NO")
         out("Automatic recovery: DISABLED")
+
+        if report_offline_rpc:
+            out("Recovery readiness: OFFLINE_VALIDATED")
 
     finally:
         conn.close()
@@ -117,9 +121,17 @@ def recovery_command(
 
         if node_rpc is None:
             out("RPC connectivity: FAILED")
+            out("Recovery readiness: DEGRADED")
             return 2
 
-        return recovery_node_connectivity(node_rpc, out)
+        result = recovery_node_connectivity(node_rpc, out)
+
+        if result == 0:
+            out("Recovery readiness: READY")
+        else:
+            out("Recovery readiness: DEGRADED")
+
+        return result
 
     if command == "run-once":
         if not authorize:
