@@ -442,7 +442,11 @@ function renderMixerSessions(payload) {
       ["Pool state", session.pool_state],
       ["Session state", session.session_state],
       ["Lifecycle", session.lifecycle_state],
-      ["Deposit address", session.address_state || "NOT REQUESTED"],
+      ["Address state", session.address_state || "NOT REQUESTED"],
+      ["Address recovery",
+       session.address_recovery_required
+         ? "RECONCILIATION REQUIRED"
+         : "NO ADDRESS RECOVERY REQUESTED"],
       ["Observations", session.observation_count],
       ["Supported", session.supported],
       ["Invalidated", session.invalidated],
@@ -461,6 +465,86 @@ function renderMixerSessions(payload) {
       );
       panel.append(row);
     }
+
+    // Receiving addresses are public, but only a READY
+    // address is eligible to be displayed or copied.
+    if (
+      session.address_state === "READY" &&
+      typeof session.deposit_address === "string" &&
+      session.deposit_address.length > 0
+    ) {
+      const addressRow = mixerElement("div", "mixer-row");
+      const addressText = mixerElement(
+        "strong", "mono", session.deposit_address
+      );
+      const copyButton = mixerElement(
+        "button", null, "Copy Address"
+      );
+
+      copyButton.type = "button";
+
+      copyButton.addEventListener("click", async () => {
+        try {
+          if (!navigator.clipboard ||
+              !navigator.clipboard.writeText) {
+            throw new Error("Clipboard unavailable");
+          }
+
+          await navigator.clipboard.writeText(
+            session.deposit_address
+          );
+
+          toast("Verified deposit address copied");
+        } catch (error) {
+          toast("Could not copy address", true);
+        }
+      });
+
+      addressRow.append(
+        mixerElement("span", null, "Verified receiving address"),
+        addressText,
+        copyButton
+      );
+
+      panel.append(addressRow);
+
+      if (session.deposit_wallet) {
+        const walletRow = mixerElement("div", "mixer-row");
+
+        walletRow.append(
+          mixerElement("span", null, "Verified reserve wallet"),
+          mixerElement("strong", null, session.deposit_wallet)
+        );
+
+        panel.append(walletRow);
+      }
+    }
+
+    if (session.address_recovery_required) {
+      const warning = mixerElement(
+        "p",
+        "mute",
+        "ADDRESS RECOVERY REQUIRED — Do not request another " +
+        "address or provide a receiving address to a participant " +
+        "until the existing request has been reconciled."
+      );
+
+      warning.setAttribute("role", "alert");
+      panel.append(warning);
+    }
+
+    if (session.recovery_state === "ACTION_REQUIRED") {
+      const warning = mixerElement(
+        "p",
+        "mute",
+        "DEPOSIT EVIDENCE REVIEW REQUIRED — Review the " +
+        "session's observation and reconciliation evidence."
+      );
+
+      warning.setAttribute("role", "status");
+      panel.append(warning);
+    }
+
     target.append(panel);
   }
 }

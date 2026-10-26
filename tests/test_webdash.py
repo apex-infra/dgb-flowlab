@@ -295,10 +295,15 @@ class WebReadTests(WebBase):
         self.assertFalse(session["research_review_ready"])
 
         for forbidden in (
-            "deposit_address", "payout_address", "txid",
+             "payout_address", "txid",
             "wallet", "fee_basis_points", "observations",
         ):
             self.assertNotIn(forbidden, session)
+
+        self.assertIsNone(session["deposit_address"])
+        self.assertIsNone(session["deposit_wallet"])
+        self.assertFalse(session["address_recovery_required"])
+
 
     def test_mixer_v2_independent_missing_database(self):
         import os

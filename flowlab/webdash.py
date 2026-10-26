@@ -199,7 +199,17 @@ def mixer_lab_sessions_snapshot(path, *, limit=50):
                        s.pool_id,
                        s.state AS session_state,
                        p.state AS pool_state,
-                       a.state AS address_state
+                       a.state AS address_state,
+                       CASE
+                           WHEN a.state = 'READY'
+                           THEN a.address
+                           ELSE NULL
+                       END AS verified_deposit_address,
+                       CASE
+                           WHEN a.state = 'READY'
+                           THEN a.wallet
+                           ELSE NULL
+                       END AS verified_deposit_wallet
                 FROM pool_sessions s
                 JOIN pools p ON p.id = s.pool_id
                 LEFT JOIN pool_deposit_addresses a
@@ -227,6 +237,11 @@ def mixer_lab_sessions_snapshot(path, *, limit=50):
                     "pool_state": row["pool_state"],
                     "session_state": row["session_state"],
                     "address_state": row["address_state"],
+                    "deposit_address": row["verified_deposit_address"],
+                    "deposit_wallet": row["verified_deposit_wallet"],
+                    "address_recovery_required": (
+                        row["address_state"] == "RECOVERY_REQUIRED"
+                    ),
                     "lifecycle_state": research["lifecycle_state"],
                     "observation_count": research["observation_count"],
                     "supported": research["supported_observations"],
