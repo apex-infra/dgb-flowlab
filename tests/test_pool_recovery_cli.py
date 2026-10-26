@@ -1076,5 +1076,263 @@ class RecoveryCliTests(unittest.TestCase):
             after,
             "Node connectivity preflight modified recovery records",
         )
+
+    def test_node_preflight_unexpected_rpc_exception(self):
+        """Unexpected RPC failures must produce a controlled refusal."""
+        from flowlab.pool_recovery_cli import recovery_node_connectivity
+
+        class BrokenNode:
+            def get_block_count(self):
+                raise RuntimeError("PRIVATE_RPC_DETAIL")
+
+        output = []
+
+        result = recovery_node_connectivity(
+            BrokenNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertIn("RPC connectivity: FAILED", output)
+        self.assertNotIn(
+            "PRIVATE_RPC_DETAIL",
+            "\n".join(output),
+        )
+
+    def test_node_preflight_rejects_boolean_height(self):
+        """Boolean values are not valid blockchain heights."""
+        from flowlab.pool_recovery_cli import recovery_node_connectivity
+
+        class InvalidNode:
+            def get_block_count(self):
+                return True
+
+        output = []
+
+        result = recovery_node_connectivity(
+            InvalidNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertIn("RPC connectivity: FAILED", output)
+
+    def test_node_preflight_rejects_negative_height(self):
+        """Negative blockchain heights must be rejected."""
+        from flowlab.pool_recovery_cli import recovery_node_connectivity
+
+        class InvalidNode:
+            def get_block_count(self):
+                return -1
+
+        output = []
+
+        result = recovery_node_connectivity(
+            InvalidNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertIn("RPC connectivity: FAILED", output)
+
+    def test_node_preflight_rejects_string_height(self):
+        """Malformed RPC responses must fail closed."""
+        from flowlab.pool_recovery_cli import recovery_node_connectivity
+
+        class InvalidNode:
+            def get_block_count(self):
+                return "24449287"
+
+        output = []
+
+        result = recovery_node_connectivity(
+            InvalidNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 2)
+        self.assertIn("RPC connectivity: FAILED", output)
+
+    def test_node_preflight_missing_rpc_credentials(self):
+        """Missing credentials must fail before RPC construction."""
+        from unittest.mock import patch
+
+        output = []
+
+        config = {
+            "rpc_user": "test-user",
+            "rpc_host": "127.0.0.1",
+            "rpc_port": 14022,
+            "wallets": ["flab_pool_reserve"],
+        }
+
+        with (
+            patch("flowlab.cli._load", return_value=config),
+            patch("flowlab.cli.RpcClient") as client,
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 2)
+        client.assert_not_called()
+        self.assertNotIn("test-user", "\n".join(output))
+
+    def test_node_preflight_rejects_remote_rpc_host(self):
+        """Remote RPC endpoints must be rejected."""
+        from unittest.mock import patch
+
+        output = []
+
+        config = {
+            "rpc_user": "test-user",
+            "rpc_password": "PRIVATE_PASSWORD",
+            "rpc_host": "192.168.1.100",
+            "rpc_port": 14022,
+            "wallets": ["flab_pool_reserve"],
+        }
+
+        with patch(
+            "flowlab.cli._load",
+            return_value=config,
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 2)
+        self.assertNotIn(
+            "PRIVATE_PASSWORD",
+            "\n".join(output),
+        )
+
+    def test_node_preflight_invalid_database_skips_rpc(self):
+        """Invalid schema must be rejected before loading credentials."""
+        from unittest.mock import patch
+
+        output = []
+
+        with (
+            patch(
+                "flowlab.pool_recovery_cli.validate_recovery_database",
+                return_value=False,
+            ),
+            patch("flowlab.cli._load") as loader,
+            patch("flowlab.cli.RpcClient") as client,
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 2)
+        loader.assert_not_called()
+        client.assert_not_called()
+
+    def test_node_preflight_corrupt_database_fail_closed(self):
+        """Corrupt SQLite must fail before credential loading or RPC."""
+        from unittest.mock import patch
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "corrupt.db"
+            path.write_bytes(b"NOT_A_SQLITE_DATABASE")
+
+            before = path.read_bytes()
+            output = []
+
+            with (
+                patch("flowlab.cli._load") as loader,
+                patch("flowlab.cli.RpcClient") as client,
+                patch(
+                    "flowlab.pool_recovery_runner."
+                    "run_persistent_recovery_pass"
+                ) as runner,
+            ):
+                result = main(
+                    ["recovery", "preflight", "--check-node"],
+                    db=str(path),
+                    out=output.append,
+                )
+
+            self.assertEqual(result, 2)
+            self.assertEqual(path.read_bytes(), before)
+            loader.assert_not_called()
+            client.assert_not_called()
+            runner.assert_not_called()
+
+    def test_node_preflight_missing_database_fail_closed(self):
+        """Missing databases must never be created by preflight."""
+        from unittest.mock import patch
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing.db"
+            output = []
+
+            with (
+                patch("flowlab.cli._load") as loader,
+                patch("flowlab.cli.RpcClient") as client,
+            ):
+                result = main(
+                    ["recovery", "preflight", "--check-node"],
+                    db=str(path),
+                    out=output.append,
+                )
+
+            self.assertEqual(result, 2)
+            self.assertFalse(path.exists())
+            loader.assert_not_called()
+            client.assert_not_called()
+
+    def test_node_preflight_schema_v1_fail_closed(self):
+        """Legacy schema V1 must not be migrated by preflight."""
+        from unittest.mock import patch
+        from flowlab import db
+
+        conn = db.connect(self.path)
+
+        try:
+            conn.execute(
+                "UPDATE meta SET value='1' "
+                "WHERE key='schema_version'"
+            )
+        finally:
+            conn.close()
+
+        output = []
+
+        with (
+            patch("flowlab.cli._load") as loader,
+            patch("flowlab.cli.RpcClient") as client,
+        ):
+            result = main(
+                ["recovery", "preflight", "--check-node"],
+                db=self.path,
+                out=output.append,
+            )
+
+        self.assertEqual(result, 2)
+        loader.assert_not_called()
+        client.assert_not_called()
+
+        conn = db.connect_readonly(self.path)
+
+        try:
+            version = conn.execute(
+                "SELECT value FROM meta "
+                "WHERE key='schema_version'"
+            ).fetchone()
+
+            self.assertEqual(version["value"], "1")
+        finally:
+            conn.close()
 if __name__ == "__main__":
     unittest.main()

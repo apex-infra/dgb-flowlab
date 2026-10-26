@@ -91,7 +91,9 @@ def recovery_node_connectivity(rpc, out=print):
         if type(height) is not int or height < 0:
             raise ValueError("Invalid blockchain height")
 
-    except (RpcError, OSError, ValueError, TypeError, AttributeError):
+    except Exception:
+        # Preflight must fail closed without exposing RPC error details.
+        # Do not suppress KeyboardInterrupt or SystemExit.
         out("RPC connectivity: FAILED")
         return 2
 
