@@ -198,9 +198,12 @@ def mixer_lab_sessions_snapshot(path, *, limit=50):
                 SELECT s.id AS session_id,
                        s.pool_id,
                        s.state AS session_state,
-                       p.state AS pool_state
+                       p.state AS pool_state,
+                       a.state AS address_state
                 FROM pool_sessions s
                 JOIN pools p ON p.id = s.pool_id
+                LEFT JOIN pool_deposit_addresses a
+                    ON a.session_id = s.id
                 ORDER BY s.created_at DESC, s.id
                 LIMIT ?
                 """,
@@ -223,6 +226,7 @@ def mixer_lab_sessions_snapshot(path, *, limit=50):
                     "session_id": row["session_id"],
                     "pool_state": row["pool_state"],
                     "session_state": row["session_state"],
+                    "address_state": row["address_state"],
                     "lifecycle_state": research["lifecycle_state"],
                     "observation_count": research["observation_count"],
                     "supported": research["supported_observations"],
@@ -405,10 +409,73 @@ def mixer_lab_configuration_actions(path, rpc=None):
             "financial_actions_authorized": False,
         }
 
+
+    def request_address(body):
+        from .pool_addresses import (
+            request_deposit_address,
+            AddressRecoveryRequired,
+        )
+
+        pool_id = identifier(body.get("pool_id"))
+        session_id = identifier(body.get("session_id"))
+
+        if rpc is None or not all(
+            callable(getattr(rpc, method, None))
+            for method in ("get_new_address", "get_address_info")
+        ):
+            raise ValueError("DigiByte wallet RPC unavailable")
+
+        existing_database()
+        conn = db.connect(path)
+
+        try:
+            # Require an existing PAUSED research pool.
+            # This avoids issuing addresses for active or
+            # unknown pool configurations.
+            row = conn.execute(
+                """
+                SELECT p.state
+                FROM pool_sessions s
+                JOIN pools p ON p.id = s.pool_id
+                WHERE s.id = ? AND s.pool_id = ?
+                """,
+                (session_id, pool_id),
+            ).fetchone()
+
+            if row is None or row["state"] != "PAUSED":
+                raise ValueError(
+                    "An existing PAUSED research pool is required"
+                )
+
+            # This function persists REQUESTING before RPC.
+            # Uncertain outcomes are handled by the existing
+            # recovery-required state machine.
+            try:
+                result = request_deposit_address(
+                    conn,
+                    rpc,
+                    pool_id=pool_id,
+                    session_id=session_id,
+                )
+            except AddressRecoveryRequired:
+                raise ValueError(
+                    "Address issuance requires recovery review"
+                ) from None
+
+            return {
+                "pool_id": pool_id,
+                "session_id": session_id,
+                "address_state": result["state"],
+                "financial_actions_authorized": False,
+            }
+        finally:
+            conn.close()
+
     return {
         "mixer_create_pool": new_pool,
         "mixer_create_session": new_session,
         "mixer_complete_registration": complete_registration,
+        "mixer_request_address": request_address,
     }
 
 

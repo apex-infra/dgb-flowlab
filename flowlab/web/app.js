@@ -379,6 +379,36 @@ $("mixer-registration-form").addEventListener(
   "submit", mixerCompleteRegistration
 );
 
+
+async function mixerRequestAddress(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+
+  if (!form.reportValidity()) return;
+
+  const body = mixerFormBody(form);
+
+  if (!window.confirm(
+    "Request a new deposit address from DigiByte Core? " +
+    "The reserve wallet must exist and be loaded."
+  )) {
+    return;
+  }
+
+  if (await act(
+    "mixer_request_address",
+    body,
+    "Deposit-address request processed; check session status"
+  )) {
+    form.reset();
+    await pollMixerLab();
+  }
+}
+
+$("mixer-address-form").addEventListener(
+  "submit", mixerRequestAddress
+);
+
 function renderMixerSessions(payload) {
   const status = $("mixer-sessions-status");
   const target = $("mixer-sessions");
@@ -412,6 +442,7 @@ function renderMixerSessions(payload) {
       ["Pool state", session.pool_state],
       ["Session state", session.session_state],
       ["Lifecycle", session.lifecycle_state],
+      ["Deposit address", session.address_state || "NOT REQUESTED"],
       ["Observations", session.observation_count],
       ["Supported", session.supported],
       ["Invalidated", session.invalidated],

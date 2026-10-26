@@ -169,6 +169,31 @@
         Validate and Seal Registration
       </button>
     </form>
+
+    <form id="mixer-address-form" autocomplete="off">
+      <h3>Request Participant Deposit Address</h3>
+      <p class="mute">
+        Requires completed registration and an existing
+        loaded reserve wallet in DigiByte Core.
+        Never retry an uncertain request automatically.
+      </p>
+
+      <label>Pool ID
+        <input name="pool_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+"
+               placeholder="flab_research_01">
+      </label>
+
+      <label>Registered Session ID
+        <input name="session_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+"
+               placeholder="flab_session_01">
+      </label>
+
+      <button type="submit">
+        Request Deposit Address
+      </button>
+    </form>
   </section>
 
   <section class="mixer-session-panel">

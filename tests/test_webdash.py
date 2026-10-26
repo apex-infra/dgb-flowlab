@@ -721,6 +721,381 @@ class WebReadTests(WebBase):
         finally:
             conn.close()
 
+
+    def test_mixer_address_action_requires_configuration(self):
+        self.start()
+
+        status, response = self.do(
+            "mixer_request_address",
+            {
+                "pool_id": "test_pool",
+                "session_id": "test_session",
+            },
+        )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(response["error"], "unknown action")
+
+    def test_mixer_address_frontend_contract(self):
+        self.start()
+
+        page = self.get("/")[2].decode()
+
+        self.assertIn('id="mixer-address-form"', page)
+
+        status, _, script = self.get("/app.js")
+
+        self.assertEqual(status, 200)
+        self.assertIn(b"mixer_request_address", script)
+
+    def test_mixer_address_requires_wallet_rpc(self):
+        import os
+        import sqlite3
+
+        self.make()
+        mixer = os.path.join(
+            self.dir.name,
+            "mixerlab-dev.db",
+        )
+
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        self.serve(mixer_db=mixer)
+
+        status, response = self.do(
+            "mixer_request_address",
+            {
+                "pool_id": "test_pool",
+                "session_id": "test_session",
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn(
+            "wallet RPC unavailable",
+            response["error"],
+        )
+
+    def test_mixer_address_requires_completed_registration(self):
+        import os
+        import sqlite3
+
+        from flowlab import db
+        from flowlab.pool_ledger import create_pool, create_session
+
+        class FakeAddressRPC:
+            def __init__(self):
+                self.calls = 0
+
+            def get_new_address(self, wallet, label):
+                self.calls += 1
+                return "mock-address"
+
+            def get_address_info(self, wallet, address):
+                return {"ismine": True}
+
+        self.make()
+
+        mixer = os.path.join(
+            self.dir.name,
+            "mixerlab-dev.db",
+        )
+
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        conn = db.connect(mixer)
+
+        try:
+            create_pool(
+                conn,
+                pool_id="test_pool",
+                reserve_wallet="test_reserve",
+                fee_wallet="test_fees",
+            )
+
+            create_session(
+                conn,
+                pool_id="test_pool",
+                session_id="test_session",
+                fee_basis_points=100,
+            )
+        finally:
+            conn.close()
+
+        rpc = FakeAddressRPC()
+        self.serve(rpc=rpc, mixer_db=mixer)
+
+        status, _ = self.do(
+            "mixer_request_address",
+            {
+                "pool_id": "test_pool",
+                "session_id": "test_session",
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(rpc.calls, 0)
+
+        sessions = json.loads(
+            self.get("/api/mixer-lab/sessions")[2]
+        )
+
+        self.assertEqual(
+            sessions["sessions"][0]["address_state"],
+            None,
+        )
+
+
+    def test_mixer_address_successful_issuance(self):
+        import os
+        import sqlite3
+        from flowlab import db
+        from flowlab.pool_ledger import create_pool, create_session
+
+        class FakeAddressRPC:
+            def __init__(self):
+                self.new_calls = 0
+                self.info_calls = 0
+
+            def get_new_address(self, wallet, label):
+                self.new_calls += 1
+                self.last_wallet = wallet
+                return "mock-deposit-address"
+
+            def get_address_info(self, wallet, address):
+                self.info_calls += 1
+                return {"ismine": True}
+
+        self.make()
+        mixer = os.path.join(self.dir.name, "mixerlab-dev.db")
+
+        source_conn = sqlite3.connect(self.db)
+        target_conn = sqlite3.connect(mixer)
+        try:
+            source_conn.backup(target_conn)
+        finally:
+            source_conn.close()
+            target_conn.close()
+
+        conn = db.connect(mixer)
+        try:
+            create_pool(
+                conn,
+                pool_id="address_pool",
+                reserve_wallet="test_reserve",
+                fee_wallet="test_fees",
+            )
+            create_session(
+                conn,
+                pool_id="address_pool",
+                session_id="address_session",
+                fee_basis_points=100,
+            )
+            with db.tx(conn):
+                conn.execute(
+                    """
+                    INSERT INTO pool_payout_instructions(
+                        session_id, position,
+                        payout_address, allocation_bps
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        "address_session", 1,
+                        "mock-payout-address", 10000,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO pool_registration_seals(
+                        session_id, completed_at
+                    ) VALUES (?, ?)
+                    """,
+                    ("address_session", "2026-10-26T00:00:00+00:00"),
+                )
+        finally:
+            conn.close()
+
+        rpc = FakeAddressRPC()
+        self.serve(rpc=rpc, mixer_db=mixer)
+
+        request = {
+            "pool_id": "address_pool",
+            "session_id": "address_session",
+        }
+
+        status, result = self.do("mixer_request_address", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["address_state"], "READY")
+        self.assertFalse(result["financial_actions_authorized"])
+        self.assertEqual(rpc.new_calls, 1)
+        self.assertEqual(rpc.info_calls, 1)
+        self.assertEqual(rpc.last_wallet, "test_reserve")
+
+        # READY requests must be idempotent.
+        status, result = self.do("mixer_request_address", request)
+        self.assertEqual(status, 200)
+        self.assertEqual(result["address_state"], "READY")
+        self.assertEqual(rpc.new_calls, 1)
+
+        sessions = json.loads(
+            self.get("/api/mixer-lab/sessions")[2]
+        )
+        self.assertEqual(
+            sessions["sessions"][0]["address_state"], "READY"
+        )
+
+        conn = db.connect_readonly(mixer)
+        try:
+            row = conn.execute(
+                """
+                SELECT state, address, wallet
+                FROM pool_deposit_addresses
+                WHERE session_id = ?
+                """,
+                ("address_session",),
+            ).fetchone()
+            self.assertEqual(row["state"], "READY")
+            self.assertEqual(
+                row["address"], "mock-deposit-address"
+            )
+            self.assertEqual(row["wallet"], "test_reserve")
+        finally:
+            conn.close()
+
+        # A separate experiment database stays unchanged.
+        conn = db.connect_readonly(self.db)
+        try:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM pool_deposit_addresses"
+            ).fetchone()[0]
+            self.assertEqual(count, 0)
+        finally:
+            conn.close()
+
+    def test_mixer_address_rpc_uncertainty_never_retries(self):
+        import os
+        import sqlite3
+        from flowlab import db
+        from flowlab.pool_ledger import create_pool, create_session
+
+        class FailingAddressRPC:
+            def __init__(self):
+                self.new_calls = 0
+
+            def get_new_address(self, wallet, label):
+                self.new_calls += 1
+                raise RuntimeError("simulated node timeout")
+
+            def get_address_info(self, wallet, address):
+                raise AssertionError("Should not verify on timeout")
+
+        self.make()
+        mixer = os.path.join(self.dir.name, "mixerlab-dev.db")
+
+        source_conn = sqlite3.connect(self.db)
+        target_conn = sqlite3.connect(mixer)
+        try:
+            source_conn.backup(target_conn)
+        finally:
+            source_conn.close()
+            target_conn.close()
+
+        conn = db.connect(mixer)
+        try:
+            create_pool(
+                conn,
+                pool_id="uncertain_pool",
+                reserve_wallet="test_reserve",
+                fee_wallet="test_fees",
+            )
+            create_session(
+                conn,
+                pool_id="uncertain_pool",
+                session_id="uncertain_session",
+                fee_basis_points=100,
+            )
+            with db.tx(conn):
+                conn.execute(
+                    """
+                    INSERT INTO pool_payout_instructions(
+                        session_id, position,
+                        payout_address, allocation_bps
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        "uncertain_session", 1,
+                        "mock-payout-address", 10000,
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO pool_registration_seals(
+                        session_id, completed_at
+                    ) VALUES (?, ?)
+                    """,
+                    (
+                        "uncertain_session",
+                        "2026-10-26T00:00:00+00:00",
+                    ),
+                )
+        finally:
+            conn.close()
+
+        rpc = FailingAddressRPC()
+        self.serve(rpc=rpc, mixer_db=mixer)
+
+        request = {
+            "pool_id": "uncertain_pool",
+            "session_id": "uncertain_session",
+        }
+
+        status, result = self.do("mixer_request_address", request)
+        self.assertEqual(status, 400)
+        self.assertIn("recovery", result["error"].lower())
+        self.assertEqual(rpc.new_calls, 1)
+
+        conn = db.connect_readonly(mixer)
+        try:
+            row = conn.execute(
+                """
+                SELECT state, address
+                FROM pool_deposit_addresses
+                WHERE session_id = ?
+                """,
+                ("uncertain_session",),
+            ).fetchone()
+            self.assertEqual(row["state"], "RECOVERY_REQUIRED")
+            self.assertIsNone(row["address"])
+        finally:
+            conn.close()
+
+        # Repeating the endpoint must not issue another address.
+        status, result = self.do("mixer_request_address", request)
+        self.assertEqual(status, 400)
+        self.assertEqual(rpc.new_calls, 1)
+
+        sessions = json.loads(
+            self.get("/api/mixer-lab/sessions")[2]
+        )
+        self.assertEqual(
+            sessions["sessions"][0]["address_state"],
+            "RECOVERY_REQUIRED",
+        )
+
     def test_binds_to_loopback_only(self):
         self.start()
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
