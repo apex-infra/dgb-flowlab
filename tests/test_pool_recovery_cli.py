@@ -1543,5 +1543,504 @@ class RecoveryCliTests(unittest.TestCase):
         self.assertIn("Recovery readiness: READY", output)
         self.assertEqual(before, snapshot())
         runner.assert_not_called()
+
+    def test_node_sync_diagnostic_synced(self):
+        """A synchronized mainnet node must report SYNCED."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+
+        class FakeNode:
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 24449287,
+                    "headers": 24449287,
+                    "initialblockdownload": False,
+                    "verificationprogress": 0.9999999699195584,
+                }
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            FakeNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "SYNCED")
+        self.assertIn("Node synchronization: SYNCED", output)
+
+    def test_node_sync_diagnostic_initial_download(self):
+        """Initial block download must report UNSYNCED."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+
+        class FakeNode:
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 24000000,
+                    "headers": 24449287,
+                    "initialblockdownload": True,
+                    "verificationprogress": 0.95,
+                }
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            FakeNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNSYNCED")
+        self.assertIn("Node synchronization: UNSYNCED", output)
+
+    def test_node_sync_diagnostic_header_lag(self):
+        """Block height below header height must report UNSYNCED."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+
+        class FakeNode:
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 24449000,
+                    "headers": 24449287,
+                    "initialblockdownload": False,
+                    "verificationprogress": 0.999,
+                }
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            FakeNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNSYNCED")
+        self.assertIn("Node synchronization: UNSYNCED", output)
+
+    def test_node_sync_diagnostic_invalid_response(self):
+        """Malformed blockchain information must report UNKNOWN."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+
+        class FakeNode:
+            def get_blockchain_info(self):
+                return {"chain": "main", "blocks": "INVALID"}
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            FakeNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNKNOWN")
+        self.assertIn("Node synchronization: UNKNOWN", output)
+
+    def test_node_sync_diagnostic_rpc_exception(self):
+        """RPC failures must report UNKNOWN without revealing details."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+
+        class BrokenNode:
+            def get_blockchain_info(self):
+                raise RuntimeError("PRIVATE_RPC_SECRET")
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            BrokenNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNKNOWN")
+        self.assertEqual(output, ["Node synchronization: UNKNOWN"])
+
+    def test_node_sync_diagnostic_wrong_chain(self):
+        """A non-mainnet chain must never report SYNCED."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+
+        class TestnetNode:
+            def get_blockchain_info(self):
+                return {
+                    "chain": "test",
+                    "blocks": 24449287,
+                    "headers": 24449287,
+                    "initialblockdownload": False,
+                    "verificationprogress": 1.0,
+                }
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            TestnetNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNKNOWN")
+        self.assertEqual(output, ["Node synchronization: UNKNOWN"])
+
+    def test_node_sync_diagnostic_nonfinite_progress(self):
+        """NaN and infinity must not pass synchronization validation."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+        from decimal import Decimal
+
+        for invalid in (
+            float("nan"),
+            float("inf"),
+            Decimal("NaN"),
+            Decimal("Infinity"),
+        ):
+            with self.subTest(progress=str(invalid)):
+                class FakeNode:
+                    def get_blockchain_info(self):
+                        return {
+                            "chain": "main",
+                            "blocks": 24449287,
+                            "headers": 24449287,
+                            "initialblockdownload": False,
+                            "verificationprogress": invalid,
+                        }
+
+                output = []
+
+                result = recovery_node_sync_diagnostic(
+                    FakeNode(),
+                    out=output.append,
+                )
+
+                self.assertEqual(result, "UNKNOWN")
+                self.assertEqual(
+                    output,
+                    ["Node synchronization: UNKNOWN"],
+                )
+
+    def test_node_sync_diagnostic_decimal_progress(self):
+        """Valid Decimal progress must be accepted."""
+        from flowlab.pool_recovery_cli import recovery_node_sync_diagnostic
+        from decimal import Decimal
+
+        class FakeNode:
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 24449287,
+                    "headers": 24449287,
+                    "initialblockdownload": False,
+                    "verificationprogress": Decimal("0.9999999699195584"),
+                }
+
+        output = []
+
+        result = recovery_node_sync_diagnostic(
+            FakeNode(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, "SYNCED")
+        self.assertEqual(output, ["Node synchronization: SYNCED"])
+
+    def test_operational_diagnostic_offline_unknown(self):
+        """Offline diagnostics must not claim node readiness."""
+        output = []
+
+        result = main(
+            ["recovery", "preflight", "--diagnostics"],
+            db=self.path,
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Node synchronization: UNKNOWN", output)
+        self.assertIn("Operational readiness: UNKNOWN", output)
+        self.assertIn("Recovery readiness: OFFLINE_VALIDATED", output)
+
+    def test_operational_diagnostic_connected_idle(self):
+        """Healthy infrastructure with no sessions is IDLE."""
+        class Node:
+            def get_block_count(self):
+                return 24449287
+
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 24449287,
+                    "headers": 24449287,
+                    "initialblockdownload": False,
+                    "verificationprogress": 0.9999999,
+                }
+
+        output = []
+
+        result = main(
+            [
+                "recovery", "preflight",
+                "--check-node", "--diagnostics",
+            ],
+            db=self.path,
+            rpc=Node(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Node synchronization: SYNCED", output)
+        self.assertIn("Recovery lease availability: AVAILABLE", output)
+        self.assertIn("Operational readiness: IDLE", output)
+
+    def test_operational_diagnostic_eligible_ready(self):
+        """Eligible sessions with healthy infrastructure are READY."""
+        from unittest.mock import patch
+
+        class Node:
+            def get_block_count(self):
+                return 100
+
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 100,
+                    "headers": 100,
+                    "initialblockdownload": False,
+                    "verificationprogress": 1.0,
+                }
+
+        output = []
+
+        with patch(
+            "flowlab.pool_recovery_supervisor.eligible_sessions",
+            return_value=[{"pool_id": "test", "session_id": "s1"}],
+        ):
+            result = main(
+                [
+                    "recovery", "preflight",
+                    "--check-node", "--diagnostics",
+                ],
+                db=self.path,
+                rpc=Node(),
+                out=output.append,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Session eligibility: 1", output)
+        self.assertIn("Operational readiness: READY", output)
+        self.assertIn("Financial actions authorized: NO", output)
+        self.assertIn("Automatic recovery: DISABLED", output)
+
+    def test_operational_diagnostic_busy_lease(self):
+        """An unexpired recovery lease reports BUSY."""
+        from datetime import datetime, timedelta, timezone
+        from flowlab import db
+        from flowlab.pool_recovery_runner import LEASE_NAME
+
+        now = datetime.now(timezone.utc)
+        stamp = now.isoformat()
+        future = (now + timedelta(hours=1)).isoformat()
+
+        conn = db.connect(self.path)
+
+        try:
+            conn.execute(
+                "INSERT INTO pool_recovery_leases "
+                "(lease_name,owner_token,fencing_token,"
+                "expires_at,updated_at) VALUES (?,?,?,?,?)",
+                (LEASE_NAME, "existing-owner", 1, future, stamp),
+            )
+        finally:
+            conn.close()
+
+        class Node:
+            def get_block_count(self):
+                return 100
+
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 100,
+                    "headers": 100,
+                    "initialblockdownload": False,
+                    "verificationprogress": 1.0,
+                }
+
+        output = []
+
+        result = main(
+            [
+                "recovery", "preflight",
+                "--check-node", "--diagnostics",
+            ],
+            db=self.path,
+            rpc=Node(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Recovery lease availability: BUSY", output)
+        self.assertIn("Operational readiness: BUSY", output)
+
+        conn = db.connect_readonly(self.path)
+
+        try:
+            row = conn.execute(
+                "SELECT owner_token,fencing_token "
+                "FROM pool_recovery_leases WHERE lease_name=?",
+                (LEASE_NAME,),
+            ).fetchone()
+
+            self.assertEqual(row["owner_token"], "existing-owner")
+            self.assertEqual(row["fencing_token"], 1)
+        finally:
+            conn.close()
+
+    def test_operational_diagnostic_unsynced(self):
+        """A lagging node reports UNSYNCED."""
+        class Node:
+            def get_block_count(self):
+                return 90
+
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 90,
+                    "headers": 100,
+                    "initialblockdownload": False,
+                    "verificationprogress": 0.9,
+                }
+
+        output = []
+
+        result = main(
+            [
+                "recovery", "preflight",
+                "--check-node", "--diagnostics",
+            ],
+            db=self.path,
+            rpc=Node(),
+            out=output.append,
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("Node synchronization: UNSYNCED", output)
+        self.assertIn("Operational readiness: UNSYNCED", output)
+
+
+    def test_operational_diagnostic_expired_lease(self):
+        """Expired leases must report AVAILABLE without modification."""
+        from datetime import datetime, timedelta, timezone
+        from flowlab import db
+        from flowlab.pool_recovery_runner import LEASE_NAME
+        from flowlab.pool_recovery_cli import recovery_operational_diagnostic
+
+        now = datetime.now(timezone.utc)
+        expired = (now - timedelta(hours=1)).isoformat()
+
+        conn = db.connect(self.path)
+
+        try:
+            conn.execute(
+                "INSERT INTO pool_recovery_leases "
+                "(lease_name,owner_token,fencing_token,"
+                "expires_at,updated_at) VALUES (?,?,?,?,?)",
+                (LEASE_NAME, "expired-owner", 5, expired, expired),
+            )
+        finally:
+            conn.close()
+
+        output = []
+
+        result = recovery_operational_diagnostic(
+            self.path,
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNKNOWN")
+        self.assertIn("Recovery lease availability: AVAILABLE", output)
+
+        conn = db.connect_readonly(self.path)
+
+        try:
+            row = conn.execute(
+                "SELECT owner_token,fencing_token "
+                "FROM pool_recovery_leases WHERE lease_name=?",
+                (LEASE_NAME,),
+            ).fetchone()
+
+            self.assertEqual(row["owner_token"], "expired-owner")
+            self.assertEqual(row["fencing_token"], 5)
+        finally:
+            conn.close()
+
+    def test_operational_diagnostic_malformed_lease(self):
+        """Malformed expiration timestamps must fail closed."""
+        from datetime import datetime, timezone
+        from flowlab import db
+        from flowlab.pool_recovery_runner import LEASE_NAME
+        from flowlab.pool_recovery_cli import recovery_operational_diagnostic
+
+        stamp = datetime.now(timezone.utc).isoformat()
+
+        conn = db.connect(self.path)
+
+        try:
+            conn.execute(
+                "INSERT INTO pool_recovery_leases "
+                "(lease_name,owner_token,fencing_token,"
+                "expires_at,updated_at) VALUES (?,?,?,?,?)",
+                (LEASE_NAME, "unknown-owner", 7, "INVALID", stamp),
+            )
+        finally:
+            conn.close()
+
+        output = []
+
+        result = recovery_operational_diagnostic(
+            self.path,
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNKNOWN")
+        self.assertIn("Recovery lease availability: UNKNOWN", output)
+        self.assertIn("Operational readiness: UNKNOWN", output)
+
+    def test_operational_diagnostic_unsynced_precedes_busy(self):
+        """Unsynchronized infrastructure takes precedence over BUSY."""
+        from datetime import datetime, timedelta, timezone
+        from flowlab import db
+        from flowlab.pool_recovery_runner import LEASE_NAME
+        from flowlab.pool_recovery_cli import recovery_operational_diagnostic
+
+        now = datetime.now(timezone.utc)
+        future = (now + timedelta(hours=1)).isoformat()
+
+        conn = db.connect(self.path)
+
+        try:
+            conn.execute(
+                "INSERT INTO pool_recovery_leases "
+                "(lease_name,owner_token,fencing_token,"
+                "expires_at,updated_at) VALUES (?,?,?,?,?)",
+                (LEASE_NAME, "other-owner", 3, future, now.isoformat()),
+            )
+        finally:
+            conn.close()
+
+        class UnsyncedNode:
+            def get_blockchain_info(self):
+                return {
+                    "chain": "main",
+                    "blocks": 90,
+                    "headers": 100,
+                    "initialblockdownload": False,
+                    "verificationprogress": 0.9,
+                }
+
+        output = []
+
+        result = recovery_operational_diagnostic(
+            self.path,
+            node_rpc=UnsyncedNode(),
+            check_node=True,
+            out=output.append,
+        )
+
+        self.assertEqual(result, "UNSYNCED")
+        self.assertIn("Recovery lease availability: BUSY", output)
+        self.assertIn("Node synchronization: UNSYNCED", output)
+        self.assertIn("Operational readiness: UNSYNCED", output)
 if __name__ == "__main__":
     unittest.main()

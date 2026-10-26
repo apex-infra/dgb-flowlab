@@ -105,9 +105,144 @@ def recovery_node_connectivity(rpc, out=print):
     return 0
 
 
+
+def recovery_node_sync_diagnostic(rpc, out=print):
+    """Classify node-reported synchronization using read-only RPC."""
+    import math
+    from decimal import Decimal
+
+    try:
+        info = rpc.get_blockchain_info()
+
+        if not isinstance(info, dict):
+            raise ValueError("Invalid blockchain response")
+
+        chain = info.get("chain")
+        blocks = info.get("blocks")
+        headers = info.get("headers")
+        initial_download = info.get("initialblockdownload")
+        progress = info.get("verificationprogress")
+
+        if chain != "main":
+            state = "UNKNOWN"
+
+        elif (
+            type(blocks) is not int
+            or type(headers) is not int
+            or blocks < 0
+            or headers < 0
+            or type(initial_download) is not bool
+            or isinstance(progress, bool)
+            or not isinstance(progress, (int, float, Decimal))
+            or not math.isfinite(float(progress))
+            or not 0 <= progress <= 1
+        ):
+            state = "UNKNOWN"
+
+        elif initial_download or blocks < headers:
+            state = "UNSYNCED"
+
+        elif blocks > headers:
+            state = "UNKNOWN"
+
+        else:
+            state = "SYNCED"
+
+    except Exception:
+        # Never expose RPC exceptions or malformed response details.
+        # KeyboardInterrupt and SystemExit remain unsuppressed.
+        state = "UNKNOWN"
+
+    out(f"Node synchronization: {state}")
+    return state
+
+
+
+def recovery_operational_diagnostic(
+    path, *, node_rpc=None, check_node=False, out=print
+):
+    """Report operational conditions without acquiring recovery leases."""
+    from datetime import datetime, timezone
+    from .pool_recovery_supervisor import eligible_sessions
+    from .pool_recovery_runner import LEASE_NAME
+
+    state = "UNKNOWN"
+    lease_state = "UNKNOWN"
+    count = 0
+
+    try:
+        conn = database.connect_readonly(path)
+
+        try:
+            count = len(eligible_sessions(conn))
+
+            lease = conn.execute(
+                "SELECT owner_token,expires_at "
+                "FROM pool_recovery_leases WHERE lease_name=?",
+                (LEASE_NAME,),
+            ).fetchone()
+
+            if lease is None or lease["owner_token"] is None:
+                lease_state = "AVAILABLE"
+            else:
+                expiry = lease["expires_at"]
+
+                if not isinstance(expiry, str):
+                    raise ValueError("Invalid lease expiry")
+
+                expiry_time = datetime.fromisoformat(
+                    expiry.replace("Z", "+00:00")
+                )
+
+                if expiry_time.tzinfo is None:
+                    raise ValueError("Naive lease expiry")
+
+                now = datetime.now(timezone.utc)
+
+                lease_state = (
+                    "BUSY" if expiry_time > now
+                    else "AVAILABLE"
+                )
+
+        finally:
+            conn.close()
+
+    except Exception:
+        # Unknown database state must never imply availability.
+        out("Recovery lease availability: UNKNOWN")
+        out("Session eligibility: UNKNOWN")
+        out("Node synchronization: UNKNOWN")
+        out("Operational readiness: UNKNOWN")
+        return "UNKNOWN"
+
+    out(f"Recovery lease availability: {lease_state}")
+    out(f"Session eligibility: {count}")
+
+    if check_node and node_rpc is not None:
+        sync = recovery_node_sync_diagnostic(node_rpc, out)
+    else:
+        sync = "UNKNOWN"
+        out("Node synchronization: UNKNOWN")
+
+    if sync == "UNSYNCED":
+        state = "UNSYNCED"
+    elif lease_state == "BUSY":
+        state = "BUSY"
+    elif lease_state != "AVAILABLE" or sync != "SYNCED":
+        state = "UNKNOWN"
+    elif count == 0:
+        state = "IDLE"
+    else:
+        state = "READY"
+
+    out(f"Operational readiness: {state}")
+    return state
+
+
 def recovery_command(
     path, command, out=print, *, limit=25, authorize=False,
     rpc=None, check_node=False, node_rpc=None,
+    diagnostics=False,
 ):
     if command == "preflight":
         result = offline_recovery_preflight(
@@ -116,12 +251,23 @@ def recovery_command(
             report_offline_rpc=not check_node,
         )
 
-        if result != 0 or not check_node:
+        if result != 0:
             return result
+
+        if not check_node:
+            if diagnostics:
+                recovery_operational_diagnostic(path, out=out)
+            return 0
 
         if node_rpc is None:
             out("RPC connectivity: FAILED")
             out("Recovery readiness: DEGRADED")
+
+            if diagnostics:
+                recovery_operational_diagnostic(
+                    path, check_node=True, out=out
+                )
+
             return 2
 
         result = recovery_node_connectivity(node_rpc, out)
@@ -130,6 +276,14 @@ def recovery_command(
             out("Recovery readiness: READY")
         else:
             out("Recovery readiness: DEGRADED")
+
+        if diagnostics:
+            recovery_operational_diagnostic(
+                path,
+                node_rpc=node_rpc if result == 0 else None,
+                check_node=True,
+                out=out,
+            )
 
         return result
 

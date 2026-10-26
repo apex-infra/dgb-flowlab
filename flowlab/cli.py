@@ -131,6 +131,7 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
     rsub.add_parser("status")
     preflight = rsub.add_parser("preflight")
     preflight.add_argument("--check-node", action="store_true")
+    preflight.add_argument("--diagnostics", action="store_true")
     rsub.add_parser("schedules")
     h = rsub.add_parser("history")
     h.add_argument("--limit", type=int, default=25)
@@ -228,6 +229,7 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
             rpc=recovery_rpc,
             check_node=getattr(a, "check_node", False),
             node_rpc=preflight_node_rpc,
+            diagnostics=getattr(a, "diagnostics", False),
         )
 
     if a.cmd in ("watch", "serve"):
