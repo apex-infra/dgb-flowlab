@@ -248,7 +248,7 @@ def mixer_lab_sessions_snapshot(path, *, limit=50):
 
 
 
-def mixer_lab_configuration_actions(path):
+def mixer_lab_configuration_actions(path, rpc=None):
     """Development-only pool/session setup; no wallet RPC."""
     import re
     from . import db
@@ -337,9 +337,78 @@ def mixer_lab_configuration_actions(path):
             "financial_actions_authorized": False,
         }
 
+
+    def complete_registration(body):
+        from .pool_registration import register_participant
+
+        pool_id = identifier(body.get("pool_id"))
+        session_id = identifier(body.get("session_id"))
+        payouts = body.get("payouts")
+
+        if rpc is None or not callable(
+            getattr(rpc, "validate_address", None)
+        ):
+            raise ValueError(
+                "DigiByte address-validation RPC unavailable"
+            )
+
+        if not isinstance(payouts, list):
+            raise ValueError("Payout instructions must be a list")
+
+        # Never echo payout addresses in responses or errors.
+        if not 1 <= len(payouts) <= 10:
+            raise ValueError("Expected 1-10 payout instructions")
+
+        if any(
+            not isinstance(item, dict)
+            or set(item) != {"address", "allocation_bps"}
+            or not isinstance(item["address"], str)
+            or not 1 <= len(item["address"]) <= 128
+            for item in payouts
+        ):
+            raise ValueError("Invalid payout instruction format")
+
+        existing_database()
+        conn = db.connect(path)
+
+        try:
+            row = conn.execute(
+                """
+                SELECT fee_basis_points
+                FROM pool_sessions
+                WHERE id = ? AND pool_id = ?
+                """,
+                (session_id, pool_id),
+            ).fetchone()
+
+            if row is None:
+                raise ValueError("Existing session not found")
+
+            result = register_participant(
+                conn,
+                rpc,
+                pool_id=pool_id,
+                session_id=session_id,
+                payouts=payouts,
+                fee_basis_points=row["fee_basis_points"],
+                existing_session=True,
+            )
+        finally:
+            conn.close()
+
+        return {
+            "registered": True,
+            "pool_id": result["pool_id"],
+            "session_id": result["session_id"],
+            "payout_count": result["payout_count"],
+            "registration_sealed": True,
+            "financial_actions_authorized": False,
+        }
+
     return {
         "mixer_create_pool": new_pool,
         "mixer_create_session": new_session,
+        "mixer_complete_registration": complete_registration,
     }
 
 
@@ -368,7 +437,7 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
 
     if mixer_configuration_enabled:
         ctl.actions.update(
-            mixer_lab_configuration_actions(mixer_path)
+            mixer_lab_configuration_actions(mixer_path, rpc)
         )
 
     token = secrets.token_urlsafe(24)

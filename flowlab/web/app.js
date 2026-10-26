@@ -296,6 +296,89 @@ $("mixer-session-form").addEventListener(
   "submit", mixerCreateSession
 );
 
+
+async function mixerCompleteRegistration(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+
+  if (!form.reportValidity()) return;
+
+  const body = mixerFormBody(form);
+  const lines = body.payouts
+    .split(/\\r?\\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  if (lines.length < 1 || lines.length > 10) {
+    toast("Registration requires 1-10 payout addresses", true);
+    return;
+  }
+
+  const payouts = [];
+
+  for (const line of lines) {
+    const parts = line.split(",");
+
+    if (parts.length !== 2) {
+      toast("Use address,allocation_bps on each line", true);
+      return;
+    }
+
+    const address = parts[0].trim();
+    const amount = parts[1].trim();
+
+    if (
+      !address ||
+      !/^\\d+$/.test(amount) ||
+      Number(amount) < 1 ||
+      Number(amount) > 10000
+    ) {
+      toast("Invalid address or allocation format", true);
+      return;
+    }
+
+    payouts.push({
+      address,
+      allocation_bps: Number(amount),
+    });
+  }
+
+  const total = payouts.reduce(
+    (sum, item) => sum + item.allocation_bps, 0
+  );
+
+  if (total !== 10000) {
+    toast("Payout allocations must total exactly 10000", true);
+    return;
+  }
+
+  if (new Set(payouts.map(item => item.address)).size !== payouts.length) {
+    toast("Duplicate payout addresses are not allowed", true);
+    return;
+  }
+
+  body.payouts = payouts;
+
+  if (!window.confirm(
+    "Seal registration permanently? Payout instructions cannot be changed."
+  )) {
+    return;
+  }
+
+  if (await act(
+    "mixer_complete_registration",
+    body,
+    "Participant registration sealed successfully"
+  )) {
+    form.reset();
+    await pollMixerLab();
+  }
+}
+
+$("mixer-registration-form").addEventListener(
+  "submit", mixerCompleteRegistration
+);
+
 function renderMixerSessions(payload) {
   const status = $("mixer-sessions-status");
   const target = $("mixer-sessions");

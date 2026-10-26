@@ -44,6 +44,127 @@ class RegistrationTests(unittest.TestCase):
             **kwargs,
         )
 
+
+    def test_complete_existing_session_atomically(self):
+        pool_ledger.create_session(
+            self.conn,
+            pool_id="test-pool",
+            session_id="existing-session",
+            fee_basis_points=100,
+        )
+
+        result = pool_registration.register_participant(
+            self.conn,
+            self.rpc,
+            pool_id="test-pool",
+            session_id="existing-session",
+            payouts=[
+                {"address": "address-A", "allocation_bps": 6000},
+                {"address": "address-B", "allocation_bps": 4000},
+            ],
+            fee_basis_points=100,
+            existing_session=True,
+        )
+
+        self.assertEqual(result["payout_count"], 2)
+
+        seals = self.conn.execute(
+            "SELECT COUNT(*) FROM pool_registration_seals "
+            "WHERE session_id='existing-session'"
+        ).fetchone()[0]
+
+        self.assertEqual(seals, 1)
+
+    def test_existing_registration_invalid_rpc_is_atomic(self):
+        pool_ledger.create_session(
+            self.conn,
+            pool_id="test-pool",
+            session_id="existing-session",
+            fee_basis_points=100,
+        )
+
+        self.rpc.invalid = "invalid-address"
+
+        with self.assertRaises(ValueError):
+            pool_registration.register_participant(
+                self.conn,
+                self.rpc,
+                pool_id="test-pool",
+                session_id="existing-session",
+                payouts=[
+                    {
+                        "address": "invalid-address",
+                        "allocation_bps": 10000,
+                    }
+                ],
+                fee_basis_points=100,
+                existing_session=True,
+            )
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM pool_payout_instructions "
+                "WHERE session_id='existing-session'"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_existing_registration_fee_cannot_change(self):
+        pool_ledger.create_session(
+            self.conn,
+            pool_id="test-pool",
+            session_id="existing-session",
+            fee_basis_points=100,
+        )
+
+        with self.assertRaises(ValueError):
+            pool_registration.register_participant(
+                self.conn,
+                self.rpc,
+                pool_id="test-pool",
+                session_id="existing-session",
+                payouts=[
+                    {"address": "address-A", "allocation_bps": 10000}
+                ],
+                fee_basis_points=500,
+                existing_session=True,
+            )
+
+    def test_existing_registration_cannot_be_resealed(self):
+        pool_ledger.create_session(
+            self.conn,
+            pool_id="test-pool",
+            session_id="existing-session",
+            fee_basis_points=100,
+        )
+
+        kwargs = {
+            "pool_id": "test-pool",
+            "session_id": "existing-session",
+            "payouts": [
+                {"address": "address-A", "allocation_bps": 10000}
+            ],
+            "fee_basis_points": 100,
+            "existing_session": True,
+        }
+
+        pool_registration.register_participant(
+            self.conn, self.rpc, **kwargs
+        )
+
+        with self.assertRaises(ValueError):
+            pool_registration.register_participant(
+                self.conn, self.rpc, **kwargs
+            )
+
+        self.assertEqual(
+            self.conn.execute(
+                "SELECT COUNT(*) FROM pool_payout_instructions "
+                "WHERE session_id='existing-session'"
+            ).fetchone()[0],
+            1,
+        )
+
     def test_valid_registration(self):
         result = self.register([
             {"address": "address-A", "allocation_bps": 6000},

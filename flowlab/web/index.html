@@ -132,6 +132,43 @@
       </label>
       <button type="submit">Create Session</button>
     </form>
+
+    <form id="mixer-registration-form" autocomplete="off">
+      <h3>Complete Participant Registration</h3>
+      <p class="mute">
+        Enter 1-10 DigiByte payout addresses with integer
+        allocations in basis points. Total must equal 10000.
+        Registration is permanent once sealed.
+      </p>
+
+      <label>Pool ID
+        <input name="pool_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+"
+               placeholder="flab_research_01">
+      </label>
+
+      <label>Existing Session ID
+        <input name="session_id" required maxlength="64"
+               pattern="[A-Za-z0-9_-]+"
+               placeholder="flab_session_01">
+      </label>
+
+      <label>Payout instructions
+        <textarea name="payouts" required rows="5"
+          spellcheck="false"
+          placeholder="DGB_ADDRESS_1,6000&#10;DGB_ADDRESS_2,4000"
+          aria-describedby="mixer-registration-help"></textarea>
+      </label>
+
+      <p id="mixer-registration-help" class="mute">
+        One address and allocation per line, separated by a
+        comma. Example: address,10000 for a 100% allocation.
+      </p>
+
+      <button type="submit">
+        Validate and Seal Registration
+      </button>
+    </form>
   </section>
 
   <section class="mixer-session-panel">

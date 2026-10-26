@@ -21,6 +21,7 @@ def register_participant(
     session_id,
     payouts,
     fee_basis_points=DEFAULT_FEE_BPS,
+    existing_session=False,
 ):
     """Atomically register a session with immutable payout instructions."""
 
@@ -75,6 +76,16 @@ def register_participant(
     if total_bps != 10_000:
         raise ValueError("Payout allocations must total 100%")
 
+    if type(existing_session) is not bool:
+        raise ValueError("Invalid registration mode")
+
+    if rpc is None or not callable(
+        getattr(rpc, "validate_address", None)
+    ):
+        raise ValueError(
+            "DigiByte address-validation RPC required"
+        )
+
     # Validate before opening a write transaction.
     # Any RPC failure leaves the database unchanged.
     for address, _ in normalized:
@@ -87,15 +98,66 @@ def register_participant(
 
     # Session, payout instructions and completion seal must commit together.
     with db.tx(conn):
-        conn.execute(
-            """
-            INSERT INTO pool_sessions(
-                id, pool_id, fee_basis_points, created_at
+        if existing_session:
+            row = conn.execute(
+                """
+                SELECT s.state AS session_state,
+                       s.fee_basis_points,
+                       p.state AS pool_state
+                FROM pool_sessions s
+                JOIN pools p ON p.id = s.pool_id
+                WHERE s.id = ? AND s.pool_id = ?
+                """,
+                (session_id, pool_id),
+            ).fetchone()
+
+            if row is None:
+                raise ValueError("Existing session not found")
+
+            if row["pool_state"] != "PAUSED":
+                raise ValueError(
+                    "Registration requires a PAUSED pool"
+                )
+
+            if row["session_state"] != "REGISTERED":
+                raise ValueError("Session state not eligible")
+
+            if row["fee_basis_points"] != fee_basis_points:
+                raise ValueError(
+                    "Existing session fee terms must match"
+                )
+
+            seal = conn.execute(
+                """
+                SELECT 1 FROM pool_registration_seals
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            ).fetchone()
+
+            instructions = conn.execute(
+                """
+                SELECT 1 FROM pool_payout_instructions
+                WHERE session_id = ?
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+
+            if seal is not None or instructions is not None:
+                raise ValueError(
+                    "Registration already started or finalized"
+                )
+        else:
+            conn.execute(
+                """
+                INSERT INTO pool_sessions(
+                    id, pool_id, fee_basis_points, created_at
+                )
+                VALUES (?, ?, ?, ?)
+                """,
+                (session_id, pool_id, fee_basis_points, now),
             )
-            VALUES (?, ?, ?, ?)
-            """,
-            (session_id, pool_id, fee_basis_points, now),
-        )
 
         for position, (address, allocation) in enumerate(
             normalized, start=1

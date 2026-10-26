@@ -503,6 +503,224 @@ class WebReadTests(WebBase):
 
         self.assertEqual(status, 403)
 
+
+    def test_mixer_registration_requires_configuration_mode(self):
+        self.start()
+
+        status, response = self.do(
+            "mixer_complete_registration",
+            {
+                "pool_id": "test_pool",
+                "session_id": "test_session",
+                "payouts": [
+                    {"address": "address-A", "allocation_bps": 10000}
+                ],
+            },
+        )
+
+        self.assertEqual(status, 404)
+        self.assertEqual(response["error"], "unknown action")
+
+    def test_mixer_registration_frontend_contract(self):
+        self.start()
+
+        page = self.get("/")[2].decode()
+        self.assertIn('id="mixer-registration-form"', page)
+
+        status, _, script = self.get("/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"mixer_complete_registration", script)
+
+    def test_mixer_registration_missing_rpc_fails_closed(self):
+        import os
+        import sqlite3
+
+        self.make()
+
+        mixer = os.path.join(
+            self.dir.name,
+            "mixerlab-dev.db",
+        )
+
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        self.serve(mixer_db=mixer)
+
+        status, response = self.do(
+            "mixer_complete_registration",
+            {
+                "pool_id": "test_pool",
+                "session_id": "test_session",
+                "payouts": [
+                    {"address": "address-A", "allocation_bps": 10000}
+                ],
+            },
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn(
+            "RPC unavailable",
+            response["error"],
+        )
+
+
+    def test_mixer_registration_complete_dashboard_flow(self):
+        import os
+        import sqlite3
+
+        from flowlab import db
+        from flowlab.pool_ledger import create_pool, create_session
+
+        class RegistrationRPC:
+            def __init__(self):
+                self.validated = []
+
+            def validate_address(self, address):
+                self.validated.append(address)
+                return {
+                    "isvalid": address in ("address-A", "address-B")
+                }
+
+        self.make()
+
+        mixer = os.path.join(
+            self.dir.name,
+            "mixerlab-dev.db",
+        )
+
+        source = sqlite3.connect(self.db)
+        target = sqlite3.connect(mixer)
+
+        try:
+            source.backup(target)
+        finally:
+            source.close()
+            target.close()
+
+        conn = db.connect(mixer)
+
+        try:
+            create_pool(
+                conn,
+                pool_id="registration_pool",
+                reserve_wallet="research_reserve",
+                fee_wallet="research_fees",
+            )
+
+            create_session(
+                conn,
+                pool_id="registration_pool",
+                session_id="registration_session",
+                fee_basis_points=100,
+            )
+        finally:
+            conn.close()
+
+        rpc = RegistrationRPC()
+        self.serve(rpc=rpc, mixer_db=mixer)
+
+        request = {
+            "pool_id": "registration_pool",
+            "session_id": "registration_session",
+            "payouts": [
+                {
+                    "address": "address-A",
+                    "allocation_bps": 6000,
+                },
+                {
+                    "address": "address-B",
+                    "allocation_bps": 4000,
+                },
+            ],
+        }
+
+        status, payload = self.do(
+            "mixer_complete_registration",
+            request,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["registered"])
+        self.assertTrue(payload["registration_sealed"])
+        self.assertEqual(payload["payout_count"], 2)
+        self.assertFalse(payload["financial_actions_authorized"])
+
+        self.assertEqual(
+            rpc.validated,
+            ["address-A", "address-B"],
+        )
+
+        sessions = json.loads(
+            self.get("/api/mixer-lab/sessions")[2]
+        )
+
+        self.assertEqual(sessions["status"], "AVAILABLE")
+        self.assertEqual(len(sessions["sessions"]), 1)
+
+        self.assertEqual(
+            sessions["sessions"][0]["lifecycle_state"],
+            "ADDRESS_REQUIRED",
+        )
+
+        # Registration must be immutable.
+        status, _ = self.do(
+            "mixer_complete_registration",
+            request,
+        )
+
+        self.assertEqual(status, 400)
+
+        conn = db.connect_readonly(mixer)
+
+        try:
+            sealed = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM pool_registration_seals
+                WHERE session_id = ?
+                """,
+                ("registration_session",),
+            ).fetchone()[0]
+
+            payouts = conn.execute(
+                """
+                SELECT payout_address, allocation_bps
+                FROM pool_payout_instructions
+                WHERE session_id = ?
+                ORDER BY position
+                """,
+                ("registration_session",),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        self.assertEqual(sealed, 1)
+        self.assertEqual(
+            [(row["payout_address"], row["allocation_bps"])
+             for row in payouts],
+            [("address-A", 6000), ("address-B", 4000)],
+        )
+
+        # The original experiment database stays untouched.
+        conn = db.connect_readonly(self.db)
+
+        try:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM pool_registration_seals"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            conn.close()
+
     def test_binds_to_loopback_only(self):
         self.start()
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")
