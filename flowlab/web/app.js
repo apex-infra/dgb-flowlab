@@ -243,6 +243,62 @@ function renderMixerLab(data) {
   details.append(operations);
 }
 
+
+function renderMixerSessions(payload) {
+  const status = $("mixer-sessions-status");
+  const target = $("mixer-sessions");
+  target.replaceChildren();
+
+  if (!payload || payload.status !== "AVAILABLE") {
+    status.textContent = "Participant telemetry unavailable.";
+    return;
+  }
+
+  const sessions = Array.isArray(payload.sessions)
+    ? payload.sessions : [];
+
+  status.textContent = sessions.length
+    ? `${sessions.length} session records · read-only`
+    : "No participant sessions recorded.";
+
+  if (payload.truncated) {
+    status.textContent += " · Showing first 50 records";
+  }
+
+  for (const session of sessions) {
+    const panel = mixerElement("section", "mixer-panel");
+
+    panel.append(mixerElement(
+      "h3", "mono", session.session_id || "Unknown session"
+    ));
+
+    const rows = [
+      ["Pool", session.pool_id],
+      ["Pool state", session.pool_state],
+      ["Session state", session.session_state],
+      ["Lifecycle", session.lifecycle_state],
+      ["Observations", session.observation_count],
+      ["Supported", session.supported],
+      ["Invalidated", session.invalidated],
+      ["Recheck required", session.recheck_required],
+      ["Research review",
+       session.research_review_ready ? "READY" : "NOT READY"],
+      ["Recovery", session.recovery_state],
+    ];
+
+    for (const [label, value] of rows) {
+      const row = mixerElement("div", "mixer-row");
+      row.append(
+        mixerElement("span", null, label),
+        mixerElement("strong", null,
+          value === undefined || value === null ? "UNKNOWN" : value)
+      );
+      panel.append(row);
+    }
+    target.append(panel);
+  }
+}
+
 async function pollMixerLab() {
   if (mixerLoading) return;
   mixerLoading = true;
@@ -257,10 +313,23 @@ async function pollMixerLab() {
     }
 
     renderMixerLab(await response.json());
+
+    const sessionResponse = await fetch(
+      "/api/mixer-lab/sessions", {cache: "no-store"}
+    );
+
+    if (!sessionResponse.ok) {
+      throw new Error("Session endpoint unavailable");
+    }
+
+    renderMixerSessions(await sessionResponse.json());
     mixerLastRefresh = Date.now();
   } catch (_) {
     $("mixer-status").textContent =
       "Mixer Lab connection unavailable.";
+    $("mixer-sessions-status").textContent =
+      "Participant telemetry unavailable.";
+    $("mixer-sessions").replaceChildren();
   } finally {
     mixerLoading = false;
   }

@@ -91,11 +91,13 @@ class WebBase(DashBase):
     use_chain = False
 
     def serve(self, rpc=None, wallets=("flab_a", "flab_b"), sleep=None, control=True,
-              db=None, builder=None, wallet_roles=None):
+              db=None, builder=None, wallet_roles=None,
+          mixer_db=None):
         self.srv = make_server(
             db or self.db, None, rpc, wallets, port=0,
             builder=builder, control=control, sleep=sleep,
             wallet_roles=wallet_roles,
+            mixer_db_path=mixer_db,
         )
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
@@ -249,6 +251,90 @@ class WebReadTests(WebBase):
             response["error"],
             "unknown action",
         )
+
+    def test_mixer_v2_empty_sessions(self):
+        self.start()
+        status, _, body = self.get("/api/mixer-lab/sessions")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "AVAILABLE")
+        self.assertEqual(payload["sessions"], [])
+        self.assertFalse(payload["authorization"]["financial_actions"])
+
+    def test_mixer_v2_session_telemetry_allowlist(self):
+        from flowlab import db
+        from flowlab.pool_ledger import create_pool, create_session
+
+        self.start()
+        conn = db.connect(self.db)
+        try:
+            create_pool(
+                conn, pool_id="research-pool",
+                reserve_wallet="reserve", fee_wallet="fees",
+            )
+            create_session(
+                conn, pool_id="research-pool",
+                session_id="research-session", fee_basis_points=500,
+            )
+        finally:
+            conn.close()
+
+        status, _, body = self.get("/api/mixer-lab/sessions")
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "AVAILABLE")
+        self.assertEqual(len(payload["sessions"]), 1)
+
+        session = payload["sessions"][0]
+        self.assertEqual(session["pool_id"], "research-pool")
+        self.assertEqual(session["session_id"], "research-session")
+        self.assertEqual(
+            session["lifecycle_state"], "REGISTRATION_REQUIRED"
+        )
+        self.assertEqual(session["observation_count"], 0)
+        self.assertFalse(session["research_review_ready"])
+
+        for forbidden in (
+            "deposit_address", "payout_address", "txid",
+            "wallet", "fee_basis_points", "observations",
+        ):
+            self.assertNotIn(forbidden, session)
+
+    def test_mixer_v2_independent_missing_database(self):
+        import os
+
+        missing = os.path.join(
+            self.dir.name, "separate-mixer.db"
+        )
+        self.make()
+        self.serve(mixer_db=missing)
+
+        status, _, body = self.get("/api/mixer-lab/sessions")
+        self.assertEqual(status, 200)
+        self.assertEqual(
+            json.loads(body)["status"], "UNAVAILABLE"
+        )
+        self.assertFalse(os.path.exists(missing))
+        self.assertEqual(self.get("/api/snapshot")[0], 200)
+
+    def test_mixer_v2_rejects_wrong_host(self):
+        self.start()
+        status, _, _ = self.get(
+            "/api/mixer-lab/sessions",
+            host="untrusted.example",
+        )
+        self.assertEqual(status, 403)
+
+    def test_mixer_v2_frontend_contract(self):
+        self.start()
+        page = self.get("/")[2].decode()
+        self.assertIn('id="mixer-sessions"', page)
+
+        status, _, body = self.get("/app.js")
+        self.assertEqual(status, 200)
+        self.assertIn(b"/api/mixer-lab/sessions", body)
+        self.assertIn(b"renderMixerSessions", body)
+
     def test_binds_to_loopback_only(self):
         self.start()
         self.assertEqual(self.srv.server_address[0], "127.0.0.1")

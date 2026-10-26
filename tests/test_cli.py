@@ -208,6 +208,33 @@ class CliFlow(unittest.TestCase):
         self.assertIn("finished", text)
         self.assertEqual(len([t for t in self.chain.txs.values() if t["inputs"]]), 4)
 
+    def test_serve_accepts_separate_mixer_database(self):
+        """CLI must forward the optional Mixer Lab database path."""
+        from unittest.mock import patch
+
+        with patch("flowlab.webdash.serve", return_value=0) as serve:
+            result = main(
+                [
+                    "serve",
+                    "--read-only",
+                    "--mixer-db",
+                    "/tmp/flowlab-mixer-test.db",
+                ],
+                db=self.db,
+                rpc=self.chain,
+                out=lambda *_: None,
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            serve.call_args.kwargs["mixer_db_path"],
+            "/tmp/flowlab-mixer-test.db",
+        )
+        self.assertFalse(
+            serve.call_args.args[6]
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

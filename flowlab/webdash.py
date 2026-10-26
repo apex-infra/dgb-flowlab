@@ -162,8 +162,95 @@ def mixer_lab_snapshot(path):
         return unavailable
 
 
+
+def mixer_lab_sessions_snapshot(path, *, limit=50):
+    """Read-only allowlisted participant telemetry."""
+    from . import db
+    from .pool_recovery_cli import validate_recovery_database
+    from .pool_research import assess_research_session
+    from .pool_recovery_assessment import assess_session_recovery
+
+    authorization = {
+        "financial_actions": False,
+        "automatic_recovery": False,
+        "transaction_broadcast": False,
+    }
+
+    unavailable = {
+        "status": "UNAVAILABLE",
+        "read_only": True,
+        "sessions": [],
+        "truncated": False,
+        "authorization": authorization,
+    }
+
+    if type(limit) is not int or not 1 <= limit <= 100:
+        return unavailable
+
+    if not validate_recovery_database(path):
+        return unavailable
+
+    try:
+        conn = db.connect_readonly(path)
+        try:
+            rows = conn.execute(
+                """
+                SELECT s.id AS session_id,
+                       s.pool_id,
+                       s.state AS session_state,
+                       p.state AS pool_state
+                FROM pool_sessions s
+                JOIN pools p ON p.id = s.pool_id
+                ORDER BY s.created_at DESC, s.id
+                LIMIT ?
+                """,
+                (limit + 1,),
+            ).fetchall()
+
+            records = []
+            for row in rows[:limit]:
+                research = assess_research_session(
+                    conn, pool_id=row["pool_id"],
+                    session_id=row["session_id"],
+                )
+                recovery = assess_session_recovery(
+                    conn, pool_id=row["pool_id"],
+                    session_id=row["session_id"],
+                )
+
+                records.append({
+                    "pool_id": row["pool_id"],
+                    "session_id": row["session_id"],
+                    "pool_state": row["pool_state"],
+                    "session_state": row["session_state"],
+                    "lifecycle_state": research["lifecycle_state"],
+                    "observation_count": research["observation_count"],
+                    "supported": research["supported_observations"],
+                    "invalidated": research["invalidated_observations"],
+                    "recheck_required": research["recheck_required"],
+                    "research_review_ready": bool(
+                        research["research_review_ready"]
+                    ),
+                    "recovery_state": recovery["state"],
+                })
+        finally:
+            conn.close()
+
+        return {
+            "status": "AVAILABLE",
+            "read_only": True,
+            "sessions": records,
+            "truncated": len(rows) > limit,
+            "authorization": authorization,
+        }
+    except Exception:
+        return unavailable
+
+
 def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None,
-                control=True, sleep=None, wallet_roles=None):
+                control=True, sleep=None, wallet_roles=None,
+                mixer_db_path=None):
+    mixer_path = mixer_db_path if mixer_db_path is not None else db_path
     wallet_roles = {
         k: list(v)
         for k, v in (wallet_roles or {}).items()
@@ -265,7 +352,11 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
                                         "runner": {"active": ctl.active(), "exp": ctl.exp},
                                         "log": list(ctl.log), "server_time": now.isoformat()})
             if path == "/api/mixer-lab":
-                return self._json(200, mixer_lab_snapshot(db_path))
+                return self._json(200, mixer_lab_snapshot(mixer_path))
+            if path == "/api/mixer-lab/sessions":
+                return self._json(
+                    200, mixer_lab_sessions_snapshot(mixer_path)
+                )
             if path == "/api/export":
                 q = dict(p.split("=", 1) for p in query.split("&") if "=" in p)
                 fmt = q.get("fmt", "json")
@@ -325,10 +416,11 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
 
 
 def serve(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=None, control=True,
-          out=print, wallet_roles=None):
+          out=print, wallet_roles=None, mixer_db_path=None):
     srv = make_server(
         db_path, exp_id, rpc, wallets, port, builder, control,
         wallet_roles=wallet_roles,
+        mixer_db_path=mixer_db_path,
     )
     mode = "full control" if control else "read-only"
     out(f"dashboard: http://127.0.0.1:{srv.server_address[1]}   ({mode}; this computer only; Ctrl+C to stop)")

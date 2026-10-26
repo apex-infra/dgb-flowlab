@@ -126,6 +126,8 @@ def main(argv=None, rpc=None, out=print, sleep=time.sleep, db=DB, local_path=LOC
     s = sub.add_parser("watch"); s.add_argument("exp", nargs="?"); s.add_argument("--once", action="store_true")
     s = sub.add_parser("serve"); s.add_argument("exp", nargs="?"); s.add_argument("--port", type=int, default=8787)
     s.add_argument("--read-only", action="store_true")
+    s.add_argument("--mixer-db", default=None,
+                   help="Existing Mixer Lab V7 database (read-only)")
     r = sub.add_parser("recovery")
     rsub = r.add_subparsers(dest="recovery_cmd", required=True)
     rsub.add_parser("status")
@@ -279,7 +281,8 @@ def _watch(a, rpc, out, sleep, db, local_path):
             return webdash.serve(
                 db, a.exp, rpc, wallets, a.port, builder, not a.read_only, out,
                 wallet_roles=wallet_roles,
-            )
+                                   mixer_db_path=a.mixer_db,
+                   )
         return dashboard.watch(db, a.exp, rpc, wallets, out, sleep, once=a.once,
                                width=shutil.get_terminal_size((100, 30)).columns - 1)
     except sqlite3.OperationalError:
