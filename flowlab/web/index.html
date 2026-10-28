@@ -85,6 +85,80 @@
     Mixer Lab diagnostics not loaded.
   </div>
 
+
+  <section id="mixer-research-panel" class="mixer-research-panel">
+    <div class="mixer-research-heading">
+      <div>
+        <h3>Synthetic Research Experiments</h3>
+        <p>Deterministic UTXO simulations · No wallet operations</p>
+      </div>
+      <span class="mixer-badge">SIMULATION ONLY</span>
+    </div>
+
+    <form id="mixer-research-form" autocomplete="off">
+      <div class="mixer-research-fields">
+        <label>Experiment seeds
+          <input name="seeds" type="text" required
+            value="42,2049,9999"
+            placeholder="42,2049,9999">
+        </label>
+
+        <label>Transactions per seed
+          <input name="transaction_count" type="number"
+            min="1" max="1000" step="1" value="100" required>
+        </label>
+
+        <label>Maximum transaction inputs
+          <input name="max_inputs" type="number"
+            min="3" max="12" step="1" value="6" required>
+        </label>
+
+        <label>Single-owner weight (%)
+          <input name="single_owner" type="number"
+            min="0" max="100" step="1" value="40" required>
+        </label>
+
+        <label>Collaborative weight (%)
+          <input name="collaborative" type="number"
+            min="0" max="100" step="1" value="30" required>
+        </label>
+
+        <label>Mixed-ownership weight (%)
+          <input name="mixed_ownership" type="number"
+            min="0" max="100" step="1" value="30" required>
+        </label>
+      </div>
+
+      <label class="mixer-research-check">
+        <input name="matched_input_profile" type="checkbox" checked>
+        Match input profiles between scenarios
+      </label>
+
+      <div class="mixer-research-actions">
+        <button type="submit" id="mixer-research-run">
+          Run Synthetic Experiment
+        </button>
+        <span id="mixer-research-status"
+          role="status" aria-live="polite">
+          Ready to run a local synthetic campaign.
+        </span>
+      </div>
+    </form>
+
+    <div id="mixer-research-results" hidden>
+      <div class="mixer-research-result-heading">
+        <h3>Research Results</h3>
+        <span class="mixer-badge">SYNTHETIC DATA</span>
+      </div>
+
+      <div id="mixer-research-metrics"
+        class="mixer-research-metrics"></div>
+
+      <div id="mixer-research-scenarios"
+        class="mixer-research-scenarios"></div>
+    </div>
+  </section>
+
   <div id="mixer-overview" class="mixer-overview"></div>
   <div id="mixer-details" class="mixer-details"></div>
 

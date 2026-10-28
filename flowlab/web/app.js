@@ -2538,3 +2538,207 @@ setInterval(() => {
     pollMixerLab();
   }
 }, 10000);
+
+
+// ------------------------------------------------------------
+// Mixer Lab Research V1 — synthetic experiment interface
+// ------------------------------------------------------------
+
+function initMixerResearchForm() {
+  const form = document.getElementById("mixer-research-form");
+  if (!form) return;
+
+  const status = document.getElementById("mixer-research-status");
+  const button = document.getElementById("mixer-research-run");
+  const results = document.getElementById("mixer-research-results");
+  const metrics = document.getElementById("mixer-research-metrics");
+  const scenarios = document.getElementById("mixer-research-scenarios");
+
+  // The existing server rejects all POST actions in read-only mode.
+  // Hide execution controls there, rather than presenting a broken form.
+  if (!CONTROL) {
+    form.hidden = true;
+    status.textContent = "Research execution is disabled in read-only mode.";
+    return;
+  }
+
+  const integer = (value, minimum, maximum, label) => {
+    const text = String(value).trim();
+    if (!/^(0|[1-9][0-9]*)$/.test(text)) {
+      throw new Error(label + " must be a whole number.");
+    }
+    const number = Number(text);
+    if (!Number.isSafeInteger(number) || number < minimum ||
+        number > maximum) {
+      throw new Error(label + " is outside its permitted range.");
+    }
+    return number;
+  };
+
+  const metricText = value => {
+    if (value === null || value === undefined) return "N/A";
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) return "N/A";
+      return Number.isInteger(value) ?
+        value.toLocaleString() : value.toFixed(4);
+    }
+    return String(value);
+  };
+
+  const addMetric = (container, label, value) => {
+    const box = document.createElement("div");
+    box.className = "mixer-research-metric";
+
+    const title = document.createElement("span");
+    title.textContent = label.replaceAll("_", " ");
+
+    const number = document.createElement("strong");
+    number.textContent = metricText(value);
+
+    box.append(title, number);
+    container.appendChild(box);
+  };
+
+  const addSection = (container, title, values) => {
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      return;
+    }
+
+    const heading = document.createElement("h4");
+    heading.textContent = title;
+    container.appendChild(heading);
+
+    const grid = document.createElement("div");
+    grid.className = "mixer-research-metrics";
+
+    Object.entries(values).forEach(([key, value]) => {
+      if (value === null || typeof value !== "object") {
+        addMetric(grid, key, value);
+      }
+    });
+
+    container.appendChild(grid);
+  };
+
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (button.disabled) return;
+
+    results.hidden = true;
+    metrics.replaceChildren();
+    scenarios.replaceChildren();
+
+    let request;
+
+    try {
+      const fields = new FormData(form);
+      const rawSeeds = String(fields.get("seeds") || "").split(",");
+
+      if (rawSeeds.length < 1 || rawSeeds.length > 8) {
+        throw new Error("Enter between 1 and 8 seeds.");
+      }
+
+      const seeds = rawSeeds.map(value =>
+        integer(value, 0, Number.MAX_SAFE_INTEGER, "Seed")
+      );
+
+      if (new Set(seeds).size !== seeds.length) {
+        throw new Error("Experiment seeds must be unique.");
+      }
+
+      const weights = {
+        single_owner: integer(
+          fields.get("single_owner"), 0, 100, "Single-owner weight"
+        ),
+        collaborative: integer(
+          fields.get("collaborative"), 0, 100, "Collaborative weight"
+        ),
+        mixed_ownership: integer(
+          fields.get("mixed_ownership"), 0, 100, "Mixed weight"
+        )
+      };
+
+      if (Object.values(weights).reduce((a, b) => a + b, 0) !== 100) {
+        throw new Error("Scenario weights must total exactly 100%.");
+      }
+
+      request = {
+        seeds,
+        transaction_count: integer(
+          fields.get("transaction_count"), 1, 1000, "Transaction count"
+        ),
+        max_inputs: integer(
+          fields.get("max_inputs"), 3, 12, "Maximum inputs"
+        ),
+        scenario_weights: weights,
+        matched_input_profile: fields.has("matched_input_profile")
+      };
+
+    } catch (error) {
+      status.textContent = error.message;
+      return;
+    }
+
+    button.disabled = true;
+    status.textContent = "Running synthetic research campaign...";
+
+    try {
+      // api() uses the existing authenticated /api/do/ transport.
+      const response = await api("mixer-research-run", request);
+
+      if (response.kind !== "mixer_dashboard_research_result" ||
+          response.execution !== "simulation_only") {
+        throw new Error("Unexpected research response.");
+      }
+
+      addMetric(
+        metrics, "Transactions",
+        response.aggregate.transaction_count
+      );
+      addMetric(
+        metrics, "Predictions",
+        response.aggregate.prediction_count
+      );
+      addMetric(
+        metrics, "Seed count",
+        response.aggregate.seed_count
+      );
+
+      addSection(metrics, "Aggregate counts", response.aggregate.counts);
+      addSection(metrics, "Aggregate metrics", response.aggregate.metrics);
+      addSection(
+        metrics, "Statistical precision",
+        response.statistics.precision
+      );
+
+      Object.entries(response.by_scenario || {}).forEach(([name, item]) => {
+        const panel = document.createElement("section");
+        panel.className = "mixer-research-scenario";
+        addSection(panel, name, {
+          transaction_count: item.transaction_count,
+          prediction_count: item.prediction_count
+        });
+        addSection(panel, "Counts", item.counts);
+        addSection(panel, "Metrics", item.metrics);
+        scenarios.appendChild(panel);
+      });
+
+      results.hidden = false;
+      status.textContent =
+        "Synthetic campaign complete. Results are simulation-only.";
+
+    } catch (error) {
+      status.textContent = "Research failed: " + error.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener(
+    "DOMContentLoaded", initMixerResearchForm, {once: true}
+  );
+} else {
+  initMixerResearchForm();
+}

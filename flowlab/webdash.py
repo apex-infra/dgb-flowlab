@@ -522,6 +522,12 @@ def make_server(db_path, exp_id=None, rpc=None, wallets=(), port=8787, builder=N
             mixer_lab_configuration_actions(mixer_path, rpc)
         )
 
+    # Synthetic research is isolated from operational Mixer Lab actions.
+    # Existing POST authentication, origin and size checks apply.
+    if control:
+        from .mixer_research_api import run_research_request
+        ctl.actions["mixer-research-run"] = run_research_request
+
     token = secrets.token_urlsafe(24)
     cache = {"at": 0.0, "value": None}
     infrastructure_cache = {"at": 0.0, "value": None}

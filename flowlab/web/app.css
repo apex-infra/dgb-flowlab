@@ -811,3 +811,119 @@ a.btn:hover{color:var(--paper)}
 @media (max-width: 620px) {
   .mixer-session-grid { grid-template-columns: 1fr; }
 }
+
+
+/* Mixer Lab Research V1 — synthetic experiment workspace */
+
+.mixer-research-panel {
+  margin: 1.25rem 0;
+  padding: 1.25rem;
+  background: #121b26;
+  border: 1px solid #294258;
+  border-radius: 12px;
+}
+
+.mixer-research-heading,
+.mixer-research-result-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.mixer-research-heading h3,
+.mixer-research-result-heading h3 {
+  margin: 0 0 .4rem;
+}
+
+.mixer-research-heading p {
+  margin: 0;
+  color: #92a9bc;
+}
+
+.mixer-research-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: .9rem;
+  margin-top: 1.25rem;
+}
+
+.mixer-research-fields label {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+}
+
+.mixer-research-fields input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.mixer-research-check {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  margin: 1.2rem 0;
+}
+
+.mixer-research-actions {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+#mixer-research-status {
+  color: #9bb5ca;
+}
+
+#mixer-research-results {
+  margin-top: 1.5rem;
+  border-top: 1px solid #294258;
+  padding-top: 1.2rem;
+}
+
+.mixer-research-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: .75rem;
+  margin: 1rem 0;
+}
+
+.mixer-research-metric,
+.mixer-research-scenario {
+  background: #192633;
+  border: 1px solid #30475c;
+  border-radius: 8px;
+  padding: .85rem;
+}
+
+.mixer-research-metric span {
+  display: block;
+  font-size: .82rem;
+  color: #a5b9cb;
+  text-transform: capitalize;
+}
+
+.mixer-research-metric strong {
+  display: block;
+  margin-top: .3rem;
+  font-size: 1.2rem;
+  overflow-wrap: anywhere;
+}
+
+.mixer-research-scenarios {
+  display: grid;
+  gap: 1rem;
+  margin-top: 1.2rem;
+}
+
+.mixer-research-scenario h4 {
+  margin: .5rem 0;
+  text-transform: capitalize;
+}
+
+.mixer-research-panel [hidden] {
+  display: none !important;
+}
