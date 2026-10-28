@@ -249,5 +249,58 @@ class ResearchAPITests(unittest.TestCase):
         )
         self.assertFalse(graph["summary"]["truncated"])
 
+
+class ResearchAnalyticsContractTests(unittest.TestCase):
+
+    def setUp(self):
+        self.config = copy.deepcopy(CONFIG)
+
+    def test_classification_counts_exposed(self):
+        result = run_research_request(self.config)
+
+        self.assertEqual(
+            result["statistics"]["counts"],
+            result["aggregate"]["counts"],
+        )
+
+    def test_precision_distribution_exposed(self):
+        result = run_research_request(self.config)
+
+        precision = result["statistics"]["precision"]
+
+        for field in (
+            "micro",
+            "mean",
+            "population_stddev",
+            "minimum",
+            "maximum",
+            "defined_seeds",
+            "undefined_seeds",
+        ):
+            self.assertIn(field, precision)
+
+        self.assertEqual(
+            precision["defined_seeds"] +
+            precision["undefined_seeds"],
+            result["statistics"]["seed_count"],
+        )
+
+    def test_analytics_response_excludes_private_data(self):
+        import json
+
+        result = run_research_request(self.config)
+
+        encoded = json.dumps(result)
+
+        for forbidden in (
+            "ground_truth",
+            "utxo_owners",
+            "transaction_participants",
+            "participant_",
+            "scenario_schedule",
+            "configuration_sha256",
+        ):
+            self.assertNotIn(forbidden, encoded)
+
 if __name__ == "__main__":
     unittest.main()

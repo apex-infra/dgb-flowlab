@@ -180,6 +180,7 @@ def run_research_request(request):
         "statistics": {
             "seed_count": statistics["seed_count"],
             "total_predictions": statistics["total_predictions"],
+            "counts": dict(statistics["counts"]),
             "precision": dict(statistics["precision"]),
         },
     }

@@ -1091,3 +1091,147 @@ a.btn:hover{color:var(--paper)}
 .mixer-research-graph-panel[hidden] {
   display: none !important;
 }
+
+
+/* Mixer Lab Research V1 — analytics dashboard */
+
+.mixer-research-analytics {
+  margin: 1.5rem 0;
+  padding: 1.2rem;
+  background: #0d1824;
+  border: 1px solid #2d485f;
+  border-radius: 12px;
+}
+
+.mixer-analytics-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.mixer-analytics-heading h3 {
+  margin: 0 0 .4rem;
+}
+
+.mixer-analytics-heading p,
+.mixer-analytics-note {
+  color: #9eb4c7;
+  font-size: .85rem;
+}
+
+.mixer-analytics-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: .75rem;
+  margin: 1.2rem 0;
+}
+
+.mixer-analytics-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+}
+
+.mixer-analytics-card {
+  padding: 1rem;
+  margin: .8rem 0;
+  border: 1px solid #2a455c;
+  border-radius: 10px;
+  background: #142332;
+}
+
+.mixer-analytics-card h4 {
+  margin: 0 0 1rem;
+  color: #d4e6f3;
+}
+
+.mixer-analytics-stat {
+  padding: .7rem;
+  background: #1a2b3b;
+  border: 1px solid #304c62;
+  border-radius: 7px;
+}
+
+.mixer-analytics-stat span {
+  display: block;
+  color: #9db6ca;
+  font-size: .78rem;
+}
+
+.mixer-analytics-stat strong {
+  display: block;
+  margin-top: .3rem;
+  font-size: 1.1rem;
+  color: #e1f1fb;
+}
+
+#mixer-analytics-precision {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: .65rem;
+}
+
+.mixer-analytics-bar-row,
+.mixer-analytics-scenario {
+  margin: .8rem 0;
+}
+
+.mixer-analytics-bar-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: .8rem;
+  margin-bottom: .4rem;
+  color: #c0d7e7;
+  text-transform: capitalize;
+  font-size: .85rem;
+}
+
+.mixer-analytics-track {
+  width: 100%;
+  height: 12px;
+  background: #26394b;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.mixer-analytics-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 6px;
+  transition: width .35s ease;
+}
+
+.mixer-analytics-fill.positive {
+  background: #38d39f;
+}
+
+.mixer-analytics-fill.negative {
+  background: #f1847b;
+}
+
+.mixer-analytics-fill.scenario {
+  background: #57aef2;
+}
+
+.mixer-analytics-scenario small {
+  display: block;
+  margin-top: .4rem;
+  color: #92aabd;
+}
+
+.mixer-analytics-note {
+  margin-top: 1rem;
+  line-height: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mixer-analytics-fill {
+    transition: none;
+  }
+}
+
+.mixer-research-analytics[hidden] {
+  display: none !important;
+}

@@ -2867,6 +2867,166 @@ function renderMixerResearchGraph(graph) {
   panel.hidden = false;
 }
 
+
+// ------------------------------------------------------------
+// Mixer Lab Research V1 — analytics visualization
+// ------------------------------------------------------------
+
+function renderMixerResearchAnalytics(response) {
+  const root = document.getElementById("mixer-research-analytics");
+  const summaryBox = document.getElementById("mixer-analytics-summary");
+  const classification = document.getElementById(
+    "mixer-analytics-classification"
+  );
+  const precisionBox = document.getElementById(
+    "mixer-analytics-precision"
+  );
+  const scenarioBox = document.getElementById(
+    "mixer-analytics-scenarios"
+  );
+
+  if (!root || !summaryBox || !classification ||
+      !precisionBox || !scenarioBox) return;
+
+  summaryBox.replaceChildren();
+  classification.replaceChildren();
+  precisionBox.replaceChildren();
+  scenarioBox.replaceChildren();
+
+  const stats = response?.statistics;
+  const aggregate = response?.aggregate;
+
+  if (!stats || !aggregate || !stats.counts || !stats.precision) {
+    root.hidden = true;
+    return;
+  }
+
+  const counts = stats.counts;
+  const p = stats.precision;
+
+  const percent = value =>
+    typeof value === "number" && Number.isFinite(value) ?
+      (value * 100).toFixed(2) + "%" : "N/A";
+
+  const numeric = value =>
+    typeof value === "number" && Number.isFinite(value) ?
+      value.toLocaleString() : "N/A";
+
+  const card = (label, value) => {
+    const box = document.createElement("div");
+    box.className = "mixer-analytics-stat";
+
+    const title = document.createElement("span");
+    title.textContent = label;
+
+    const number = document.createElement("strong");
+    number.textContent = value;
+
+    box.append(title, number);
+    return box;
+  };
+
+  const bar = (label, value, max, tone) => {
+    const row = document.createElement("div");
+    row.className = "mixer-analytics-bar-row";
+
+    const heading = document.createElement("div");
+    heading.className = "mixer-analytics-bar-heading";
+
+    const name = document.createElement("span");
+    name.textContent = label;
+
+    const count = document.createElement("strong");
+    count.textContent = numeric(value);
+
+    heading.append(name, count);
+
+    const track = document.createElement("div");
+    track.className = "mixer-analytics-track";
+
+    const fill = document.createElement("div");
+    fill.className = "mixer-analytics-fill " + tone;
+
+    const valid = typeof value === "number" &&
+      Number.isFinite(value) && value >= 0 &&
+      typeof max === "number" && Number.isFinite(max) && max > 0;
+
+    fill.style.width = valid ?
+      Math.min(100, value / max * 100).toFixed(2) + "%" : "0%";
+
+    track.appendChild(fill);
+    row.append(heading, track);
+
+    return row;
+  };
+
+  summaryBox.append(
+    card("Predictions", numeric(aggregate.prediction_count)),
+    card("True positives", numeric(counts.tp)),
+    card("False positives", numeric(counts.fp)),
+    card("Micro precision", percent(p.micro))
+  );
+
+  const positiveTotal = Number(counts.tp || 0) +
+    Number(counts.fp || 0);
+
+  classification.append(
+    bar("True positives", counts.tp, positiveTotal, "positive"),
+    bar("False positives", counts.fp, positiveTotal, "negative")
+  );
+
+  precisionBox.append(
+    card("Micro precision", percent(p.micro)),
+    card("Mean seed precision", percent(p.mean)),
+    card("Population std. deviation", percent(p.population_stddev)),
+    card("Minimum seed precision", percent(p.minimum)),
+    card("Maximum seed precision", percent(p.maximum)),
+    card("Defined seeds", numeric(p.defined_seeds)),
+    card("Undefined seeds", numeric(p.undefined_seeds))
+  );
+
+  Object.entries(response.by_scenario || {}).forEach(([name, item]) => {
+    const panel = document.createElement("div");
+    panel.className = "mixer-analytics-scenario";
+
+    const heading = document.createElement("div");
+    heading.className = "mixer-analytics-bar-heading";
+
+    const label = document.createElement("span");
+    label.textContent = name.replaceAll("_", " ");
+
+    const value = document.createElement("strong");
+    value.textContent = percent(item.metrics?.precision);
+
+    heading.append(label, value);
+
+    const track = document.createElement("div");
+    track.className = "mixer-analytics-track";
+
+    const fill = document.createElement("div");
+    fill.className = "mixer-analytics-fill scenario";
+
+    const precision = item.metrics?.precision;
+
+    fill.style.width =
+      typeof precision === "number" && Number.isFinite(precision) ?
+        Math.max(0, Math.min(100, precision * 100)).toFixed(2) + "%" :
+        "0%";
+
+    track.appendChild(fill);
+
+    const details = document.createElement("small");
+    details.textContent =
+      numeric(item.transaction_count) + " transactions · " +
+      numeric(item.prediction_count) + " predictions";
+
+    panel.append(heading, track, details);
+    scenarioBox.appendChild(panel);
+  });
+
+  root.hidden = false;
+}
+
 function initMixerResearchForm() {
   const form = document.getElementById("mixer-research-form");
   if (!form) return;
@@ -2948,6 +3108,7 @@ function initMixerResearchForm() {
     if (button.disabled) return;
 
     results.hidden = true;
+    document.getElementById("mixer-research-analytics").hidden = true;
     metrics.replaceChildren();
     scenarios.replaceChildren();
     document.getElementById(
@@ -3049,6 +3210,7 @@ function initMixerResearchForm() {
         scenarios.appendChild(panel);
       });
 
+      renderMixerResearchAnalytics(response);
       renderMixerResearchGraph(response.graph);
 
       results.hidden = false;
