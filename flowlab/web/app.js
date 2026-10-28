@@ -2544,6 +2544,329 @@ setInterval(() => {
 // Mixer Lab Research V1 — synthetic experiment interface
 // ------------------------------------------------------------
 
+
+// ------------------------------------------------------------
+// Mixer Lab Research V1 — public synthetic UTXO visualization
+// ------------------------------------------------------------
+
+function renderMixerResearchGraph(graph) {
+  const panel = document.getElementById("mixer-research-graph-panel");
+  const svg = document.getElementById("mixer-research-graph");
+  const telemetry = document.getElementById(
+    "mixer-research-graph-telemetry"
+  );
+  const selection = document.getElementById(
+    "mixer-research-graph-selection"
+  );
+
+  if (!panel || !svg || !telemetry || !selection) return;
+
+  panel.hidden = true;
+  svg.replaceChildren();
+  telemetry.replaceChildren();
+
+  if (!graph || graph.kind !== "mixer_public_utxo_graph" ||
+      graph.execution !== "simulation_only" ||
+      !Array.isArray(graph.nodes) ||
+      !Array.isArray(graph.edges)) {
+    return;
+  }
+
+  const summary = graph.summary || {};
+  const transactions = graph.nodes.filter(
+    node => node.kind === "transaction"
+  );
+
+  if (!transactions.length) {
+    selection.textContent = "No synthetic transactions to display.";
+    return;
+  }
+
+  const NS = "http://www.w3.org/2000/svg";
+  const WIDTH = Math.max(1000, 320 + transactions.length * 230);
+  const HEIGHT = 820;
+  const TX_Y = 405;
+
+  const makeSVG = (tag, attributes) => {
+    const element = document.createElementNS(NS, tag);
+    Object.entries(attributes || {}).forEach(([name, value]) => {
+      element.setAttribute(name, String(value));
+    });
+    return element;
+  };
+
+  const identifierHash = identifier => {
+    let hash = 2166136261;
+    for (let i = 0; i < identifier.length; i++) {
+      hash ^= identifier.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return hash >>> 0;
+  };
+
+  const txPositions = new Map();
+  const outputProducers = new Map();
+
+  transactions.forEach((tx, index) => {
+    txPositions.set(tx.id, {
+      x: 160 + index * 230,
+      y: TX_Y
+    });
+  });
+
+  graph.edges.forEach(edge => {
+    if (edge.kind === "create") {
+      outputProducers.set(edge.target, edge.source);
+    }
+  });
+
+  const inputConsumers = new Map();
+
+  graph.edges.forEach(edge => {
+    if (edge.kind === "spend" &&
+        !inputConsumers.has(edge.source)) {
+      inputConsumers.set(edge.source, edge.target);
+    }
+  });
+
+  const positions = new Map(txPositions);
+
+  graph.nodes.forEach(node => {
+    if (node.kind !== "utxo") return;
+
+    const producer = outputProducers.get(node.id);
+    const consumer = inputConsumers.get(node.id);
+
+    const producerPosition = producer ?
+      txPositions.get(producer) : null;
+
+    const consumerPosition = consumer ?
+      txPositions.get(consumer) : null;
+
+    const anchor = producerPosition || consumerPosition || {
+      x: 160, y: TX_Y
+    };
+
+    const lane = identifierHash(node.id) % 12;
+
+    positions.set(node.id, {
+      x: producerPosition ? anchor.x + 82 : anchor.x - 82,
+      y: 65 + lane * 62
+    });
+  });
+
+  const defs = makeSVG("defs");
+
+  const marker = makeSVG("marker", {
+    id: "mixer-research-arrow",
+    markerWidth: 9,
+    markerHeight: 9,
+    refX: 8,
+    refY: 4,
+    orient: "auto",
+    markerUnits: "strokeWidth"
+  });
+
+  marker.appendChild(makeSVG("path", {
+    d: "M0,0 L8,4 L0,8 Z",
+    fill: "#6c9ec4"
+  }));
+
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+
+  svg.setAttribute("viewBox", `0 0 ${WIDTH} ${HEIGHT}`);
+  svg.setAttribute("width", WIDTH);
+  svg.setAttribute("height", HEIGHT);
+
+  const edgeLayer = makeSVG("g", {
+    class: "mixer-graph-edges"
+  });
+
+  const nodeLayer = makeSVG("g", {
+    class: "mixer-graph-nodes"
+  });
+
+  const edgeElements = [];
+  const nodeElements = [];
+
+  const shortID = identifier =>
+    identifier.length > 22 ?
+      identifier.slice(0, 12) + "…" + identifier.slice(-6) :
+      identifier;
+
+  graph.edges.forEach(edge => {
+    const from = positions.get(edge.source);
+    const to = positions.get(edge.target);
+
+    if (!from || !to) return;
+
+    const bend = Math.max(36, Math.abs(to.x - from.x) / 2);
+
+    const path = makeSVG("path", {
+      d: `M${from.x},${from.y} C${from.x + bend},${from.y} ` +
+         `${to.x - bend},${to.y} ${to.x},${to.y}`,
+      class: "mixer-graph-edge mixer-graph-edge-" + edge.kind,
+      "marker-end": "url(#mixer-research-arrow)",
+      "data-source": edge.source,
+      "data-target": edge.target
+    });
+
+    const title = makeSVG("title");
+    title.textContent =
+      edge.kind.toUpperCase() + ": " +
+      edge.source + " → " + edge.target;
+
+    path.appendChild(title);
+    edgeLayer.appendChild(path);
+    edgeElements.push({element: path, edge});
+  });
+
+  const inspectTransaction = tx => {
+    const related = new Set([tx.id]);
+
+    graph.edges.forEach(edge => {
+      if (edge.source === tx.id) related.add(edge.target);
+      if (edge.target === tx.id) related.add(edge.source);
+    });
+
+    edgeElements.forEach(({element, edge}) => {
+      const active = (
+        edge.source === tx.id || edge.target === tx.id
+      );
+
+      element.classList.toggle("is-active", active);
+      element.classList.toggle("is-muted", !active);
+    });
+
+    nodeElements.forEach(({element, node}) => {
+      const active = related.has(node.id);
+      element.classList.toggle("is-active", active);
+      element.classList.toggle("is-muted", !active);
+    });
+
+    selection.textContent =
+      "Selected " + tx.id +
+      " · Inputs: " + tx.input_count +
+      " · Outputs: " + tx.output_count +
+      " · Fee: " + tx.fee_sats + " sats";
+  };
+
+  graph.nodes.forEach(node => {
+    const position = positions.get(node.id);
+
+    if (!position) return;
+
+    const isTx = node.kind === "transaction";
+
+    const group = makeSVG("g", {
+      class: "mixer-graph-node " +
+        (isTx ? "mixer-graph-tx" : "mixer-graph-utxo"),
+      transform: `translate(${position.x},${position.y})`
+    });
+
+    if (isTx) {
+      group.appendChild(makeSVG("rect", {
+        x: -47, y: -21,
+        width: 94, height: 42,
+        rx: 9
+      }));
+    } else {
+      group.appendChild(makeSVG("circle", {
+        r: 11
+      }));
+    }
+
+    const label = makeSVG("text", {
+      x: 0,
+      y: isTx ? 5 : -19,
+      "text-anchor": "middle"
+    });
+
+    label.textContent = isTx ?
+      "TX " + node.sequence : shortID(node.id);
+
+    group.appendChild(label);
+
+    const title = makeSVG("title");
+
+    title.textContent = isTx ?
+      node.id + " · " + node.input_count +
+        " inputs · " + node.output_count +
+        " outputs · Fee " + node.fee_sats + " sats" :
+      node.id + " · " + node.value_sats + " sats";
+
+    group.appendChild(title);
+
+    if (isTx) {
+      group.setAttribute("tabindex", "0");
+      group.setAttribute("role", "button");
+      group.setAttribute(
+        "aria-label", "Inspect transaction " + node.id
+      );
+
+      group.addEventListener(
+        "click", () => inspectTransaction(node)
+      );
+
+      group.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          inspectTransaction(node);
+        }
+      });
+    }
+
+    nodeLayer.appendChild(group);
+    nodeElements.push({element: group, node});
+  });
+
+  svg.append(edgeLayer, nodeLayer);
+
+  const makeTelemetry = (label, value) => {
+    const box = document.createElement("div");
+    box.className = "mixer-research-graph-stat";
+
+    const heading = document.createElement("span");
+    heading.textContent = label;
+
+    const count = document.createElement("strong");
+    count.textContent = String(value ?? 0);
+
+    box.append(heading, count);
+    telemetry.appendChild(box);
+  };
+
+  makeTelemetry(
+    "Visible transactions", summary.visible_transactions
+  );
+
+  makeTelemetry(
+    "Total transactions", summary.total_transactions
+  );
+
+  makeTelemetry("UTXO nodes", summary.visible_utxos);
+
+  makeTelemetry(
+    "Spend edges", summary.visible_spend_edges
+  );
+
+  makeTelemetry(
+    "Create edges", summary.visible_create_edges
+  );
+
+  makeTelemetry(
+    "Graph truncated", summary.truncated ? "YES" : "NO"
+  );
+
+  selection.textContent =
+    "Displaying the first campaign seed, position " +
+    String(summary.campaign_seed_position ?? 0) +
+    ". Select any transaction to inspect its connections.";
+
+  panel.hidden = false;
+}
+
 function initMixerResearchForm() {
   const form = document.getElementById("mixer-research-form");
   if (!form) return;
@@ -2627,6 +2950,9 @@ function initMixerResearchForm() {
     results.hidden = true;
     metrics.replaceChildren();
     scenarios.replaceChildren();
+    document.getElementById(
+      "mixer-research-graph-panel"
+    ).hidden = true;
 
     let request;
 
@@ -2722,6 +3048,8 @@ function initMixerResearchForm() {
         addSection(panel, "Metrics", item.metrics);
         scenarios.appendChild(panel);
       });
+
+      renderMixerResearchGraph(response.graph);
 
       results.hidden = false;
       status.textContent =

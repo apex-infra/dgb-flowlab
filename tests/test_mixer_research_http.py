@@ -183,5 +183,32 @@ class ResearchHTTPTests(unittest.TestCase):
                 server.server_close()
 
 
+
+    def test_http_response_contains_public_graph(self):
+        status, result = self.request()
+
+        self.assertEqual(status, 200)
+
+        graph = result["graph"]
+
+        self.assertEqual(
+            graph["kind"],
+            "mixer_public_utxo_graph",
+        )
+
+        self.assertEqual(
+            graph["summary"]["visible_transactions"],
+            24,
+        )
+
+        self.assertTrue(graph["nodes"])
+        self.assertTrue(graph["edges"])
+
+        encoded = json.dumps(result)
+
+        self.assertNotIn("ground_truth", encoded)
+        self.assertNotIn("utxo_owners", encoded)
+        self.assertNotIn("participant_", encoded)
+
 if __name__ == "__main__":
     unittest.main()

@@ -927,3 +927,167 @@ a.btn:hover{color:var(--paper)}
 .mixer-research-panel [hidden] {
   display: none !important;
 }
+
+
+/* Mixer Lab Research — public synthetic UTXO graph */
+
+.mixer-research-graph-panel {
+  margin-top: 1.5rem;
+  padding: 1.15rem;
+  border: 1px solid #304b65;
+  border-radius: 12px;
+  background: #0c141e;
+}
+
+.mixer-research-graph-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.mixer-research-graph-heading h3 {
+  margin: 0 0 .4rem;
+}
+
+.mixer-research-graph-heading p,
+.mixer-research-graph-help {
+  margin: .3rem 0;
+  color: #94aabb;
+  font-size: .85rem;
+}
+
+.mixer-research-graph-telemetry {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: .6rem;
+  margin: 1.25rem 0;
+}
+
+.mixer-research-graph-stat {
+  padding: .8rem;
+  background: #182535;
+  border: 1px solid #2b4055;
+  border-radius: 8px;
+}
+
+.mixer-research-graph-stat span {
+  display: block;
+  font-size: .78rem;
+  color: #9eb5c8;
+}
+
+.mixer-research-graph-stat strong {
+  display: block;
+  margin-top: .3rem;
+  font-size: 1.15rem;
+  color: #dceaf5;
+}
+
+.mixer-research-graph-scroll {
+  overflow: auto;
+  max-width: 100%;
+  background:
+    linear-gradient(rgba(84, 120, 151, .06) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(84, 120, 151, .06) 1px, transparent 1px),
+    #08111b;
+  background-size: 40px 40px;
+  border: 1px solid #253b50;
+  border-radius: 9px;
+  scrollbar-color: #385772 #0b1621;
+}
+
+#mixer-research-graph {
+  display: block;
+  max-width: none;
+}
+
+.mixer-graph-edge {
+  fill: none;
+  stroke: #567a9e;
+  stroke-width: 1.4;
+  opacity: .21;
+  transition: opacity .25s, stroke-width .25s;
+}
+
+.mixer-graph-edge-spend {
+  stroke: #55a6e6;
+}
+
+.mixer-graph-edge-create {
+  stroke: #42cfa8;
+}
+
+.mixer-graph-edge.is-active {
+  opacity: .95;
+  stroke-width: 2.7;
+  stroke-dasharray: 9 7;
+  animation: mixer-graph-flow 1.15s linear infinite;
+}
+
+.mixer-graph-edge.is-muted,
+.mixer-graph-node.is-muted {
+  opacity: .13;
+}
+
+.mixer-graph-node {
+  transition: opacity .25s;
+}
+
+.mixer-graph-tx {
+  cursor: pointer;
+}
+
+.mixer-graph-tx rect {
+  fill: #173b58;
+  stroke: #54b5f7;
+  stroke-width: 1.8;
+}
+
+.mixer-graph-tx.is-active rect {
+  fill: #176f73;
+  stroke: #59f7d4;
+  stroke-width: 2.6;
+  filter: drop-shadow(0 0 8px rgba(77, 242, 193, .5));
+}
+
+.mixer-graph-utxo circle {
+  fill: #12392f;
+  stroke: #41cd99;
+  stroke-width: 1.5;
+}
+
+.mixer-graph-utxo.is-active circle {
+  fill: #1d9475;
+  stroke: #96ffdc;
+}
+
+.mixer-graph-node text {
+  fill: #c6d9e8;
+  font-size: 11px;
+  font-family: ui-monospace, monospace;
+  pointer-events: none;
+}
+
+.mixer-research-graph-selection {
+  margin-top: .9rem;
+  color: #bdd8eb;
+  font-size: .9rem;
+  overflow-wrap: anywhere;
+}
+
+@keyframes mixer-graph-flow {
+  to { stroke-dashoffset: -32; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mixer-graph-edge.is-active {
+    animation: none;
+  }
+}
+
+.mixer-research-panel [hidden],
+.mixer-research-graph-panel[hidden] {
+  display: none !important;
+}

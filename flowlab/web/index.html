@@ -156,6 +156,48 @@
 
       <div id="mixer-research-scenarios"
         class="mixer-research-scenarios"></div>
+
+      <section id="mixer-research-graph-panel"
+        class="mixer-research-graph-panel" hidden>
+
+        <div class="mixer-research-graph-heading">
+          <div>
+            <h3>Public UTXO Network</h3>
+            <p>
+              Synthetic transaction graph · First campaign seed ·
+              Directional UTXO flows
+            </p>
+          </div>
+          <span class="mixer-badge">PUBLIC SYNTHETIC DATA</span>
+        </div>
+
+        <div id="mixer-research-graph-telemetry"
+          class="mixer-research-graph-telemetry"></div>
+
+        <p class="mixer-research-graph-help">
+          Scroll horizontally to explore transactions.
+          Select a transaction node to highlight its connections.
+          Hover over nodes and edges for details.
+        </p>
+
+        <div id="mixer-research-graph-scroll"
+          class="mixer-research-graph-scroll"
+          tabindex="0"
+          aria-label="Scrollable synthetic UTXO transaction graph">
+
+          <svg id="mixer-research-graph"
+            xmlns="http://www.w3.org/2000/svg"
+            role="img"
+            aria-label="Synthetic UTXO transaction relationships">
+          </svg>
+        </div>
+
+        <div id="mixer-research-graph-selection"
+          class="mixer-research-graph-selection"
+          role="status" aria-live="polite">
+          Select a transaction to inspect its connections.
+        </div>
+      </section>
     </div>
   </section>
 

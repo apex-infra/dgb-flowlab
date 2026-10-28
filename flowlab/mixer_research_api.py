@@ -20,6 +20,10 @@ from .mixer_statistics import (
 )
 
 
+from .mixer_graph import build_public_graph
+from .mixer_workloads import build_seeded_workload
+
+
 class ResearchAPIError(ValueError):
     """Invalid synthetic research API request."""
 
@@ -125,6 +129,22 @@ def run_research_request(request):
             "synthetic research execution failed"
         ) from exc
 
+    # Visualization is a bounded view of the first campaign seed.
+    # No private ground truth or generator configuration is returned.
+    graph_dataset = build_seeded_workload(
+        seed=request["seeds"][0],
+        transaction_count=request["transaction_count"],
+        max_inputs=request["max_inputs"],
+        scenario_weights=dict(request["scenario_weights"]),
+        matched_input_profile=request["matched_input_profile"],
+    )
+
+    graph = build_public_graph(
+        graph_dataset["public"],
+    )
+
+    graph["summary"]["campaign_seed_position"] = 0
+
     aggregate = report["aggregate"]
 
     # Explicit allowlists prevent private campaign metadata,
@@ -156,6 +176,7 @@ def run_research_request(request):
         "analyst": "common_input_same_owner_hypothesis",
         "aggregate": safe_aggregate,
         "by_scenario": safe_scenarios,
+        "graph": graph,
         "statistics": {
             "seed_count": statistics["seed_count"],
             "total_predictions": statistics["total_predictions"],

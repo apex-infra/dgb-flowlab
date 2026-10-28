@@ -173,5 +173,81 @@ class ResearchAPITests(unittest.TestCase):
         )
 
 
+
+    def test_graph_in_research_response(self):
+        result = run_research_request(self.config)
+        graph = result["graph"]
+
+        self.assertEqual(
+            graph["kind"],
+            "mixer_public_utxo_graph",
+        )
+        self.assertEqual(
+            graph["execution"],
+            "simulation_only",
+        )
+        self.assertEqual(
+            graph["summary"]["visible_transactions"],
+            24,
+        )
+        self.assertEqual(
+            graph["summary"]["total_transactions"],
+            100,
+        )
+        self.assertEqual(
+            graph["summary"]["campaign_seed_position"],
+            0,
+        )
+
+    def test_graph_edges_reference_existing_nodes(self):
+        graph = run_research_request(self.config)["graph"]
+        identifiers = {
+            node["id"] for node in graph["nodes"]
+        }
+
+        for edge in graph["edges"]:
+            self.assertIn(edge["source"], identifiers)
+            self.assertIn(edge["target"], identifiers)
+
+    def test_graph_contains_no_private_ownership(self):
+        result = run_research_request(self.config)
+        graph = result["graph"]
+
+        import json
+        encoded = json.dumps(graph)
+
+        for forbidden in (
+            "ground_truth",
+            "utxo_owners",
+            "transaction_participants",
+            "participant_",
+            "scenario_schedule",
+            "configuration",
+        ):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_graph_is_deterministic(self):
+        first = run_research_request(self.config)["graph"]
+        second = run_research_request(self.config)["graph"]
+
+        self.assertEqual(first, second)
+
+    def test_graph_with_small_campaign(self):
+        request = copy.deepcopy(self.config)
+        request["seeds"] = [42]
+        request["transaction_count"] = 10
+
+        graph = run_research_request(request)["graph"]
+
+        self.assertEqual(
+            graph["summary"]["total_transactions"],
+            10,
+        )
+        self.assertEqual(
+            graph["summary"]["visible_transactions"],
+            10,
+        )
+        self.assertFalse(graph["summary"]["truncated"])
+
 if __name__ == "__main__":
     unittest.main()
