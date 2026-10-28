@@ -57,6 +57,7 @@ def run_seeded_campaign(
     transaction_count=30,
     max_inputs=6,
     scenario_weights=None,
+    matched_input_profile=False,
 ):
     """Evaluate generated workloads across multiple seeds.
 
@@ -87,6 +88,9 @@ def run_seeded_campaign(
         3 <= max_inputs <= 12
     ):
         raise SeededCampaignError("invalid max_inputs")
+
+    if type(matched_input_profile) is not bool:
+        raise SeededCampaignError("invalid matched_input_profile")
 
     # Conservative upper bound before generating any workload.
     max_pairs_per_tx = max_inputs * (max_inputs - 1) // 2
@@ -132,6 +136,7 @@ def run_seeded_campaign(
                 transaction_count=transaction_count,
                 max_inputs=max_inputs,
                 scenario_weights=scenario_weights,
+                matched_input_profile=matched_input_profile,
             )
         except WorkloadError as exc:
             raise SeededCampaignError(str(exc)) from exc

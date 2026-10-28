@@ -34,6 +34,7 @@ def build_seeded_workload(
     transaction_count=30,
     max_inputs=6,
     scenario_weights=None,
+    matched_input_profile=False,
 ):
     """Build reproducible independent synthetic transactions.
 
@@ -62,7 +63,23 @@ def build_seeded_workload(
     ):
         raise WorkloadError("invalid max inputs")
 
+    if type(matched_input_profile) is not bool:
+        raise WorkloadError("invalid matched_input_profile")
+
     rng = random.Random(seed)
+
+    if matched_input_profile:
+        # Independent size stream: changing ownership composition
+        # does not change transaction input counts.
+        from .mixer_input_profiles import build_input_profile
+
+        input_profile = build_input_profile(
+            seed=seed,
+            transaction_count=transaction_count,
+            max_inputs=max_inputs,
+        )["input_counts"]
+    else:
+        input_profile = None
 
     # Preserve the legacy workload exactly when weights are omitted.
     # Custom distributions are deterministic but shuffled.
@@ -106,7 +123,11 @@ def build_seeded_workload(
         )
         composition[scenario] += 1
 
-        input_count = rng.randint(3, max_inputs)
+        input_count = (
+            rng.randint(3, max_inputs)
+            if input_profile is None
+            else input_profile[sequence]
+        )
 
         # A bounded synthetic participant universe.
         owner_pool = [
@@ -194,6 +215,9 @@ def build_seeded_workload(
 
     if scenario_schedule is not None:
         summary["scenario_schedule"] = list(scenario_schedule)
+
+    if matched_input_profile:
+        summary["matched_input_profile"] = True
 
     return {
         "kind": "mixer_seeded_workload",
