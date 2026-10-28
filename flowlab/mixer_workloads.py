@@ -9,7 +9,6 @@ No wallet operations, RPC, networking, or persistence.
 import hashlib
 import random
 
-
 SCENARIOS = (
     "single_owner",
     "collaborative",
@@ -34,6 +33,7 @@ def build_seeded_workload(
     seed=2049,
     transaction_count=30,
     max_inputs=6,
+    scenario_weights=None,
 ):
     """Build reproducible independent synthetic transactions.
 
@@ -64,6 +64,27 @@ def build_seeded_workload(
 
     rng = random.Random(seed)
 
+    # Preserve the legacy workload exactly when weights are omitted.
+    # Custom distributions are deterministic but shuffled.
+    if scenario_weights is None:
+        scenario_schedule = None
+    else:
+        # Lazy import prevents a circular module dependency:
+        # mixer_distribution imports SCENARIOS from this module.
+        from .mixer_distribution import (
+            DistributionError,
+            build_distribution,
+        )
+
+        try:
+            scenario_schedule = build_distribution(
+                seed=seed,
+                transaction_count=transaction_count,
+                weights=scenario_weights,
+            )["schedule"]
+        except DistributionError as exc:
+            raise WorkloadError(str(exc)) from exc
+
     genesis = []
     transactions = []
     unspent = []
@@ -78,7 +99,11 @@ def build_seeded_workload(
     global_input_index = 0
 
     for sequence in range(transaction_count):
-        scenario = SCENARIOS[sequence % len(SCENARIOS)]
+        scenario = (
+            SCENARIOS[sequence % len(SCENARIOS)]
+            if scenario_schedule is None
+            else scenario_schedule[sequence]
+        )
         composition[scenario] += 1
 
         input_count = rng.randint(3, max_inputs)
@@ -159,6 +184,17 @@ def build_seeded_workload(
             counts_by_owner
         )
 
+    summary = {
+        "seed": seed,
+        "transaction_count": transaction_count,
+        "max_inputs": max_inputs,
+        "initial_utxo_count": len(genesis),
+        "scenario_composition": composition,
+    }
+
+    if scenario_schedule is not None:
+        summary["scenario_schedule"] = list(scenario_schedule)
+
     return {
         "kind": "mixer_seeded_workload",
         "version": 1,
@@ -173,11 +209,5 @@ def build_seeded_workload(
             "transaction_participants":
                 transaction_participants,
         },
-        "summary": {
-            "seed": seed,
-            "transaction_count": transaction_count,
-            "max_inputs": max_inputs,
-            "initial_utxo_count": len(genesis),
-            "scenario_composition": composition,
-        },
+        "summary": summary,
     }

@@ -56,6 +56,7 @@ def run_seeded_campaign(
     seeds=(42, 2049, 9999),
     transaction_count=30,
     max_inputs=6,
+    scenario_weights=None,
 ):
     """Evaluate generated workloads across multiple seeds.
 
@@ -98,6 +99,22 @@ def run_seeded_campaign(
             "campaign prediction budget exceeded"
         )
 
+    if scenario_weights is not None:
+        # Validate the distribution before generating workloads.
+        from .mixer_distribution import (
+            DistributionError,
+            build_distribution,
+        )
+
+        try:
+            build_distribution(
+                seed=seeds[0],
+                transaction_count=transaction_count,
+                weights=scenario_weights,
+            )
+        except DistributionError as exc:
+            raise SeededCampaignError(str(exc)) from exc
+
     aggregate = _empty_counts()
     scenario_totals = {
         name: {
@@ -114,6 +131,7 @@ def run_seeded_campaign(
                 seed=seed,
                 transaction_count=transaction_count,
                 max_inputs=max_inputs,
+                scenario_weights=scenario_weights,
             )
         except WorkloadError as exc:
             raise SeededCampaignError(str(exc)) from exc
@@ -133,8 +151,22 @@ def run_seeded_campaign(
         # Map co-input predictions to their originating scenario.
         input_scenarios = {}
 
-        for index, tx in enumerate(public["transactions"]):
-            name = SCENARIOS[index % len(SCENARIOS)]
+        # The schedule is research metadata, not analyst input.
+        # Legacy workloads retain their original sequence mapping.
+        schedule = dataset["summary"].get("scenario_schedule")
+
+        if schedule is None:
+            schedule = [
+                SCENARIOS[index % len(SCENARIOS)]
+                for index in range(len(public["transactions"]))
+            ]
+
+        if len(schedule) != len(public["transactions"]):
+            raise SeededCampaignError(
+                "scenario schedule length mismatch"
+            )
+
+        for tx, name in zip(public["transactions"], schedule):
             scenario_totals[name]["transaction_count"] += 1
 
             for uid in tx["inputs"]:
