@@ -355,6 +355,27 @@ class DashboardTests(DashBase):
         snap = snapshot(self.db, exp)
         jobs = snap["flows"][0]["jobs"]
 
+        self.assertEqual(snap["play_name"], "settlement_cycle")
+
+        cycle = SETTLEMENT_CYCLE_CFG["settlement_cycle"]
+        expected_decisions = (
+            cycle["outbound"]["decisions"]
+            + cycle["return"]["decisions"]
+        )
+
+        self.assertEqual(snap["target_jobs"], expected_decisions)
+        self.assertEqual(expected_decisions, 4)
+
+        confirmed_decisions = sum(
+            j["state"] == "CONFIRMED"
+            for j in jobs
+            if j["generated"]
+            and isinstance(j["generated"].get("decision_index"), int)
+        )
+
+        self.assertEqual(confirmed_decisions, expected_decisions)
+        self.assertGreater(len(jobs), expected_decisions)
+
         settlement_jobs = [
             j for j in jobs
             if j["generated"]

@@ -75,11 +75,30 @@ def snapshot(db_path, exp_id=None, now=None):
             "next_due_s": None,
             "mode": "experimental" if experimental else "deterministic",
             "staged": staged,
+            "play_name": (cfg.get("play") or {}).get("name"),
+            "decision_targets": (
+                {
+                    "workload": cfg["settlement_cycle"]["outbound"]["decisions"],
+                    "return_workload": cfg["settlement_cycle"]["return"]["decisions"],
+                }
+                if (cfg.get("play") or {}).get("name") == "settlement_cycle"
+                else None
+            ),
             "staged_accounting": None,
             "target_jobs": (
                 workload.get("jobs")
                 if experimental and workload.get("mode") == "count"
-                else None
+                else (
+                    sum(
+                        phase.get("decisions", 0)
+                        for phase in (
+                            cfg.get("settlement_cycle", {}).get("outbound", {}),
+                            cfg.get("settlement_cycle", {}).get("return", {}),
+                        )
+                    )
+                    if cfg.get("play", {}).get("name") == "settlement_cycle"
+                    else None
+                )
             ),
             "randomization": (
                 {"model": rnd.get("model"), "seed": rnd.get("seed")}

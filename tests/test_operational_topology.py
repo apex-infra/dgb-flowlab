@@ -65,6 +65,38 @@ class OperationalTopologyTests(unittest.TestCase):
         ):
             self.assertEqual(len(graph["columns"][column]), 1)
 
+    def test_settlement_cycle_identity_is_not_a_wallet(self):
+        roles = {
+            "reserve": ["flab_source"],
+            "stage": ["flab_stage"],
+            "hubs": ["flab_hub_a"],
+            "workers": ["flab_a"],
+            "destinations": ["flab_dest"],
+        }
+
+        flows = [{
+            "source": "flab_source",
+            "wallets": ["flab_stage", "flab_hub_a", "flab_a"],
+            "dest": "settlement_cycle:synthetic-identity",
+            "jobs": [{
+                "from": "flab_stage",
+                "to": "flab_a",
+                "seq": 0,
+                "state": "CONFIRMED",
+            }],
+        }]
+
+        graph = self.build(flows, roles)
+
+        self.assertNotIn(
+            "settlement_cycle:synthetic-identity",
+            [node["id"] for node in graph["nodes"]],
+        )
+        self.assertEqual(
+            len(graph["columns"]["UNASSIGNED"]), 0
+        )
+        self.assertEqual(len(graph["edges"]), 1)
+
     def test_multiple_flows_preserved(self):
         flows = [
             {"jobs": [

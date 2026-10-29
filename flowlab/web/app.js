@@ -107,7 +107,12 @@ function buildOperationalTopology(flows, walletRoles) {
       addWallet(wallet);
     }
 
-    addWallet(flow.dest);
+    // Settlement Cycle uses a synthetic flow identity as its destination.
+    // Keep that identity out of wallet topology.
+    if (!(typeof flow.dest === "string" &&
+          flow.dest.startsWith("settlement_cycle:"))) {
+      addWallet(flow.dest);
+    }
 
     for (const job of (Array.isArray(flow.jobs)
       ? flow.jobs : [])) {
@@ -980,6 +985,53 @@ async function renderApprove(data) {
   catch (err) { sigs.rv = null; toast(err.message, true); }
 }
 
+function experimentalDecisionStatus(snapshot, current) {
+  const g = current.generated || {};
+  const index = Number.isInteger(g.decision_index)
+    ? g.decision_index + 1
+    : current.seq;
+
+  if (snapshot.play_name === "settlement_cycle") {
+    const phase = g.phase;
+    const label = phase === "return_workload"
+      ? "Return decision"
+      : "Outbound decision";
+
+    const target = snapshot.decision_targets?.[phase];
+
+    return {
+      label,
+      value: index + " / " + (
+        Number.isInteger(target) ? target : "?"
+      )
+    };
+  }
+
+  return {
+    label: "Decision",
+    value: index + " / " + (snapshot.target_jobs || "?")
+  };
+}
+
+function experimentalFinalizationStatus(playName, jobs) {
+  const settlement = playName === "settlement_cycle";
+  const phase = settlement ? "reserve_return" : "finalization";
+  const relevant = jobs.filter(
+    j => j.generated && j.generated.phase === phase
+  );
+  const confirmed = relevant.filter(
+    j => j.state === "CONFIRMED"
+  ).length;
+
+  return {
+    label: settlement ? "Reserve return" : "Finalization",
+    value: relevant.length
+      ? confirmed + " / " + relevant.length
+        + (settlement ? " confirmed" : " sweeps confirmed")
+      : "pending"
+  };
+}
+
 function renderExperimental(data) {
   const box = $("panel-experimental"), s = data.snapshot;
   if (!s || s.mode !== "experimental") {
@@ -991,9 +1043,6 @@ function renderExperimental(data) {
   const jobs = s.flows.flatMap(f => f.jobs);
   const decisions = jobs.filter(
     j => j.generated && Number.isInteger(j.generated.decision_index)
-  );
-  const finalizations = jobs.filter(
-    j => j.generated && j.generated.phase === "finalization"
   );
   const current = decisions.length ? decisions[decisions.length - 1] : null;
   const rnd = s.randomization || {};
@@ -1033,7 +1082,7 @@ function renderExperimental(data) {
       ),
       item("Principal after fees", dgb(accounting.principal_after_fees_sats) + " DGB"),
       item("Cumulative workload", dgb(accounting.cumulative_workload_sats) + " DGB"),
-      item("Experiment fees", dgb(accounting.experiment_fees_sats) + " DGB"),
+      item("Fees charged against principal", dgb(accounting.experiment_fees_sats) + " DGB"),
       item("Destination receipts", dgb(accounting.destination_receipts_sats) + " DGB"),
       item(
         "Settlement distributions",
@@ -1043,7 +1092,7 @@ function renderExperimental(data) {
         "Reserve return",
         dgb(accounting.reserve_return_sats || 0) + " DGB"
       ),
-      item("Reserve commit fee", dgb(accounting.commitment_fee_sats) + " DGB")
+      item("Reserve allocation fee", dgb(accounting.commitment_fee_sats) + " DGB")
     );
 
     if (accounting.accounting_reconciled === true) {
@@ -1070,10 +1119,10 @@ function renderExperimental(data) {
   }
 
   const g = current.generated;
-  const decision = Number.isInteger(g.decision_index) ? g.decision_index + 1 : current.seq;
+  const decisionStatus = experimentalDecisionStatus(s, current);
 
   grid.append(
-    item("Decision", decision + " / " + (s.target_jobs || "?")),
+    item(decisionStatus.label, decisionStatus.value),
     item("Route", current.from + " → " + current.to, "mono"),
     item("Planned amount", current.planned === "all" ? "entire balance" : dgb(current.planned) + " DGB"),
     item("Delay", String(current.delay_s || 0) + " s"),
@@ -1094,11 +1143,8 @@ function renderExperimental(data) {
     item("Fee reserve", g.fee_reserve_sats != null ? dgb(g.fee_reserve_sats) + " DGB" : "-"),
     item("Generator", "v" + (g.generator_version ?? "-")),
     item(
-      "Finalization",
-      finalizations.length
-        ? String(finalizations.filter(j => j.state === "CONFIRMED").length)
-          + " / " + String(finalizations.length) + " sweeps confirmed"
-        : "pending"
+      experimentalFinalizationStatus(s.play_name, jobs).label,
+      experimentalFinalizationStatus(s.play_name, jobs).value
     )
   );
 
@@ -1893,8 +1939,19 @@ function renderResults(data) {
         resultDGB(accounting.committed_principal_sats),
       ],
       [
-        "Experiment fees",
+        "Total network fees",
+        resultDGB(
+          (accounting.experiment_fees_sats || 0)
+          + (accounting.commitment_fee_sats || 0)
+        ),
+      ],
+      [
+        "Fees charged against principal",
         resultDGB(accounting.experiment_fees_sats),
+      ],
+      [
+        "Reserve allocation fee",
+        resultDGB(accounting.commitment_fee_sats),
       ],
       [
         "Cumulative workload",
