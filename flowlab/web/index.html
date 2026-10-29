@@ -151,11 +151,26 @@
         <span class="mixer-badge">SYNTHETIC DATA</span>
       </div>
 
+      <details id="mixer-research-raw-details"
+        class="mixer-research-raw-details">
+
+        <summary>
+          Detailed Research Metrics
+          <span>
+            Aggregate counts, precision statistics,
+            and individual scenario reports
+          </span>
+        </summary>
+
+        <div class="mixer-research-raw-content">
       <div id="mixer-research-metrics"
         class="mixer-research-metrics"></div>
 
       <div id="mixer-research-scenarios"
         class="mixer-research-scenarios"></div>
+
+        </div>
+      </details>
 
       <section id="mixer-research-analytics"
         class="mixer-research-analytics"
@@ -212,6 +227,36 @@
 
         <div id="mixer-research-graph-telemetry"
           class="mixer-research-graph-telemetry"></div>
+        <div id="mixer-replay-controls"
+          class="mixer-replay-controls"
+          aria-label="Synthetic transaction replay controls">
+
+          <button type="button"
+            id="mixer-replay-play">▶ Play</button>
+
+          <button type="button"
+            id="mixer-replay-pause">⏸ Pause</button>
+
+          <button type="button"
+            id="mixer-replay-restart">↺ Restart</button>
+
+          <label for="mixer-replay-speed">
+            Playback speed
+          </label>
+
+          <select id="mixer-replay-speed">
+            <option value="2000">0.5×</option>
+            <option value="1000" selected>1×</option>
+            <option value="500">2×</option>
+            <option value="250">4×</option>
+          </select>
+
+          <span id="mixer-replay-status"
+            role="status" aria-live="polite">
+            Ready to replay
+          </span>
+        </div>
+
 
         <p class="mixer-research-graph-help">
           Scroll horizontally to explore transactions.

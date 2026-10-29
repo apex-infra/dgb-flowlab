@@ -1235,3 +1235,168 @@ a.btn:hover{color:var(--paper)}
 .mixer-research-analytics[hidden] {
   display: none !important;
 }
+
+
+/* FlowLab Research V1 — synthetic transaction replay */
+
+.mixer-replay-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: .7rem;
+  padding: .8rem;
+  margin: .8rem 0 1rem;
+  background: #132332;
+  border: 1px solid #304d64;
+  border-radius: 9px;
+}
+
+.mixer-replay-controls button,
+.mixer-replay-controls select {
+  background: #17354b;
+  color: #d7edf9;
+  border: 1px solid #38617d;
+  border-radius: 6px;
+  padding: .55rem .75rem;
+  font: inherit;
+}
+
+.mixer-replay-controls button {
+  cursor: pointer;
+}
+
+.mixer-replay-controls button:hover,
+.mixer-replay-controls button:focus-visible {
+  border-color: #62c9e9;
+  background: #1d4660;
+}
+
+.mixer-replay-controls label {
+  color: #9bb9cc;
+  font-size: .85rem;
+}
+
+#mixer-replay-status {
+  color: #69e3c8;
+  font-family: ui-monospace, monospace;
+  font-size: .85rem;
+  margin-left: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mixer-graph-edge.is-active {
+    animation: none;
+  }
+}
+
+
+/* FlowLab M5.24A — research workspace layout */
+
+/*
+ * Scope full-width behavior to Mixer Lab.
+ * Other FlowLab pages retain their existing layouts.
+ */
+#tab-mixer.page.mixer-page {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#tab-mixer .mixer-research-panel {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#tab-mixer #mixer-research-results,
+#tab-mixer .mixer-research-analytics,
+#tab-mixer .mixer-research-graph-panel {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+/* Detailed results are available without dominating the page. */
+
+.mixer-research-raw-details {
+  margin: 1.1rem 0;
+  border: 1px solid #2d4d63;
+  border-radius: 10px;
+  background: #101d29;
+  overflow: hidden;
+}
+
+.mixer-research-raw-details > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: .6rem 1.2rem;
+  padding: 1rem 1.15rem;
+  cursor: pointer;
+  color: #dcecf6;
+  font-size: .95rem;
+  font-weight: 600;
+  list-style: none;
+}
+
+.mixer-research-raw-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.mixer-research-raw-details > summary::before {
+  content: "▸";
+  color: #49d8bd;
+}
+
+.mixer-research-raw-details[open] > summary::before {
+  content: "▾";
+}
+
+.mixer-research-raw-details > summary span {
+  color: #91aec1;
+  font-size: .78rem;
+  font-weight: 400;
+}
+
+.mixer-research-raw-details > summary:hover {
+  background: #172b3b;
+}
+
+.mixer-research-raw-details > summary:focus-visible {
+  outline: 2px solid #4ec9e8;
+  outline-offset: -3px;
+}
+
+.mixer-research-raw-content {
+  padding: 1rem;
+  border-top: 1px solid #2d4d63;
+}
+
+/* Give the network graph a larger research workspace. */
+
+#tab-mixer .mixer-research-graph-scroll {
+  width: 100%;
+  max-width: 100%;
+  min-height: 560px;
+  box-sizing: border-box;
+}
+
+#tab-mixer .mixer-analytics-columns {
+  grid-template-columns:
+    repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 900px) {
+  #tab-mixer .mixer-analytics-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mixer-research-raw-details > summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

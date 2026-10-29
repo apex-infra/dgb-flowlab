@@ -2549,7 +2549,14 @@ setInterval(() => {
 // Mixer Lab Research V1 — public synthetic UTXO visualization
 // ------------------------------------------------------------
 
+let mixerResearchReplayCleanup = null;
+
 function renderMixerResearchGraph(graph) {
+  if (mixerResearchReplayCleanup) {
+    mixerResearchReplayCleanup();
+    mixerResearchReplayCleanup = null;
+  }
+
   const panel = document.getElementById("mixer-research-graph-panel");
   const svg = document.getElementById("mixer-research-graph");
   const telemetry = document.getElementById(
@@ -2805,13 +2812,22 @@ function renderMixerResearchGraph(graph) {
         "aria-label", "Inspect transaction " + node.id
       );
 
-      group.addEventListener(
-        "click", () => inspectTransaction(node)
-      );
+      group.addEventListener("click", () => {
+        if (mixerResearchReplayCleanup) {
+          const pauseButton = document.getElementById(
+            "mixer-replay-pause"
+          );
+          pauseButton?.click();
+        }
+        inspectTransaction(node);
+      });
 
       group.addEventListener("keydown", event => {
         if (event.key === "Enter" || event.key === " ") {
           event.preventDefault();
+          document.getElementById(
+            "mixer-replay-pause"
+          )?.click();
           inspectTransaction(node);
         }
       });
@@ -2822,6 +2838,109 @@ function renderMixerResearchGraph(graph) {
   });
 
   svg.append(edgeLayer, nodeLayer);
+
+  // Deterministic playback of the completed synthetic graph.
+  // Playback never runs the simulation or contacts a blockchain.
+  const playButton = document.getElementById("mixer-replay-play");
+  const pauseButton = document.getElementById("mixer-replay-pause");
+  const restartButton = document.getElementById("mixer-replay-restart");
+  const speedSelect = document.getElementById("mixer-replay-speed");
+  const replayStatus = document.getElementById("mixer-replay-status");
+
+  let replayTimer = null;
+  let replayIndex = -1;
+
+  const orderedTransactions = [...transactions].sort(
+    (a, b) => a.sequence - b.sequence
+  );
+
+  const stopReplay = () => {
+    if (replayTimer !== null) {
+      clearInterval(replayTimer);
+      replayTimer = null;
+    }
+  };
+
+  const updateReplayStatus = state => {
+    if (!replayStatus) return;
+
+    const position = Math.max(0, replayIndex + 1);
+
+    replayStatus.textContent =
+      state + " · Transaction " +
+      position + " / " + orderedTransactions.length;
+  };
+
+  const stepReplay = () => {
+    if (replayIndex + 1 >= orderedTransactions.length) {
+      stopReplay();
+      updateReplayStatus("Complete");
+      return;
+    }
+
+    replayIndex += 1;
+
+    const tx = orderedTransactions[replayIndex];
+
+    inspectTransaction(tx);
+    updateReplayStatus("Playing");
+  };
+
+  const startReplay = () => {
+    stopReplay();
+
+    if (!orderedTransactions.length) return;
+
+    if (replayIndex >= orderedTransactions.length - 1) {
+      replayIndex = -1;
+    }
+
+    const delay = Number(speedSelect?.value || 1000);
+
+    if (!Number.isFinite(delay) || delay < 100) return;
+
+    stepReplay();
+
+    if (replayIndex >= orderedTransactions.length - 1) {
+      updateReplayStatus("Complete");
+      return;
+    }
+
+    replayTimer = setInterval(stepReplay, delay);
+  };
+
+  const pauseReplay = () => {
+    stopReplay();
+    updateReplayStatus("Paused");
+  };
+
+  const restartReplay = () => {
+    stopReplay();
+    replayIndex = -1;
+    updateReplayStatus("Ready");
+    startReplay();
+  };
+
+  const changeReplaySpeed = () => {
+    if (replayTimer !== null) {
+      startReplay();
+    }
+  };
+
+  playButton?.addEventListener("click", startReplay);
+  pauseButton?.addEventListener("click", pauseReplay);
+  restartButton?.addEventListener("click", restartReplay);
+  speedSelect?.addEventListener("change", changeReplaySpeed);
+
+  mixerResearchReplayCleanup = () => {
+    stopReplay();
+    playButton?.removeEventListener("click", startReplay);
+    pauseButton?.removeEventListener("click", pauseReplay);
+    restartButton?.removeEventListener("click", restartReplay);
+    speedSelect?.removeEventListener("change", changeReplaySpeed);
+  };
+
+  updateReplayStatus("Ready");
 
   const makeTelemetry = (label, value) => {
     const box = document.createElement("div");
