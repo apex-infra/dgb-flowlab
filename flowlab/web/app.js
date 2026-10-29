@@ -50,6 +50,366 @@ function layout(names, W) {
   return Object.fromEntries(names.map((w, i) => [w, {x: pad + i * step, y: 165, i}]));
 }
 
+
+// M6.1: Pure, read-only operational topology model.
+// Only configured wallet roles assign role columns.
+// Unknown wallets remain unassigned rather than being misclassified.
+function buildOperationalTopology(flows, walletRoles) {
+  const groups = [
+    ["reserve", "SOURCE"],
+    ["stage", "STAGE"],
+    ["hubs", "HUBS"],
+    ["workers", "WORKERS"],
+    ["destinations", "DESTINATIONS"]
+  ];
+
+  const roles = walletRoles || {};
+  const assignments = new Map();
+
+  for (const [key, label] of groups) {
+    const wallets = Array.isArray(roles[key]) ? roles[key] : [];
+    for (const wallet of wallets) {
+      if (typeof wallet === "string" && wallet &&
+          !assignments.has(wallet)) {
+        assignments.set(wallet, label);
+      }
+    }
+  }
+
+  const columns = Object.fromEntries(
+    groups.map(([, label]) => [label, []])
+  );
+  columns.UNASSIGNED = [];
+
+  const nodes = new Map();
+  const edges = [];
+  const operations = [];
+
+  const addWallet = wallet => {
+    if (typeof wallet !== "string" || !wallet) return;
+
+    if (nodes.has(wallet)) return;
+
+    const role = assignments.get(wallet) || "UNASSIGNED";
+    const node = {id: wallet, label: wallet, role};
+
+    nodes.set(wallet, node);
+    columns[role].push(node);
+  };
+
+  for (const [flowIndex, flow] of (flows || []).entries()) {
+    if (!flow || typeof flow !== "object") continue;
+
+    addWallet(flow.source);
+
+    for (const wallet of (Array.isArray(flow.wallets)
+      ? flow.wallets : [])) {
+      addWallet(wallet);
+    }
+
+    addWallet(flow.dest);
+
+    for (const job of (Array.isArray(flow.jobs)
+      ? flow.jobs : [])) {
+      if (!job || typeof job !== "object") continue;
+
+      const from = job.from;
+      const to = job.to;
+
+      if (typeof from !== "string" || !from) continue;
+
+      // A settlement is an operation, not a destination wallet.
+      // Never infer individual payout addresses from its label.
+      if (to == null &&
+          typeof job.to_label === "string" &&
+          /^Settlement \(\d+ destinations?\)$/.test(job.to_label)) {
+        addWallet(from);
+        operations.push({
+          id: "settlement:" + flowIndex + ":" + job.seq,
+          kind: "settlement",
+          from,
+          label: job.to_label,
+          sequence: job.seq,
+          state: job.state,
+          txid: job.txid || null,
+          confirmations: job.confs || 0
+        });
+        continue;
+      }
+
+      if (typeof to !== "string" || !to) continue;
+
+      addWallet(from);
+      addWallet(to);
+
+      edges.push({
+        id: String(flowIndex) + ":" + String(job.seq),
+        from,
+        to,
+        sequence: job.seq,
+        state: job.state,
+        txid: job.txid || null,
+        confirmations: job.confs || 0,
+        planned: job.planned,
+        amount: job.amount,
+        fee: job.fee
+      });
+    }
+  }
+
+  return {
+    kind: "flowlab_operational_topology",
+    version: 1,
+    columns,
+    nodes: Array.from(nodes.values()),
+    edges,
+    operations
+  };
+}
+
+
+// M6.1 — Unified operational graph.
+// Uses existing snapshot jobs; never generates transaction routes.
+function drawOperationalStage(flows, balances, walletRoles) {
+  const svg = $("stage");
+  svg.replaceChildren();
+  beads = [];
+
+  const graph = buildOperationalTopology(flows, walletRoles);
+
+  const order = [
+    "SOURCE",
+    "STAGE",
+    "HUBS",
+    "WORKERS",
+    "DESTINATIONS"
+  ];
+
+  if (graph.columns.UNASSIGNED.length) {
+    order.push("UNASSIGNED");
+  }
+
+  const columnWidth = 240;
+  const width = 150 + order.length * columnWidth;
+  const maxRows = Math.max(
+    1,
+    ...order.map(role => graph.columns[role].length)
+  );
+
+  const height = Math.max(540, 160 + maxRows * 95 + graph.operations.length * 70);
+  const positions = new Map();
+
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("preserveAspectRatio", "xMinYMin meet");
+
+  const defs = mk("defs", {});
+
+  const marker = mk("marker", {
+    id: "flowlab-operational-arrow",
+    markerWidth: 8,
+    markerHeight: 8,
+    refX: 7,
+    refY: 4,
+    orient: "auto",
+    markerUnits: "strokeWidth"
+  });
+
+  marker.appendChild(mk("path", {
+    d: "M0,0 L8,4 L0,8 Z",
+    fill: "#81A6C4"
+  }));
+
+  defs.appendChild(marker);
+  svg.appendChild(defs);
+
+  order.forEach((role, colIndex) => {
+    const x = 150 + colIndex * columnWidth;
+
+    svg.appendChild(mk("text", {
+      x,
+      y: 43,
+      "text-anchor": "middle",
+      fill: "#8AAAC3",
+      "font-size": 15,
+      "font-weight": 700
+    }, role));
+
+    graph.columns[role].forEach((node, rowIndex) => {
+      positions.set(node.id, {
+        x,
+        y: 110 + rowIndex * 95
+      });
+    });
+  });
+
+  // Draw transaction paths first so nodes remain legible.
+  const activePaths = [];
+
+  graph.edges.forEach(edge => {
+    const a = positions.get(edge.from);
+    const b = positions.get(edge.to);
+
+    if (!a || !b) return;
+
+    const state = edge.state || "PLANNED";
+    const broadcast = state === "BROADCAST";
+    const confirmed = state === "CONFIRMED";
+    const color = COLORS[state] || "#7C93A8";
+
+    const bend = Math.max(35, Math.abs(b.x - a.x) / 2);
+
+    const path = mk("path", {
+      d: `M${a.x},${a.y} C${a.x + bend},${a.y} ` +
+         `${b.x - bend},${b.y} ${b.x},${b.y}`,
+      fill: "none",
+      stroke: color,
+      "stroke-width": broadcast ? 3 : confirmed ? 1.2 : 1.3,
+      "stroke-dasharray": state === "PLANNED" ? "5 7" : "none",
+      opacity: broadcast ? 0.95 : confirmed ? 0.18 : 0.16,
+      "marker-end": "url(#flowlab-operational-arrow)"
+    });
+
+    const title = mk("title", {});
+
+    title.textContent =
+      edge.from + " → " + edge.to +
+      " | " + state +
+      " | job " + String(edge.sequence) +
+      (edge.txid ? " | " + edge.txid : "");
+
+    path.appendChild(title);
+    svg.appendChild(path);
+
+    if (broadcast) activePaths.push(path);
+  });
+
+
+  // Settlement operations are not recipient wallets.
+  // Connect only the recorded source to the operation itself.
+  graph.operations.forEach((op, index) => {
+    const source = positions.get(op.from);
+    if (!source) return;
+
+    const x = width - 210;
+    const y = 160 + maxRows * 95 + index * 70;
+    const color = COLORS[op.state] || "#7C93A8";
+
+    const path = mk("path", {
+      d: `M${source.x},${source.y} Q${source.x},${y} ${x},${y}`,
+      fill: "none",
+      stroke: color,
+      "stroke-width": 2,
+      "stroke-dasharray": op.state === "PLANNED" ? "5 7" : "none",
+      opacity: op.state === "CONFIRMED" ? 0.45 : 0.9,
+      "data-operation": "settlement"
+    });
+
+    svg.appendChild(path);
+
+    const box = mk("rect", {
+      x: x - 100,
+      y: y - 21,
+      width: 200,
+      height: 42,
+      rx: 9,
+      fill: "#203044",
+      stroke: color,
+      "stroke-width": 2,
+      "data-operation": "settlement"
+    });
+
+    svg.appendChild(box);
+
+    const label = mk("text", {
+      x,
+      y: y + 4,
+      "text-anchor": "middle",
+      fill: "#E6EEF5",
+      "font-size": 12
+    }, op.label);
+
+    const title = mk("title", {});
+    title.textContent =
+      "Settlement from " + op.from +
+      " | " + String(op.state || "UNKNOWN") +
+      (op.txid ? " | " + op.txid : "");
+
+    label.appendChild(title);
+    svg.appendChild(label);
+
+    if (op.state === "BROADCAST") {
+      activePaths.push(path);
+    }
+  });
+
+  // Wallet nodes are anchored to their configured roles.
+  order.forEach(role => {
+    graph.columns[role].forEach(node => {
+      const pos = positions.get(node.id);
+
+      const box = mk("rect", {
+        x: pos.x - 88,
+        y: pos.y - 23,
+        width: 176,
+        height: 46,
+        rx: 9,
+        fill: "#142B3D",
+        stroke: role === "SOURCE" ? "#2E86F5" :
+                role === "DESTINATIONS" ? "#38D39F" :
+                role === "UNASSIGNED" ? "#7C93A8" :
+                "#56A8D8",
+        "stroke-width": 2
+      });
+
+      svg.appendChild(box);
+
+      const label = mk("text", {
+        x: pos.x,
+        y: pos.y + 4,
+        "text-anchor": "middle",
+        fill: "#E6EEF5",
+        "font-size": 12
+      }, node.label.length > 22
+          ? node.label.slice(0, 19) + "…"
+          : node.label);
+
+      const title = mk("title", {});
+      title.textContent = node.label;
+      label.appendChild(title);
+
+      svg.appendChild(label);
+
+      if (balances && balances[node.id] != null) {
+        svg.appendChild(mk("text", {
+          x: pos.x,
+          y: pos.y + 39,
+          "text-anchor": "middle",
+          fill: "#93ACBF",
+          "font-size": 11
+        }, dgb(balances[node.id]) + " DGB"));
+      }
+    });
+  });
+
+  // Reuse the existing requestAnimationFrame transaction animation.
+  activePaths.forEach(path => {
+    const circle = mk("circle", {
+      r: 6,
+      fill: "#BBD9FF",
+      stroke: "#2E86F5",
+      "stroke-width": 2
+    });
+
+    svg.appendChild(circle);
+
+    beads.push({
+      p: path,
+      c: circle,
+      len: path.getTotalLength()
+    });
+  });
+}
+
 function drawStage(flow, bal, nextSeq) {
   const svg = $("stage"); svg.replaceChildren(); beads = [];
   const names = [flow.source, ...flow.wallets, flow.dest], pos = layout(names, 1000);
@@ -2453,7 +2813,14 @@ function render(data) {
   hops.replaceChildren(); wal.replaceChildren(); ev.replaceChildren();
   const next = jobs.find(j => j.state === "PLANNED");
   if (!s.flows.length) $("stage").replaceChildren();
-  s.flows.forEach(f => { hops.appendChild(renderHops(f)); drawStage(f, data.balances, next && next.seq); });
+  s.flows.forEach(f => {
+    hops.appendChild(renderHops(f));
+  });
+  drawOperationalStage(
+    s.flows,
+    data.balances,
+    data.wallet_roles || {}
+  );
   if (e.state === "CONFIGURED") hops.append(h("div", "mute", "Not approved yet. The plan is shown above the table."));
   const bal = data.balances, tot = bal ? Object.values(bal).reduce((a, v) => a + (v || 0), 0) : 0;
   if (!bal) wal.appendChild(h("div", "mute", "Balances need the node, which is not answering."));
